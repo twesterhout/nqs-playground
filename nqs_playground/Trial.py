@@ -64,7 +64,7 @@ class Net(nn.Module):
         # self._dense4 = nn.Linear(10, 10)
         # self._dense5 = nn.Linear(10, 10)
         self._dense6 = nn.Linear(10, 2, bias=False)
-        nn.init.normal_(self._dense1.weight, mean=0, std=5e-1)
+        nn.init.normal_(self._dense1.weight, mean=0, std=10e-1)
         nn.init.normal_(self._dense1.bias, mean=0, std=1e-1)
         nn.init.normal_(self._dense2.weight, std=5e-1)
         nn.init.normal_(self._dense2.bias, std=1e-1)
@@ -595,7 +595,7 @@ class Optimiser(object):
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
         self._regulariser = regulariser
-        self._optimizer = torch.optim.Adam(self._machine.parameters(),
+        self._optimizer = torch.optim.SGD(self._machine.parameters(),
                                            lr=self._learning_rate)
         self._delta = None
 
@@ -628,16 +628,41 @@ class Optimiser(object):
         return self._machine
 
 
+def heisenberg6():
+    hamiltonian = Heisenberg([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
+    machine = Machine(6)
+    return machine, hamiltonian
+
+
+def kagome12():
+    # Generated using tipsi, Kagome(2, 2) with periodic boundary conditions.
+    edges = [(0, 1), (0, 2), (0, 4), (0, 8),
+             (1, 2), (1, 3), (1, 11),
+             (2, 6), (2, 10),
+             (3, 4), (3, 5), (3, 11),
+             (4, 5), (4, 8),
+             (5, 7), (5, 9),
+             (6, 7), (6, 8), (6, 10),
+             (7, 8), (7, 9),
+             (9, 10), (9, 11),
+             (10, 11)]
+    hamiltonian = Heisenberg(edges)
+    machine = Machine(12)
+    return machine, hamiltonian
+
+
 def main():
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
+    psi, H = kagome12()
+    magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     opt = Optimiser(
-        Machine(6),
-        Heisenberg([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]),
-        magnetisation=0,
-        epochs=4000,
-        monte_carlo_steps=(1000, 13000, 6),
-        learning_rate=0.01,
+        psi,
+        H,
+        magnetisation=magnetisation,
+        epochs=200,
+        monte_carlo_steps=(1000, 1000 + 5000 * psi.number_spins, psi.number_spins),
+        learning_rate=0.05,
         regulariser=lambda i: 10.0 * 0.9**i + 0.001
     )
     opt()
