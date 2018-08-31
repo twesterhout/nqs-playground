@@ -167,9 +167,9 @@ class Machine(Net):
         if n_spins <= 0:
             raise ValueError("Invalid number of spins: {}".format(n_spins))
         super().__init__(n_spins)
-        self._size: int = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
+        self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
         # Hash-table mapping CompactSpin to Machine.Cell
-        self._cache: Dict[CompactSpin, Machine.Cell] = {}
+        self._cache = {}
 
     def log_wf(self, x: np.ndarray) -> complex:
         """
