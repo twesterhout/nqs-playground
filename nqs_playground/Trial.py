@@ -425,6 +425,11 @@ class MetropolisMC(object):
         return do_generate()
 
 
+class WorthlessConfiguration(Exception):
+    def __init__(self, flips):
+        super().__init__("The current spin configuration has too low a weight.")
+        self.suggestion = flips
+
 class Heisenberg(object):
     """
     Isotropic Heisenberg Hamiltonian on a lattice.
@@ -447,8 +452,8 @@ class Heisenberg(object):
             else:
                 assert spin[i] == -spin[j]
                 x = state.log_quot_wf([i, j])
-                if x.real > 10.0:
-                    raise ValueError([i, j])
+                if x.real > 5.5:
+                    raise WorthlessConfiguration([i, j])
                 energy += -1 + 2 * cmath.exp(x)
         return np.complex64(energy)
 
@@ -459,8 +464,6 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
 
     :return: (all gradients, mean gradient, mean local energy, force)
     """
-    logging.info('Running Monte-Carlo...')
-    start = time.time()
     derivatives = []
     energies = []
     energies_cache = {}
@@ -479,10 +482,29 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     mean_E = np.mean(energies)
     force = np.mean(energies * derivatives.conj().transpose(), axis=1)
     force -= mean_O.conj() * mean_E
-    finish = time.time()
-    logging.info('Done in {:.2f} seconds!'.format(finish - start))
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     return derivatives, mean_O, mean_E, force
+
+
+def monte_carlo(machine, hamiltonian, initial_spin, steps):
+    logging.info('Running Monte-Carlo...')
+    start = time.time()
+    restarts = 5
+    spin = np.copy(initial_spin)
+    answer = None
+    while answer is None:
+        try:
+            answer = monte_carlo_loop(machine, hamiltonian, spin, steps)
+        except WorthlessConfiguration as err:
+            if restarts > 0:
+                logging.warning('Restarting the Monte-Carlo simulation...')
+                restarts -= 1
+                spin[err.suggestion] *= -1
+            else:
+                raise
+    finish = time.time()
+    logging.info('Done in {:.2f} seconds!'.format(finish - start))
+    return answer
 
 
 class Covariance(LinearOperator):
@@ -579,6 +601,7 @@ def random_spin(n, magnetisation=None):
     else:
         return np.random.choice([np.float32(-1.0), np.float32(1.0)], size=n)
 
+
 class Optimiser(object):
     def __init__(self,
                  machine,
@@ -607,7 +630,7 @@ class Optimiser(object):
         spin = random_spin(self._machine.number_spins, self._magnetisation)
         # Monte-Carlo
         (Os, mean_O, E, F) = \
-            monte_carlo_loop(self._machine, self._hamiltonian, spin,
+            monte_carlo(self._machine, self._hamiltonian, spin,
                              self._monte_carlo_steps)
         logging.info('E = {}'.format(E))
         # Calculate the "true" gradients
