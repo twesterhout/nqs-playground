@@ -58,18 +58,18 @@ class Net(nn.Module):
     def __init__(self, n: int):
         super(Net, self).__init__()
         self._number_spins = n
-        self._dense1 = nn.Linear(n, 10)
-        self._dense2 = nn.Linear(10, 10)
-        # self._dense3 = nn.Linear(10, 10)
+        self._dense1 = nn.Linear(n, 20)
+        self._dense2 = nn.Linear(20, 20)
+        self._dense3 = nn.Linear(20, 10)
         # self._dense4 = nn.Linear(10, 10)
         # self._dense5 = nn.Linear(10, 10)
         self._dense6 = nn.Linear(10, 2, bias=False)
-        nn.init.normal_(self._dense1.weight, mean=0, std=10e-1)
+        nn.init.normal_(self._dense1.weight, mean=0, std=1e-1)
         nn.init.normal_(self._dense1.bias, mean=0, std=1e-1)
         nn.init.normal_(self._dense2.weight, std=5e-1)
         nn.init.normal_(self._dense2.bias, std=1e-1)
-        # nn.init.normal_(self._dense3.weight, std=1e-1)
-        # nn.init.normal_(self._dense3.bias, std=1e-1)
+        nn.init.normal_(self._dense3.weight, std=5e-1)
+        nn.init.normal_(self._dense3.bias, std=1e-1)
         # nn.init.normal_(self._dense4.weight, std=1e-1)
         # nn.init.normal_(self._dense4.bias, std=1e-1)
         # nn.init.normal_(self._dense5.weight, std=1e-1)
@@ -89,7 +89,7 @@ class Net(nn.Module):
         """
         x = torch.tanh(self._dense1(x))
         x = torch.tanh(self._dense2(x))
-        # x = F.relu(self._dense3(x))
+        x = torch.tanh(self._dense3(x))
         # x = F.relu(self._dense4(x))
         # x = F.relu(self._dense5(x))
         x = self._dense6(x)
@@ -111,7 +111,7 @@ def to_bytes(spin: np.ndarray) -> np.ndarray:
             b[0] = (b[0] << 1) | (spin[i] == 1.0)
     for i in range(chunks):
         j = 8 * i + rest
-        b[rest + i] = ((spin[j + 0] == 1.0) << 7) \
+        b[int(rest > 0) + i] = ((spin[j + 0] == 1.0) << 7) \
                     | ((spin[j + 1] == 1.0) << 6) \
                     | ((spin[j + 2] == 1.0) << 5) \
                     | ((spin[j + 3] == 1.0) << 4) \
@@ -430,6 +430,7 @@ class WorthlessConfiguration(Exception):
         super().__init__("The current spin configuration has too low a weight.")
         self.suggestion = flips
 
+
 class Heisenberg(object):
     """
     Isotropic Heisenberg Hamiltonian on a lattice.
@@ -482,6 +483,7 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     mean_E = np.mean(energies)
     force = np.mean(energies * derivatives.conj().transpose(), axis=1)
     force -= mean_O.conj() * mean_E
+    logging.info('Subspace dimension: {}'.format(len(energies_cache)))
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     return derivatives, mean_O, mean_E, force
 
@@ -684,9 +686,9 @@ def main():
         H,
         magnetisation=magnetisation,
         epochs=200,
-        monte_carlo_steps=(1000, 1000 + 5000 * psi.number_spins, psi.number_spins),
+        monte_carlo_steps=(1000, 1000 + 2000 * psi.number_spins, psi.number_spins),
         learning_rate=0.05,
-        regulariser=lambda i: 10.0 * 0.9**i + 0.001
+        regulariser=lambda i: 100.0 * 0.9**i + 0.001
     )
     opt()
 
