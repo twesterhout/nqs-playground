@@ -38,6 +38,7 @@ from itertools import islice
 from functools import reduce
 import logging
 import math
+import os
 import time
 from typing import Dict, List, Tuple, Optional
 
@@ -58,18 +59,18 @@ class Net(nn.Module):
     def __init__(self, n: int):
         super(Net, self).__init__()
         self._number_spins = n
-        self._dense1 = nn.Linear(n, 20)
-        self._dense2 = nn.Linear(20, 20)
-        self._dense3 = nn.Linear(20, 10)
-        # self._dense4 = nn.Linear(10, 10)
-        # self._dense5 = nn.Linear(10, 10)
-        self._dense6 = nn.Linear(10, 2, bias=False)
-        nn.init.normal_(self._dense1.weight, mean=0, std=1e-1)
-        nn.init.normal_(self._dense1.bias, mean=0, std=1e-1)
-        nn.init.normal_(self._dense2.weight, std=5e-1)
-        nn.init.normal_(self._dense2.bias, std=1e-1)
-        nn.init.normal_(self._dense3.weight, std=5e-1)
-        nn.init.normal_(self._dense3.bias, std=1e-1)
+        self._dense1 = nn.Linear(n, 17)
+        self._dense2 = nn.Linear(17, 15)
+        # self._dense3 = nn.Linear(15, 10)
+        # self._dense4 = nn.Linear(10, 15)
+        # self._dense5 = nn.Linear(15, 20)
+        self._dense6 = nn.Linear(15, 2, bias=False)
+        nn.init.normal_(self._dense1.weight, mean=0, std=1e-2)
+        nn.init.normal_(self._dense1.bias, mean=0, std=2e-2)
+        # nn.init.normal_(self._dense2.weight, std=5e-1)
+        # nn.init.normal_(self._dense2.bias, std=1e-1)
+        # nn.init.normal_(self._dense3.weight, std=5e-1)
+        # nn.init.normal_(self._dense3.bias, std=1e-1)
         # nn.init.normal_(self._dense4.weight, std=1e-1)
         # nn.init.normal_(self._dense4.bias, std=1e-1)
         # nn.init.normal_(self._dense5.weight, std=1e-1)
@@ -87,11 +88,11 @@ class Net(nn.Module):
         """
         Runs the forward propagation.
         """
-        x = torch.tanh(self._dense1(x))
-        x = torch.tanh(self._dense2(x))
-        x = torch.tanh(self._dense3(x))
-        # x = F.relu(self._dense4(x))
-        # x = F.relu(self._dense5(x))
+        x = torch.sigmoid(self._dense1(x))
+        x = torch.sigmoid(self._dense2(x))
+        # x = torch.tanh(self._dense3(x))
+        # x = torch.tanh(self._dense4(x))
+        # x = torch.tanh(self._dense5(x))
         x = self._dense6(x)
         # x[0].clamp_(-20, 5)
         # logging.info(x)
@@ -620,15 +621,12 @@ class Optimiser(object):
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
         self._regulariser = regulariser
-        self._optimizer = torch.optim.SGD(self._machine.parameters(),
-                                           lr=self._learning_rate)
+        self._optimizer = torch.optim.Adamax(self._machine.parameters(),
+                                             lr=self._learning_rate)
         self._delta = None
 
     def learning_cycle(self, iteration):
         logging.info('==================== {} ===================='.format(iteration))
-        # Random spin with 0 magnetisation
-        # TODO(twesterhout): Generalise this to arbitrary magnetisation
-        assert self._machine.number_spins % 2 == 0
         spin = random_spin(self._machine.number_spins, self._magnetisation)
         # Monte-Carlo
         (Os, mean_O, E, F) = \
@@ -638,14 +636,17 @@ class Optimiser(object):
         # Calculate the "true" gradients
         # We also cache δ to use it as a guess the next time we're computing
         # S⁻¹F.
-        self._delta = Covariance(
-            Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
-        self._machine.set_gradients(self._delta)
+        # self._delta = Covariance(
+        #     Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
+        # self._machine.set_gradients(self._delta)
+        self._machine.set_gradients(F.real)
         # Update the variational parameters
         self._optimizer.step()
         self._machine.clear_cache()
         logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
-                     .format(np.linalg.norm(F), np.linalg.norm(self._delta)))
+                     .format(np.linalg.norm(F),
+                             np.linalg.norm(F.real) # np.linalg.norm(self._delta)
+                             ))
 
     def __call__(self):
         for i in range(self._epochs):
@@ -676,10 +677,22 @@ def kagome12():
     return machine, hamiltonian
 
 
+def heisenberg3x3():
+    hamiltonian = Heisenberg([(0, 1), (1, 2), (2, 0),
+                              (3, 4), (4, 5), (5, 3),
+                              (6, 7), (7, 8), (8, 6),
+                              (0, 3), (3, 6), (6, 0),
+                              (1, 4), (4, 7), (7, 1),
+                              (2, 5), (5, 8), (8, 2)])
+    machine = Machine(9)
+    return machine, hamiltonian
+
+
 def main():
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
-    psi, H = kagome12()
+    psi, H = heisenberg3x3()
+    # psi.load_state_dict(torch.load('Result.{}.txt'.format(2670839)))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     opt = Optimiser(
         psi,
@@ -688,9 +701,12 @@ def main():
         epochs=200,
         monte_carlo_steps=(1000, 1000 + 2000 * psi.number_spins, psi.number_spins),
         learning_rate=0.05,
-        regulariser=lambda i: 100.0 * 0.9**i + 0.001
+        regulariser=lambda i: 100.0 * 0.9**i + 0.01
     )
+    logging.info(psi)
     opt()
+    torch.save(psi.state_dict(), 'Result.{}.txt'.format(os.getpid()))
+
 
 if __name__ == '__main__':
     main()
