@@ -668,7 +668,7 @@ def heisenberg3x3():
 
 def import_network(nn_file):
     module_name, extension = os.path.splitext(os.path.basename(nn_file))
-    module_dir = os.path.basename(nn_file)
+    module_dir = os.path.dirname(nn_file)
     if extension != '.py':
         raise ValueError(
             'Could not import the network from {}: not a python source file.')
