@@ -34,14 +34,17 @@
 
 import cmath
 import cProfile
+import importlib
 from itertools import islice
 from functools import reduce
 import logging
 import math
 import os
+import sys
 import time
 from typing import Dict, List, Tuple, Optional
 
+import click
 from numba import jit, jitclass, uint8, int64, float32
 import numpy as np
 import scipy
@@ -582,6 +585,7 @@ class Optimiser(object):
                  epochs,
                  monte_carlo_steps,
                  learning_rate,
+                 use_sr,
                  regulariser):
         self._machine = machine
         self._hamiltonian = hamiltonian
@@ -589,33 +593,40 @@ class Optimiser(object):
         self._epochs = epochs
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
-        self._regulariser = regulariser
-        self._optimizer = torch.optim.Adamax(self._machine.parameters(),
-                                             lr=self._learning_rate)
-        self._delta = None
+        self._use_sr = use_sr
+        if use_sr:
+            self._regulariser = regulariser
+            self._delta = None
+            self._optimizer = torch.optim.Adam(self._machine.parameters(),
+                                               lr=self._learning_rate)
+        else:
+            self._optimizer = torch.optim.SGD(self._machine.parameters(),
+                                              lr=self._learning_rate)
 
     def learning_cycle(self, iteration):
         logging.info('==================== {} ===================='.format(iteration))
+        # Monte Carlo
         spin = random_spin(self._machine.number_spins, self._magnetisation)
-        # Monte-Carlo
         (Os, mean_O, E, F) = \
             monte_carlo(self._machine, self._hamiltonian, spin,
                              self._monte_carlo_steps)
         logging.info('E = {}'.format(E))
         # Calculate the "true" gradients
-        # We also cache δ to use it as a guess the next time we're computing
-        # S⁻¹F.
-        # self._delta = Covariance(
-        #     Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
-        # self._machine.set_gradients(self._delta)
-        self._machine.set_gradients(F.real)
+        if self._use_sr:
+            # We also cache δ to use it as a guess the next time we're computing
+            # S⁻¹F.
+            self._delta = Covariance(
+                Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
+            self._machine.set_gradients(self._delta)
+            logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
+                         .format(np.linalg.norm(F), np.linalg.norm(self._delta)))
+        else:
+            self._machine.set_gradients(F.real)
+            logging.info('∥F∥₂ = {}, ∥Re[F]∥₂ = {}'
+                         .format(np.linalg.norm(F), np.linalg.norm(F.real)))
         # Update the variational parameters
         self._optimizer.step()
         self._machine.clear_cache()
-        logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
-                     .format(np.linalg.norm(F),
-                             np.linalg.norm(F.real) # np.linalg.norm(self._delta)
-                             ))
 
     def __call__(self):
         for i in range(self._epochs):
@@ -654,27 +665,65 @@ def heisenberg3x3():
                               (2, 5), (5, 8), (8, 2)])
     return hamiltonian
 
-def main():
+
+def import_network(nn_file):
+    module_name, extension = os.path.splitext(os.path.basename(nn_file))
+    module_dir = os.path.basename(nn_file)
+    if extension != '.py':
+        raise ValueError(
+            'Could not import the network from {}: not a python source file.')
+    # Insert in the beginning
+    sys.path.insert(0, module_dir)
+    module = importlib.import_module(module_name)
+    sys.path.pop(0)
+    return module.Net
+
+
+@click.command()
+@click.argument('nn-file', type=click.Path(exists=True, resolve_path=True,
+                                           path_type=str), metavar='<arch_file>')
+@click.option('-i', '--in-file', type=click.File(mode='rb'),
+              help='File containing a PyTorch `state_dict` serialised using '
+                   '`torch.save`. It will be used as the initial state.')
+@click.option('-o', '--out-file', type=click.File(mode='wb'),
+              help='Where to save the final state to. It will contain a '
+                   'PyTorch `state_dict` serialised using `torch.save`.')
+@click.option('--use-sr', type=bool, default=True, show_default=True,
+              help='Whether to use SR for optimisation.')
+@click.option('--epochs', type=click.IntRange(min=0), default=200,
+              show_default=True, help='Number of learning steps to perform.')
+@click.option('--lr', type=click.FloatRange(min=1.0E-10), default=0.05,
+              show_default=True, help='Learning rate.')
+@click.option('--steps', type=click.IntRange(min=1), default=2000,
+              show_default=True, help='Length of the Markov Chain.')
+def main(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
+    """
+    Hehehe
+    """
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
-    from .model import Net
-    Machine = _make_machine(Net)
+    Machine = _make_machine(import_network(nn_file))
     H = heisenberg3x3()
     psi = Machine(H.number_spins)
-    # psi.load_state_dict(torch.load('Result.{}.txt'.format(2670839)))
+    if in_file is not None:
+        psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
+    thermalisation = int(0.1 * steps)
     opt = Optimiser(
         psi,
         H,
         magnetisation=magnetisation,
-        epochs=200,
-        monte_carlo_steps=(1000, 1000 + 2000 * psi.number_spins, psi.number_spins),
-        learning_rate=0.05,
+        epochs=epochs,
+        monte_carlo_steps=(thermalisation * psi.number_spins,
+                           (thermalisation + steps) * psi.number_spins,
+                           psi.number_spins),
+        learning_rate=lr,
+        use_sr=use_sr,
         regulariser=lambda i: 100.0 * 0.9**i + 0.01
     )
-    logging.info(psi)
     opt()
-    torch.save(psi.state_dict(), 'Result.{}.txt'.format(os.getpid()))
+    if out_file is not None:
+        torch.save(psi.state_dict(), out_file)
 
 
 if __name__ == '__main__':

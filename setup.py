@@ -20,6 +20,7 @@ setup(name='nqs_playground',
           'numpy',
           'scipy',
           'torch',
-          'numba'
+          'numba',
+          'click'
       ],
       zip_safe=False)
