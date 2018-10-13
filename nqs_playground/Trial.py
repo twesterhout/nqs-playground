@@ -38,6 +38,7 @@ from itertools import islice
 from functools import reduce
 import logging
 import math
+import os
 import time
 from typing import Dict, List, Tuple, Optional
 
@@ -49,27 +50,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# torch.set_default_tensor_type('torch.cuda.FloatTensor')
+# torch.cuda.set_device(0)
+
+
 class Net(nn.Module):
     """
     The Neural Network used to encode the wave function.
-
     It is basically a function ℝⁿ -> ℝ² where n is the number of spins.
     """
     def __init__(self, n: int):
         super(Net, self).__init__()
         self._number_spins = n
-        self._dense1 = nn.Linear(n, 20)
-        self._dense2 = nn.Linear(20, 20)
-        self._dense3 = nn.Linear(20, 10)
-        # self._dense4 = nn.Linear(10, 10)
-        # self._dense5 = nn.Linear(10, 10)
-        self._dense6 = nn.Linear(10, 2, bias=False)
-        nn.init.normal_(self._dense1.weight, mean=0, std=1e-1)
-        nn.init.normal_(self._dense1.bias, mean=0, std=1e-1)
-        nn.init.normal_(self._dense2.weight, std=5e-1)
-        nn.init.normal_(self._dense2.bias, std=1e-1)
-        nn.init.normal_(self._dense3.weight, std=5e-1)
-        nn.init.normal_(self._dense3.bias, std=1e-1)
+        self._conv1 = nn.Conv2d(1, 64, kernel_size=3)
+        self._conv2 = nn.Conv2d(64, 128, kernel_size=3)
+		# self._dense1 = nn.Linear(n, 80)
+        # self._dense2 = nn.Linear(17, 15)
+        # self._dense3 = nn.Linear(15, 10)
+        # self._dense4 = nn.Linear(10, 15)
+        # self._dense5 = nn.Linear(15, 20)
+        self._dense6 = nn.Linear(128, 2, bias=False)
+        nn.init.normal_(self._conv1.weight, mean=0, std=1e-2)
+        nn.init.normal_(self._conv1.bias, mean=0, std=2e-2)
+        nn.init.normal_(self._conv2.weight, mean=0, std=1e-2)
+        nn.init.normal_(self._conv2.bias, mean=0, std=2e-2)
+        # nn.init.normal_(self._dense1.weight, mean=0, std=1e-2)
+        # nn.init.normal_(self._dense1.bias, mean=0, std=2e-2)
+        # nn.init.normal_(self._dense2.weight, std=5e-1)
+        # nn.init.normal_(self._dense2.bias, std=1e-1)
+        # nn.init.normal_(self._dense3.weight, std=5e-1)
+        # nn.init.normal_(self._dense3.bias, std=1e-1)
         # nn.init.normal_(self._dense4.weight, std=1e-1)
         # nn.init.normal_(self._dense4.bias, std=1e-1)
         # nn.init.normal_(self._dense5.weight, std=1e-1)
@@ -87,19 +97,42 @@ class Net(nn.Module):
         """
         Runs the forward propagation.
         """
-        x = torch.tanh(self._dense1(x))
-        x = torch.tanh(self._dense2(x))
-        x = torch.tanh(self._dense3(x))
-        # x = F.relu(self._dense4(x))
-        # x = F.relu(self._dense5(x))
+        ##print(x)
+        Lx, Ly = 3, 3
+        x = x.reshape(1, 1, 3, 3)
+        #print(x)		
+        x = x.repeat(1, 1, 3, 3)[:, :, (Lx - 1):(2 * Lx + 1), (Ly - 1):(2 * Ly + 1)]  # assumes that filter is 3x3
+        #print(x)
+        x = self._conv1(x)
+        x = torch.sigmoid(x)
+        
+        x = x.repeat(1, 1, 3, 3)[:, :, (Lx - 1):(2 * Lx + 1), (Ly - 1):(2 * Ly + 1)]
+        x = self._conv2(x)
+        x = torch.sigmoid(x)
+        #print(x)
+        x = torch.mean(x, dim = 3)
+        #print(x)
+        x = torch.mean(x, dim = 2)
+        #print(x)		
+        x = torch.sigmoid(x)
+        #print(x)
+        x = x[0, :]
+        #print(x.shape)      
+        # x = torch.sigmoid(self._dense2(x))
+        # x = torch.tanh(self._dense3(x))
+        # x = torch.tanh(self._dense4(x))
+        # x = torch.tanh(self._dense5(x))
         x = self._dense6(x)
         # x[0].clamp_(-20, 5)
         # logging.info(x)
+        #print(x)
+        # print(x)
         return x
 
 @jit(uint8[:](float32[:]), nopython=True)
 def to_bytes(spin: np.ndarray) -> np.ndarray:
     """
+
     Converts a spin to a bit array. It is assumed that a spin-up corresponds to
     1.0.
     """
@@ -148,7 +181,6 @@ class Machine(Net):
         Cache cell corresponding to a spin configuration |S〉. A cell stores
         log(〈S|Ψ〉) and ∂log(〈S|Ψ〉)/∂W where W are the variational
         parameters.
-
         :param complex wave_function: log(〈S|Ψ〉).
         :param gradient: ∇log(〈S|Ψ〉).
         :type gradient: np.ndarray of float32 or None.
@@ -161,7 +193,6 @@ class Machine(Net):
     def __init__(self, n_spins: int):
         """
         Initialises the state with random values for the variational parameters.
-
         :param int n_spins: Number of spins in the system.
         """
         if n_spins <= 0:
@@ -174,7 +205,6 @@ class Machine(Net):
     def log_wf(self, x: np.ndarray) -> complex:
         """
         Computes log(Ψ(x)).
-
         :param np.ndarray x: Spin configuration. Must be a numpy array of
                              ``float32``.
         :return: log(Ψ(x))
@@ -202,7 +232,6 @@ class Machine(Net):
                    key: Optional[CompactSpin] = None) -> np.ndarray:
         """
         Computes ∇log(Ψ(x)).
-
         :param np.ndarray x:   Spin configuration. Must be a numpy array of ``float32``.
         :param np.ndarray out: Destination array. Must be a numpy array of ``complex64``.
         :param key: Precomputed ``CompactSpin``-representation of x.
@@ -255,7 +284,6 @@ class Machine(Net):
     def set_gradients(self, x: np.ndarray):
         """
         Performs ∇W = x, i.e. sets the gradients of the variational parameters.
-
         :param np.ndarray x: New value for ∇W. Must be a numpy array of
         ``float32`` of length ``self.size``.
         """
@@ -271,7 +299,6 @@ class Machine(Net):
         """
         In-place subtracts ``x`` from the parameters. This is useful when
         implementing optimizers by hand.
-
         :param np.ndarray x: A numpy array of length ``self.size`` of ``complex64``.
         """
         with torch.no_grad():
@@ -295,7 +322,6 @@ class MonteCarloState(object):
     def __init__(self, machine, spin):
         """
         Initialises the Monte-Carlo state.
-
         :param machine: Variational state
         :param np.ndarray spin: Initial spin configuration
         """
@@ -375,7 +401,6 @@ class _Flipper(object):
     def next(self, accepted: bool):
         """
         Updates the internal state.
-
         :param bool accepted: Specifies whether the last proposed flips were
         accepted.
         """
@@ -399,7 +424,6 @@ class MetropolisMC(object):
     def __init__(self, machine, spin: np.ndarray):
         """
         Initialises a Markov chain.
-
         :param machine: The variational state
         :param np.ndarray spin: Initial spin configuration
         """
@@ -462,7 +486,6 @@ class Heisenberg(object):
 def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     """
     Runs the Monte-Carlo simulation.
-
     :return: (all gradients, mean gradient, mean local energy, force)
     """
     derivatives = []
@@ -557,7 +580,6 @@ class Covariance(LinearOperator):
     def solve(self, b, x0 = None):
         """
         Solves
-
         +-----------------+ +-------+ +-+     +-----------------+ +-------+ +-+
         | Re[S]^T Im[S]^T | | Re[S] | |x|     | Re[S]^T Im[S]^T | | Re[b] | |F|
         +-----------------+ |       | | |  =  +-----------------+ |       | | |
@@ -620,15 +642,12 @@ class Optimiser(object):
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
         self._regulariser = regulariser
-        self._optimizer = torch.optim.SGD(self._machine.parameters(),
-                                           lr=self._learning_rate)
+        self._optimizer = torch.optim.Adamax(self._machine.parameters(),
+                                             lr=self._learning_rate)
         self._delta = None
 
     def learning_cycle(self, iteration):
         logging.info('==================== {} ===================='.format(iteration))
-        # Random spin with 0 magnetisation
-        # TODO(twesterhout): Generalise this to arbitrary magnetisation
-        assert self._machine.number_spins % 2 == 0
         spin = random_spin(self._machine.number_spins, self._magnetisation)
         # Monte-Carlo
         (Os, mean_O, E, F) = \
@@ -638,14 +657,17 @@ class Optimiser(object):
         # Calculate the "true" gradients
         # We also cache δ to use it as a guess the next time we're computing
         # S⁻¹F.
-        self._delta = Covariance(
-            Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
-        self._machine.set_gradients(self._delta)
+        # self._delta = Covariance(
+        #     Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
+        # self._machine.set_gradients(self._delta)
+        self._machine.set_gradients(F.real)
         # Update the variational parameters
         self._optimizer.step()
         self._machine.clear_cache()
         logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
-                     .format(np.linalg.norm(F), np.linalg.norm(self._delta)))
+                     .format(np.linalg.norm(F),
+                             np.linalg.norm(F.real) # np.linalg.norm(self._delta)
+                             ))
 
     def __call__(self):
         for i in range(self._epochs):
@@ -676,22 +698,36 @@ def kagome12():
     return machine, hamiltonian
 
 
+def heisenbergNxN(n=3):
+    edges = []
+    for x in range(n):
+        for y in range(n):
+            edges.append((y * n + x, y * n + ((x + 1) % n)))
+            edges.append((y * n + x, ((y + 1) % n) * n + x))
+    hamiltonian = Heisenberg(edges)
+    machine = Machine(n * n)
+    return machine, hamiltonian
+
+
 def main():
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
-    psi, H = kagome12()
+    psi, H = heisenbergNxN(n = 3)
+    # psi.load_state_dict(torch.load('Result.{}.txt'.format(2670839)))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     opt = Optimiser(
         psi,
         H,
         magnetisation=magnetisation,
-        epochs=200,
+        epochs=10000,
         monte_carlo_steps=(1000, 1000 + 2000 * psi.number_spins, psi.number_spins),
-        learning_rate=0.05,
-        regulariser=lambda i: 100.0 * 0.9**i + 0.001
+        learning_rate=0.03,
+        regulariser=lambda i: 100.0 * 0.9**i + 0.01
     )
+    logging.info(psi)
     opt()
+    torch.save(psi.state_dict(), 'Result.{}.txt'.format(os.getpid()))
+
 
 if __name__ == '__main__':
     main()
-    # cProfile.run('main()')
