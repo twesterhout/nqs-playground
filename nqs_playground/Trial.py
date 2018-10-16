@@ -277,6 +277,10 @@ class MonteCarloState(object):
         """
         return self._spin
 
+    @property
+    def machine(self):
+        return self._machine
+
     def log_wf(self) -> complex:
         """
         Returns log(〈S|ψ〉) where S is the current spin configuration.
@@ -427,6 +431,14 @@ class Heisenberg(object):
                 energy += -1 + 2 * cmath.exp(x)
         return np.complex64(energy)
 
+    def reachable_from(self, spin):
+        reachable = []
+        for (i, j) in filter(lambda x: spin[x[0]] != spin[x[1]], self._graph):
+            assert spin[i] == -spin[j]
+            reachable.append(spin.copy())
+            reachable[-1][[i, j]] *= -1
+        return reachable
+
     @property
     def number_spins(self) -> int:
         return self._number_spins
@@ -460,6 +472,28 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     return derivatives, mean_O, mean_E, force
 
+def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
+    logging.info('Running Monte Carlo...')
+    energies = []
+    energies_cache = {}
+    wave_function = {}
+    chain = MetropolisMC(machine, initial_spin)
+    for state in islice(chain, *steps):
+        spin = CompactSpin(state.spin)
+        e_loc = energies_cache.get(spin)
+        if e_loc is None:
+            e_loc = hamiltonian(state)
+            energies_cache[spin] = e_loc
+        energies.append(e_loc)
+        wave_function[spin] = cmath.exp(state.log_wf())
+        for s in hamiltonian.reachable_from(state.spin):
+            wave_function[CompactSpin(s)] = cmath.exp(state.machine.log_wf(s))
+    energies = np.array(energies, dtype=np.complex64)
+    mean_E = np.mean(energies)
+    logging.info('Subspace dimension: {}'.format(len(wave_function)))
+    logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
+    logging.info('E = {}'.format(mean_E))
+    return mean_E, wave_function
 
 def monte_carlo(machine, hamiltonian, initial_spin, steps):
     logging.info('Running Monte-Carlo...')
@@ -679,7 +713,71 @@ def import_network(nn_file):
     return module.Net
 
 
-@click.command()
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.argument('nn-file',
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar='<arch_file>')
+@click.option('-i', '--in-file',
+    type=click.File(mode='rb'),
+    required=True,
+    help='File containing the Neural Network weights as a PyTorch `state_dict` '
+         'serialised using `torch.save`. It is up to the user to ensure that '
+         'the weights are compatible with the architecture read from '
+         '<arch_file>.')
+@click.option('-o', '--out-file',
+    type=click.File(mode='w'),
+    default=sys.stdout,
+    show_default=True,
+    help='Location where to save the sampled state.')
+@click.option('--steps',
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True,
+    help='Length of the Markov Chain.')
+def sample(nn_file, in_file, out_file, steps):
+    """
+    Runs Monte Carlo on a NQS with given architecture and weights. The result
+    is an explicit representation of the NQS, i.e. |ψ〉= ∑ψ(S)|S〉where
+    {|S〉} are spin product states. The result is written in the following
+    format:
+
+    \b
+    <S₁>\t<Re[ψ(S₁)]>\t<Im[ψ(S₁)]>
+    <S₂>\t<Re[ψ(S₂)]>\t<Im[ψ(S₂)]>
+    ...
+    """
+    logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
+                        level=logging.DEBUG)
+    Machine = _make_machine(import_network(nn_file))
+    H = heisenberg3x3()
+    psi = Machine(H.number_spins)
+    psi.load_state_dict(torch.load(in_file))
+    magnetisation = 0 if psi.number_spins % 2 == 0 else 1
+    thermalisation = int(0.1 * steps)
+    monte_carlo_steps = ( thermalisation * psi.number_spins
+                        , (thermalisation + steps) * psi.number_spins
+                        , psi.number_spins
+                        )
+    E, wave_function = monte_carlo_loop_for_lanczos(
+        psi,
+        H,
+        random_spin(psi.number_spins, magnetisation),
+        monte_carlo_steps
+    )
+    # For normalisation
+    scale = 1.0 / math.sqrt(sum(map(lambda x: abs(x)**2, wave_function.values())))
+    out_file.write('# E = {} + {}'.format(E.real, E.imag))
+    fmt = '\n{:0' + str(psi.number_spins) + 'b}\t{}\t{}'
+    for (spin, coeff) in wave_function.items():
+        out_file.write(fmt.format(int(spin), scale * coeff.real, scale * coeff.imag))
+
+
+@cli.command()
 @click.argument('nn-file', type=click.Path(exists=True, resolve_path=True,
                                            path_type=str), metavar='<arch_file>')
 @click.option('-i', '--in-file', type=click.File(mode='rb'),
@@ -696,7 +794,7 @@ def import_network(nn_file):
               show_default=True, help='Learning rate.')
 @click.option('--steps', type=click.IntRange(min=1), default=2000,
               show_default=True, help='Length of the Markov Chain.')
-def main(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
+def optimise(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
     """
     Hehehe
     """
@@ -727,5 +825,5 @@ def main(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
 
 
 if __name__ == '__main__':
-    main()
+    cli()
     # cProfile.run('main()')
