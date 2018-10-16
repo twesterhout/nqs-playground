@@ -472,6 +472,7 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     return derivatives, mean_O, mean_E, force
 
+
 def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
     logging.info('Running Monte Carlo...')
     energies = []
@@ -494,6 +495,7 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     logging.info('E = {}'.format(mean_E))
     return mean_E, wave_function
+
 
 def monte_carlo(machine, hamiltonian, initial_spin, steps):
     logging.info('Running Monte-Carlo...')
@@ -778,25 +780,41 @@ def sample(nn_file, in_file, out_file, steps):
 
 
 @cli.command()
-@click.argument('nn-file', type=click.Path(exists=True, resolve_path=True,
-                                           path_type=str), metavar='<arch_file>')
-@click.option('-i', '--in-file', type=click.File(mode='rb'),
-              help='File containing a PyTorch `state_dict` serialised using '
-                   '`torch.save`. It will be used as the initial state.')
-@click.option('-o', '--out-file', type=click.File(mode='wb'),
-              help='Where to save the final state to. It will contain a '
-                   'PyTorch `state_dict` serialised using `torch.save`.')
-@click.option('--use-sr', type=bool, default=True, show_default=True,
-              help='Whether to use SR for optimisation.')
-@click.option('--epochs', type=click.IntRange(min=0), default=200,
-              show_default=True, help='Number of learning steps to perform.')
-@click.option('--lr', type=click.FloatRange(min=1.0E-10), default=0.05,
-              show_default=True, help='Learning rate.')
-@click.option('--steps', type=click.IntRange(min=1), default=2000,
-              show_default=True, help='Length of the Markov Chain.')
+@click.argument('nn-file',
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar='<arch_file>')
+@click.option('-i', '--in-file',
+    type=click.File(mode='rb'),
+    help='File containing the Neural Network weights as a PyTorch `state_dict` '
+         'serialised using `torch.save`. It is up to the user to ensure that '
+         'the weights are compatible with the architecture read from '
+         '<arch_file>.')
+@click.option('-o', '--out-file',
+    type=click.File(mode='wb'),
+    help='Where to save the final state to. It will contain a '
+         'PyTorch `state_dict` serialised using `torch.save`. If no file is '
+         'specified, the result will be discarded.')
+@click.option('--use-sr',
+    type=bool,
+    default=True,
+    show_default=True,
+    help='Whether to use Stochastic Reconfiguration for optimisation.')
+@click.option('--epochs',
+    type=click.IntRange(min=0),
+    default=200,
+    show_default=True,
+    help='Number of learning steps to perform.')
+@click.option('--lr',
+    type=click.FloatRange(min=1.0E-10),
+    default=0.05,
+    show_default=True, help='Learning rate.')
+@click.option('--steps',
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True, help='Length of the Markov Chain.')
 def optimise(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
     """
-    Hehehe
+    Variational Monte Carlo optimising E.
     """
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
