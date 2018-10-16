@@ -444,6 +444,27 @@ class Heisenberg(object):
         return self._number_spins
 
 
+def _load_hamiltonian(in_file):
+    specs = []
+    for (coupling, edges) in map(lambda x: x.strip().split(maxsplit=1),
+                                 filter(lambda x: not x.startswith('#'),
+                                        in_file)):
+        coupling = float(coupling)
+        # TODO: Parse the edges properly, it's not that difficult...
+        edges = eval(edges)
+        specs.append((coupling, edges))
+    # TODO: Generalise Heisenberg to support multiple graphs with different
+    # couplings
+    if len(specs) != 1:
+        raise NotImplementedError('Multiple couplings are not yet supported.')
+    (_, edges) = specs[0]
+    return Heisenberg(edges)
+
+
+def read_hamiltonian(in_file):
+    return _load_hamiltonian(in_file)
+
+
 def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     """
     Runs the Monte-Carlo simulation.
@@ -466,11 +487,12 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     energies = np.array(energies, dtype=np.complex64)
     mean_O = np.mean(derivatives, axis=0)
     mean_E = np.mean(energies)
+    std_E = np.std(energies)
     force = np.mean(energies * derivatives.conj().transpose(), axis=1)
     force -= mean_O.conj() * mean_E
     logging.info('Subspace dimension: {}'.format(len(energies_cache)))
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
-    return derivatives, mean_O, mean_E, force
+    return derivatives, mean_O, mean_E, std_E**2, force
 
 
 def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
@@ -491,10 +513,11 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
             wave_function[CompactSpin(s)] = cmath.exp(state.machine.log_wf(s))
     energies = np.array(energies, dtype=np.complex64)
     mean_E = np.mean(energies)
+    std_E = np.std(energies)
     logging.info('Subspace dimension: {}'.format(len(wave_function)))
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
-    logging.info('E = {}'.format(mean_E))
-    return mean_E, wave_function
+    logging.info('E = {}, Var[E] = {}'.format(mean_E, std_E**2))
+    return mean_E, std_E**2, wave_function
 
 
 def monte_carlo(machine, hamiltonian, initial_spin, steps):
@@ -622,7 +645,9 @@ class Optimiser(object):
                  monte_carlo_steps,
                  learning_rate,
                  use_sr,
-                 regulariser):
+                 regulariser,
+                 model_file,
+                 time_limit):
         self._machine = machine
         self._hamiltonian = hamiltonian
         self._magnetisation = magnetisation
@@ -630,11 +655,13 @@ class Optimiser(object):
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
         self._use_sr = use_sr
+        self._model_file = model_file
+        self._time_limit = time_limit
         if use_sr:
             self._regulariser = regulariser
             self._delta = None
-            self._optimizer = torch.optim.Adam(self._machine.parameters(),
-                                               lr=self._learning_rate)
+            self._optimizer = torch.optim.Adamax(self._machine.parameters(),
+                                                 lr=self._learning_rate)
         else:
             self._optimizer = torch.optim.SGD(self._machine.parameters(),
                                               lr=self._learning_rate)
@@ -643,10 +670,10 @@ class Optimiser(object):
         logging.info('==================== {} ===================='.format(iteration))
         # Monte Carlo
         spin = random_spin(self._machine.number_spins, self._magnetisation)
-        (Os, mean_O, E, F) = \
+        (Os, mean_O, E, var_E, F) = \
             monte_carlo(self._machine, self._hamiltonian, spin,
                              self._monte_carlo_steps)
-        logging.info('E = {}'.format(E))
+        logging.info('E = {}, Var[E] = {}'.format(E, var_E))
         # Calculate the "true" gradients
         if self._use_sr:
             # We also cache δ to use it as a guess the next time we're computing
@@ -665,8 +692,21 @@ class Optimiser(object):
         self._machine.clear_cache()
 
     def __call__(self):
-        for i in range(self._epochs):
-            self.learning_cycle(i)
+        if self._model_file is not None:
+            save = lambda: torch.save(self._machine.state_dict(), self._model_file)
+        else:
+            save = lambda: None
+        if self._time_limit is not None:
+            start = time.time()
+            for i in range(self._epochs):
+                if time.time() - start > self._time_limit:
+                    save()
+                    start = time.time()
+                self.learning_cycle(i)
+        else:
+            for i in range(self._epochs):
+                self.learning_cycle(i)
+        save()
         return self._machine
 
 
@@ -736,12 +776,16 @@ def cli():
     default=sys.stdout,
     show_default=True,
     help='Location where to save the sampled state.')
+@click.option('--hamiltonian', 'hamiltonian_file',
+    type=click.File(mode='r'),
+    required=True,
+    help='File containing the Heisenberg Hamiltonian specifications.')
 @click.option('--steps',
     type=click.IntRange(min=1),
     default=2000,
     show_default=True,
     help='Length of the Markov Chain.')
-def sample(nn_file, in_file, out_file, steps):
+def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     """
     Runs Monte Carlo on a NQS with given architecture and weights. The result
     is an explicit representation of the NQS, i.e. |ψ〉= ∑ψ(S)|S〉where
@@ -756,7 +800,7 @@ def sample(nn_file, in_file, out_file, steps):
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
     Machine = _make_machine(import_network(nn_file))
-    H = heisenberg3x3()
+    H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
@@ -765,7 +809,7 @@ def sample(nn_file, in_file, out_file, steps):
                         , (thermalisation + steps) * psi.number_spins
                         , psi.number_spins
                         )
-    E, wave_function = monte_carlo_loop_for_lanczos(
+    E, var_E, wave_function = monte_carlo_loop_for_lanczos(
         psi,
         H,
         random_spin(psi.number_spins, magnetisation),
@@ -773,7 +817,8 @@ def sample(nn_file, in_file, out_file, steps):
     )
     # For normalisation
     scale = 1.0 / math.sqrt(sum(map(lambda x: abs(x)**2, wave_function.values())))
-    out_file.write('# E = {} + {}'.format(E.real, E.imag))
+    out_file.write('# E = {} + {}\n'.format(E.real, E.imag))
+    out_file.write('# Var[E] = {} + {}'.format(var_E.real, var_E.imag))
     fmt = '\n{:0' + str(psi.number_spins) + 'b}\t{}\t{}'
     for (spin, coeff) in wave_function.items():
         out_file.write(fmt.format(int(spin), scale * coeff.real, scale * coeff.imag))
@@ -794,6 +839,10 @@ def sample(nn_file, in_file, out_file, steps):
     help='Where to save the final state to. It will contain a '
          'PyTorch `state_dict` serialised using `torch.save`. If no file is '
          'specified, the result will be discarded.')
+@click.option('--hamiltonian', 'hamiltonian_file',
+    type=click.File(mode='r'),
+    required=True,
+    help='File containing the Heisenberg Hamiltonian specifications.')
 @click.option('--use-sr',
     type=bool,
     default=True,
@@ -808,18 +857,25 @@ def sample(nn_file, in_file, out_file, steps):
     type=click.FloatRange(min=1.0E-10),
     default=0.05,
     show_default=True, help='Learning rate.')
+@click.option('--time', 'time_limit',
+    type=click.FloatRange(min=1.0E-10),
+    show_default=True,
+    help='Time interval that specifies how often the model is written to the '
+         'output file. If not specified, the weights are saved only once -- '
+         'after all the iterations.')
 @click.option('--steps',
     type=click.IntRange(min=1),
     default=2000,
     show_default=True, help='Length of the Markov Chain.')
-def optimise(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
+def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
+             steps, time_limit):
     """
     Variational Monte Carlo optimising E.
     """
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
     Machine = _make_machine(import_network(nn_file))
-    H = heisenberg3x3()
+    H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     if in_file is not None:
         psi.load_state_dict(torch.load(in_file))
@@ -835,7 +891,9 @@ def optimise(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
                            psi.number_spins),
         learning_rate=lr,
         use_sr=use_sr,
-        regulariser=lambda i: 100.0 * 0.9**i + 0.01
+        regulariser=lambda i: 100.0 * 0.9**i + 0.01,
+        model_file=out_file,
+        time_limit=time_limit
     )
     opt()
     if out_file is not None:
