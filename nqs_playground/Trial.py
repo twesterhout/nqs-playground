@@ -34,14 +34,17 @@
 
 import cmath
 import cProfile
+import importlib
 from itertools import islice
 from functools import reduce
 import logging
 import math
 import os
+import sys
 import time
 from typing import Dict, List, Tuple, Optional
 
+import click
 from numba import jit, jitclass, uint8, int64, float32
 import numpy as np
 import scipy
@@ -50,53 +53,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class Net(nn.Module):
-    """
-    The Neural Network used to encode the wave function.
-
-    It is basically a function ℝⁿ -> ℝ² where n is the number of spins.
-    """
-    def __init__(self, n: int):
-        super(Net, self).__init__()
-        self._number_spins = n
-        self._dense1 = nn.Linear(n, 17)
-        self._dense2 = nn.Linear(17, 15)
-        # self._dense3 = nn.Linear(15, 10)
-        # self._dense4 = nn.Linear(10, 15)
-        # self._dense5 = nn.Linear(15, 20)
-        self._dense6 = nn.Linear(15, 2, bias=False)
-        nn.init.normal_(self._dense1.weight, mean=0, std=1e-2)
-        nn.init.normal_(self._dense1.bias, mean=0, std=2e-2)
-        # nn.init.normal_(self._dense2.weight, std=5e-1)
-        # nn.init.normal_(self._dense2.bias, std=1e-1)
-        # nn.init.normal_(self._dense3.weight, std=5e-1)
-        # nn.init.normal_(self._dense3.bias, std=1e-1)
-        # nn.init.normal_(self._dense4.weight, std=1e-1)
-        # nn.init.normal_(self._dense4.bias, std=1e-1)
-        # nn.init.normal_(self._dense5.weight, std=1e-1)
-        # nn.init.normal_(self._dense5.bias, std=1e-1)
-        # nn.init.normal_(self._dense6.weight, std=1e-1)
-
-    @property
-    def number_spins(self) -> int:
-        """
-        Returns the number of spins the network expects as input.
-        """
-        return self._number_spins
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Runs the forward propagation.
-        """
-        x = torch.sigmoid(self._dense1(x))
-        x = torch.sigmoid(self._dense2(x))
-        # x = torch.tanh(self._dense3(x))
-        # x = torch.tanh(self._dense4(x))
-        # x = torch.tanh(self._dense5(x))
-        x = self._dense6(x)
-        # x[0].clamp_(-20, 5)
-        # logging.info(x)
-        return x
 
 @jit(uint8[:](float32[:]), nopython=True)
 def to_bytes(spin: np.ndarray) -> np.ndarray:
@@ -140,151 +96,157 @@ class CompactSpin(bytes):
         return int.from_bytes(self, byteorder='big')
 
 
-class Machine(Net):
+def _make_machine(BaseNet):
     """
-    Our variational ansatz |Ψ〉.
+    Creates the ``Machine`` class by deriving from a user-defined Neural
+    Network ``BaseNet``.
     """
-    class Cell(object):
+    class Machine(BaseNet):
         """
-        Cache cell corresponding to a spin configuration |S〉. A cell stores
-        log(〈S|Ψ〉) and ∂log(〈S|Ψ〉)/∂W where W are the variational
-        parameters.
+        Our variational ansatz |Ψ〉.
+        """
+        class Cell(object):
+            """
+            Cache cell corresponding to a spin configuration |S〉. A cell stores
+            log(〈S|Ψ〉) and ∂log(〈S|Ψ〉)/∂W where W are the variational
+            parameters.
 
-        :param complex wave_function: log(〈S|Ψ〉).
-        :param gradient: ∇log(〈S|Ψ〉).
-        :type gradient: np.ndarray of float32 or None.
-        """
-        def __init__(self, wave_function: complex,
-                     gradient: Optional[np.ndarray] = None):
-            self.log_wf = wave_function
-            self.der_log_wf = gradient
+            :param complex wave_function: log(〈S|Ψ〉).
+            :param gradient: ∇log(〈S|Ψ〉).
+            :type gradient: np.ndarray of float32 or None.
+            """
+            def __init__(self, wave_function: complex,
+                         gradient: Optional[np.ndarray] = None):
+                self.log_wf = wave_function
+                self.der_log_wf = gradient
 
-    def __init__(self, n_spins: int):
-        """
-        Initialises the state with random values for the variational parameters.
+        def __init__(self, n_spins: int):
+            """
+            Initialises the state with random values for the variational parameters.
 
-        :param int n_spins: Number of spins in the system.
-        """
-        if n_spins <= 0:
-            raise ValueError("Invalid number of spins: {}".format(n_spins))
-        super().__init__(n_spins)
-        self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
-        # Hash-table mapping CompactSpin to Machine.Cell
-        self._cache = {}
+            :param int n_spins: Number of spins in the system.
+            """
+            if n_spins <= 0:
+                raise ValueError("Invalid number of spins: {}".format(n_spins))
+            super().__init__(n_spins)
+            self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
+            # Hash-table mapping CompactSpin to Machine.Cell
+            self._cache = {}
 
-    def log_wf(self, x: np.ndarray) -> complex:
-        """
-        Computes log(Ψ(x)).
+        def log_wf(self, x: np.ndarray) -> complex:
+            """
+            Computes log(Ψ(x)).
 
-        :param np.ndarray x: Spin configuration. Must be a numpy array of
-                             ``float32``.
-        :return: log(Ψ(x))
-        :rtype: complex
-        """
-        key = CompactSpin(x)
-        cell = self._cache.get(key)
-        if cell is not None:
-            return cell.log_wf
-        else:
-            with torch.no_grad():
-                (a, b) = self.forward(torch.from_numpy(x))
-                log_wf = complex(a, b)
-                self._cache[key] = Machine.Cell(log_wf)
-                return log_wf
-
-    @property
-    def size(self) -> int:
-        """
-        Returns the number of variational parameters.
-        """
-        return self._size
-
-    def der_log_wf(self, x: np.ndarray, out: np.ndarray = None,
-                   key: Optional[CompactSpin] = None) -> np.ndarray:
-        """
-        Computes ∇log(Ψ(x)).
-
-        :param np.ndarray x:   Spin configuration. Must be a numpy array of ``float32``.
-        :param np.ndarray out: Destination array. Must be a numpy array of ``complex64``.
-        :param key: Precomputed ``CompactSpin``-representation of x.
-        :type key: CompactSpin or None.
-        :return: ∇log(Ψ(x)) as a numpy array of ``complex64``.
-                 __Don't you dare modify it!__.
-        """
-        if key is None:
+            :param np.ndarray x: Spin configuration. Must be a numpy array of
+                                 ``float32``.
+            :return: log(Ψ(x))
+            :rtype: complex
+            """
             key = CompactSpin(x)
-        # If out is not given, allocate a new array
-        if out is None:
-            out = np.empty((self.size,), dtype=np.complex64)
-        cell = self._cache.get(key)
-        if cell is not None and cell.der_log_wf is not None:
-            # Copy already known gradient
-            out[:] = cell.der_log_wf
-        else:
-            # Forward-propagation to construct the graph
-            result = self.forward(torch.from_numpy(x))
-            # Computes ∇Re[log(Ψ(x))]
-            self.zero_grad()
-            result.backward(torch.tensor([1, 0], dtype=torch.float32),
-                            retain_graph=True)
-            # TODO(twesterhout): This is ugly and error-prone.
-            i = 0
-            for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                out.real[i:i + p.size] = p
-                i += p.size
-            # Computes ∇Im[log(Ψ(x))]
-            self.zero_grad()
-            result.backward(torch.tensor([0, 1], dtype=torch.float32))
-            # TODO(twesterhout): This is ugly and error-prone.
-            i = 0
-            for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                out.imag[i:i + p.size] = p
-                i += p.size
-            # Save the results
-            # TODO(twesterhout): Remove the copy when it's safe to do so.
-            self._cache[key] = Machine.Cell(complex(result[0].item(), result[1].item()),
-                                            np.copy(out))
-        return out
+            cell = self._cache.get(key)
+            if cell is not None:
+                return cell.log_wf
+            else:
+                with torch.no_grad():
+                    (a, b) = self.forward(torch.from_numpy(x))
+                    log_wf = complex(a, b)
+                    self._cache[key] = Machine.Cell(log_wf)
+                    return log_wf
 
-    def clear_cache(self):
-        """
-        Clears the internal cache. This function must be called when the
-        variational parameters are updated.
-        """
-        self._cache = {}
+        @property
+        def size(self) -> int:
+            """
+            Returns the number of variational parameters.
+            """
+            return self._size
 
-    def set_gradients(self, x: np.ndarray):
-        """
-        Performs ∇W = x, i.e. sets the gradients of the variational parameters.
+        def der_log_wf(self, x: np.ndarray, out: np.ndarray = None,
+                       key: Optional[CompactSpin] = None) -> np.ndarray:
+            """
+            Computes ∇log(Ψ(x)).
 
-        :param np.ndarray x: New value for ∇W. Must be a numpy array of
-        ``float32`` of length ``self.size``.
-        """
-        with torch.no_grad():
-            gradients = torch.from_numpy(x)
-            i = 0
-            for dp in map(lambda p_: p_.grad.data.view(-1), self.parameters()):
-                (n,) = dp.size()
-                dp.copy_(gradients[i:i + n])
-                i += n
+            :param np.ndarray x:   Spin configuration. Must be a numpy array of ``float32``.
+            :param np.ndarray out: Destination array. Must be a numpy array of ``complex64``.
+            :param key: Precomputed ``CompactSpin``-representation of x.
+            :type key: CompactSpin or None.
+            :return: ∇log(Ψ(x)) as a numpy array of ``complex64``.
+                     __Don't you dare modify it!__.
+            """
+            if key is None:
+                key = CompactSpin(x)
+            # If out is not given, allocate a new array
+            if out is None:
+                out = np.empty((self.size,), dtype=np.complex64)
+            cell = self._cache.get(key)
+            if cell is not None and cell.der_log_wf is not None:
+                # Copy already known gradient
+                out[:] = cell.der_log_wf
+            else:
+                # Forward-propagation to construct the graph
+                result = self.forward(torch.from_numpy(x))
+                # Computes ∇Re[log(Ψ(x))]
+                self.zero_grad()
+                result.backward(torch.tensor([1, 0], dtype=torch.float32),
+                                retain_graph=True)
+                # TODO(twesterhout): This is ugly and error-prone.
+                i = 0
+                for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
+                    out.real[i:i + p.size] = p
+                    i += p.size
+                # Computes ∇Im[log(Ψ(x))]
+                self.zero_grad()
+                result.backward(torch.tensor([0, 1], dtype=torch.float32))
+                # TODO(twesterhout): This is ugly and error-prone.
+                i = 0
+                for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
+                    out.imag[i:i + p.size] = p
+                    i += p.size
+                # Save the results
+                # TODO(twesterhout): Remove the copy when it's safe to do so.
+                self._cache[key] = Machine.Cell(complex(result[0].item(), result[1].item()),
+                                                np.copy(out))
+            return out
 
-    def __isub__(self, x: np.ndarray):
-        """
-        In-place subtracts ``x`` from the parameters. This is useful when
-        implementing optimizers by hand.
+        def clear_cache(self):
+            """
+            Clears the internal cache. This function must be called when the
+            variational parameters are updated.
+            """
+            self._cache = {}
 
-        :param np.ndarray x: A numpy array of length ``self.size`` of ``complex64``.
-        """
-        with torch.no_grad():
-            delta = torch.from_numpy(x)
-            i = 0
-            for p in map(lambda p_: p_.data.view(-1), self.parameters()):
-                (n,) = p.size()
-                p.add_(-1, delta[i:i + n])
-                i += n
-        # Changing the weights invalidates the cache.
-        self._cache = {}
-        return self
+        def set_gradients(self, x: np.ndarray):
+            """
+            Performs ∇W = x, i.e. sets the gradients of the variational parameters.
+
+            :param np.ndarray x: New value for ∇W. Must be a numpy array of
+            ``float32`` of length ``self.size``.
+            """
+            with torch.no_grad():
+                gradients = torch.from_numpy(x)
+                i = 0
+                for dp in map(lambda p_: p_.grad.data.view(-1), self.parameters()):
+                    (n,) = dp.size()
+                    dp.copy_(gradients[i:i + n])
+                    i += n
+
+        def __isub__(self, x: np.ndarray):
+            """
+            In-place subtracts ``x`` from the parameters. This is useful when
+            implementing optimizers by hand.
+
+            :param np.ndarray x: A numpy array of length ``self.size`` of ``complex64``.
+            """
+            with torch.no_grad():
+                delta = torch.from_numpy(x)
+                i = 0
+                for p in map(lambda p_: p_.data.view(-1), self.parameters()):
+                    (n,) = p.size()
+                    p.add_(-1, delta[i:i + n])
+                    i += n
+            # Changing the weights invalidates the cache.
+            self._cache = {}
+            return self
+    return Machine
 
 
 class MonteCarloState(object):
@@ -441,6 +403,12 @@ class Heisenberg(object):
         Initialises the Hamiltonian given a list of edges.
         """
         self._graph = edges
+        smallest = min(map(min, edges))
+        largest = max(map(max, edges))
+        if smallest != 0:
+            ValueError('Invalid graph: Counting from 0, but the minimal index '
+                       'present is {}.'.format(smallest))
+        self._number_spins = largest + 1
 
     def __call__(self, state: MonteCarloState) -> np.complex64:
         """
@@ -458,6 +426,10 @@ class Heisenberg(object):
                     raise WorthlessConfiguration([i, j])
                 energy += -1 + 2 * cmath.exp(x)
         return np.complex64(energy)
+
+    @property
+    def number_spins(self) -> int:
+        return self._number_spins
 
 
 def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
@@ -613,6 +585,7 @@ class Optimiser(object):
                  epochs,
                  monte_carlo_steps,
                  learning_rate,
+                 use_sr,
                  regulariser):
         self._machine = machine
         self._hamiltonian = hamiltonian
@@ -620,33 +593,40 @@ class Optimiser(object):
         self._epochs = epochs
         self._monte_carlo_steps = monte_carlo_steps
         self._learning_rate = learning_rate
-        self._regulariser = regulariser
-        self._optimizer = torch.optim.Adamax(self._machine.parameters(),
-                                             lr=self._learning_rate)
-        self._delta = None
+        self._use_sr = use_sr
+        if use_sr:
+            self._regulariser = regulariser
+            self._delta = None
+            self._optimizer = torch.optim.Adam(self._machine.parameters(),
+                                               lr=self._learning_rate)
+        else:
+            self._optimizer = torch.optim.SGD(self._machine.parameters(),
+                                              lr=self._learning_rate)
 
     def learning_cycle(self, iteration):
         logging.info('==================== {} ===================='.format(iteration))
+        # Monte Carlo
         spin = random_spin(self._machine.number_spins, self._magnetisation)
-        # Monte-Carlo
         (Os, mean_O, E, F) = \
             monte_carlo(self._machine, self._hamiltonian, spin,
                              self._monte_carlo_steps)
         logging.info('E = {}'.format(E))
         # Calculate the "true" gradients
-        # We also cache δ to use it as a guess the next time we're computing
-        # S⁻¹F.
-        # self._delta = Covariance(
-        #     Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
-        # self._machine.set_gradients(self._delta)
-        self._machine.set_gradients(F.real)
+        if self._use_sr:
+            # We also cache δ to use it as a guess the next time we're computing
+            # S⁻¹F.
+            self._delta = Covariance(
+                Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
+            self._machine.set_gradients(self._delta)
+            logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
+                         .format(np.linalg.norm(F), np.linalg.norm(self._delta)))
+        else:
+            self._machine.set_gradients(F.real)
+            logging.info('∥F∥₂ = {}, ∥Re[F]∥₂ = {}'
+                         .format(np.linalg.norm(F), np.linalg.norm(F.real)))
         # Update the variational parameters
         self._optimizer.step()
         self._machine.clear_cache()
-        logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
-                     .format(np.linalg.norm(F),
-                             np.linalg.norm(F.real) # np.linalg.norm(self._delta)
-                             ))
 
     def __call__(self):
         for i in range(self._epochs):
@@ -657,7 +637,7 @@ class Optimiser(object):
 def heisenberg6():
     hamiltonian = Heisenberg([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
     machine = Machine(6)
-    return machine, hamiltonian
+    return hamiltonian
 
 
 def kagome12():
@@ -673,8 +653,7 @@ def kagome12():
              (9, 10), (9, 11),
              (10, 11)]
     hamiltonian = Heisenberg(edges)
-    machine = Machine(12)
-    return machine, hamiltonian
+    return hamiltonian
 
 
 def heisenberg3x3():
@@ -684,28 +663,67 @@ def heisenberg3x3():
                               (0, 3), (3, 6), (6, 0),
                               (1, 4), (4, 7), (7, 1),
                               (2, 5), (5, 8), (8, 2)])
-    machine = Machine(9)
-    return machine, hamiltonian
+    return hamiltonian
 
 
-def main():
+def import_network(nn_file):
+    module_name, extension = os.path.splitext(os.path.basename(nn_file))
+    module_dir = os.path.dirname(nn_file)
+    if extension != '.py':
+        raise ValueError(
+            'Could not import the network from {}: not a python source file.')
+    # Insert in the beginning
+    sys.path.insert(0, module_dir)
+    module = importlib.import_module(module_name)
+    sys.path.pop(0)
+    return module.Net
+
+
+@click.command()
+@click.argument('nn-file', type=click.Path(exists=True, resolve_path=True,
+                                           path_type=str), metavar='<arch_file>')
+@click.option('-i', '--in-file', type=click.File(mode='rb'),
+              help='File containing a PyTorch `state_dict` serialised using '
+                   '`torch.save`. It will be used as the initial state.')
+@click.option('-o', '--out-file', type=click.File(mode='wb'),
+              help='Where to save the final state to. It will contain a '
+                   'PyTorch `state_dict` serialised using `torch.save`.')
+@click.option('--use-sr', type=bool, default=True, show_default=True,
+              help='Whether to use SR for optimisation.')
+@click.option('--epochs', type=click.IntRange(min=0), default=200,
+              show_default=True, help='Number of learning steps to perform.')
+@click.option('--lr', type=click.FloatRange(min=1.0E-10), default=0.05,
+              show_default=True, help='Learning rate.')
+@click.option('--steps', type=click.IntRange(min=1), default=2000,
+              show_default=True, help='Length of the Markov Chain.')
+def main(nn_file, in_file, out_file, use_sr, epochs, lr, steps):
+    """
+    Hehehe
+    """
     logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
                         level=logging.DEBUG)
-    psi, H = heisenberg3x3()
-    # psi.load_state_dict(torch.load('Result.{}.txt'.format(2670839)))
+    Machine = _make_machine(import_network(nn_file))
+    H = heisenberg3x3()
+    psi = Machine(H.number_spins)
+    if in_file is not None:
+        psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
+    thermalisation = int(0.1 * steps)
     opt = Optimiser(
         psi,
         H,
         magnetisation=magnetisation,
-        epochs=200,
-        monte_carlo_steps=(1000, 1000 + 2000 * psi.number_spins, psi.number_spins),
-        learning_rate=0.05,
+        epochs=epochs,
+        monte_carlo_steps=(thermalisation * psi.number_spins,
+                           (thermalisation + steps) * psi.number_spins,
+                           psi.number_spins),
+        learning_rate=lr,
+        use_sr=use_sr,
         regulariser=lambda i: 100.0 * 0.9**i + 0.01
     )
-    logging.info(psi)
     opt()
-    torch.save(psi.state_dict(), 'Result.{}.txt'.format(os.getpid()))
+    if out_file is not None:
+        torch.save(psi.state_dict(), out_file)
 
 
 if __name__ == '__main__':
