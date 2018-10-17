@@ -693,7 +693,12 @@ class Optimiser(object):
 
     def __call__(self):
         if self._model_file is not None:
-            save = lambda: torch.save(self._machine.state_dict(), self._model_file)
+            def save():
+                # NOTE: This is important, because we want to overwrite the
+                # previous weights
+                self._model_file.seek(0)
+                self._model_file.truncate()
+                torch.save(self._machine.state_dict(), self._model_file)
         else:
             save = lambda: None
         if self._time_limit is not None:
@@ -878,6 +883,7 @@ def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
     H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     if in_file is not None:
+        logging.info('Reading the weights...')
         psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
@@ -896,8 +902,6 @@ def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
         time_limit=time_limit
     )
     opt()
-    if out_file is not None:
-        torch.save(psi.state_dict(), out_file)
 
 
 if __name__ == '__main__':
