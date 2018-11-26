@@ -45,6 +45,7 @@ import time
 from typing import Dict, List, Tuple, Optional
 
 import click
+import mpmath # Just to be safe: for accurate computation of L2 norms
 from numba import jit, jitclass, uint8, int64, float32
 import numpy as np
 import scipy
@@ -120,16 +121,19 @@ def _make_machine(BaseNet):
                 self.log_wf = wave_function
                 self.der_log_wf = gradient
 
-        def __init__(self, n_spins: int):
+        def __init__(self, *args, **kwargs):
             """
             Initialises the state with random values for the variational parameters.
 
             :param int n_spins: Number of spins in the system.
             """
-            if n_spins <= 0:
-                raise ValueError("Invalid number of spins: {}".format(n_spins))
-            super().__init__(n_spins)
-            self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
+            # if n_spins <= 0:
+            #     raise ValueError("Invalid number of spins: {}".format(n_spins))
+            super().__init__(*args, **kwargs)
+            try:
+                self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
+            except AttributeError:
+                self._size = None
             # Hash-table mapping CompactSpin to Machine.Cell
             self._cache = {}
 
@@ -520,6 +524,21 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
     return mean_E, std_E**2, wave_function
 
 
+def compute_l2_norm(machine, initial_spin, steps):
+    _old_dps = mpmath.mp.dps
+    mpmath.mp.dps = 50
+    wave_function = {}
+    chain = MetropolisMC(machine, initial_spin)
+    for state in islice(chain, *steps):
+        spin = CompactSpin(state.spin)
+        wave_function[spin] = mpmath.exp(mpmath.mpc(state.log_wf()))
+    l2_norm = mpmath.sqrt(
+        sum(map(lambda x: mpmath.fabs(x)**2, wave_function.values()),
+            mpmath.mpf(0)) / len(wave_function))
+    mpmath.mp.dps = _old_dps
+    return float(l2_norm)
+
+
 def monte_carlo(machine, hamiltonian, initial_spin, steps):
     logging.info('Running Monte-Carlo...')
     start = time.time()
@@ -660,8 +679,8 @@ class Optimiser(object):
         if use_sr:
             self._regulariser = regulariser
             self._delta = None
-            self._optimizer = torch.optim.Adamax(self._machine.parameters(),
-                                                 lr=self._learning_rate)
+            self._optimizer = torch.optim.SGD(self._machine.parameters(),
+                                              lr=self._learning_rate)
         else:
             self._optimizer = torch.optim.SGD(self._machine.parameters(),
                                               lr=self._learning_rate)
@@ -713,6 +732,93 @@ class Optimiser(object):
                 self.learning_cycle(i)
         save()
         return self._machine
+
+
+def _make_normalised_machine(BaseNet):
+    class NormalisedMachine(_make_machine(BaseNet)):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._scale = complex(0.0, 0.0)
+
+        @property
+        def scale(self):
+            return math.exp(self._scale.real)
+
+        @scale.setter
+        def scale(self, value):
+            self._scale = complex(math.log(value), self._scale.imag)
+
+        @property
+        def phase(self):
+            return self._scale.imag
+
+        @phase.setter
+        def phase(self, value):
+            self._scale = complex(self._scale.real, value)
+
+        def log_wf(self, x):
+            return super().log_wf(x) + self._scale
+
+        def forward(self, x):
+            scale = torch.tensor([self._scale.real, self._scale.imag],
+                                 dtype=torch.float32, requires_grad=False)
+            return super().forward(x) + scale
+
+        def backward(self, x):
+            raise NotImplementedError('NormalisedMachine is not trainable')
+
+        def der_log_wf(self, x):
+            raise NotImplementedError('NormalisedMachine is not trainable')
+
+        def set_gradients(self, x):
+            raise NotImplementedError('NormalisedMachine is not trainable')
+
+        def __isub__(self, x):
+            raise NotImplementedError('NormalisedMachine is immutable')
+    return NormalisedMachine
+
+
+class AverageNet(nn.Module):
+    def __init__(self, BaseNet, n, weight_files):
+        self._machines = []
+        self._number_spins = n
+        Machine = _make_normalised_machine(BaseNet)
+        for file_name in weight_files:
+            with open(file_name, 'rb') as in_file:
+                psi = Machine(n)
+                psi.load_state_dict(torch.load(in_file))
+                self._machines.append(psi)
+
+    @property
+    def number_spins(self):
+        return self._number_spins
+
+    def normalise_(self, steps, magnetisation=None):
+        for psi in self._machines:
+            n_runs = 10
+            l2_norms = np.array([
+                compute_l2_norm(psi, random_spin(psi.number_spins,
+                                                 magnetisation), steps)
+                    for _ in range(n_runs)])
+            l2_mean = np.mean(l2_norms)
+            logging.info('After {} runs: ||ψ||₂ = {} ± {}'.format(n_runs, l2_mean, np.std(l2_norms)))
+            psi.scale = 1.0 / l2_mean
+            psi.clear_cache()
+
+    def align_(self, spin):
+        for psi in self._machines:
+            psi.phase = -psi.log_wf(spin).imag
+
+    def forward(self, x):
+        with torch.no_grad():
+            def wf(psi, x):
+                (a, b) = psi.forward(x)
+                return cmath.exp(complex(a, b))
+            avg_psi = np.mean(np.array([wf(psi, x) for psi in self._machines]))
+            avg_log_psi = cmath.log(avg_psi)
+            x = torch.tensor([avg_log_psi.real, avg_log_psi.imag],
+                             dtype=torch.float32, requires_grad=False)
+            return x
 
 
 def heisenberg6():
@@ -828,6 +934,64 @@ def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     for (spin, coeff) in wave_function.items():
         out_file.write(fmt.format(int(spin), scale * coeff.real, scale * coeff.imag))
 
+@cli.command()
+@click.argument('nn-file',
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar='<arch_file>')
+@click.option('-i', '--in-file',
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    required=True,
+    help='')
+# @click.option('-o', '--out-file',
+#     type=click.File(mode='w'),
+#     default=sys.stdout,
+#     show_default=True,
+#     help='Location where to save the sampled state.')
+@click.option('--hamiltonian', 'hamiltonian_file',
+    type=click.File(mode='r'),
+    required=True,
+    help='File containing the Heisenberg Hamiltonian specifications.')
+@click.option('--steps',
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True,
+    help='Length of the Markov Chain.')
+def sample_average(nn_file, in_file, hamiltonian_file, steps):
+    logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
+                        level=logging.DEBUG)
+    Net = import_network(nn_file)
+    # Machine = _make_machine(Net)
+    H = read_hamiltonian(hamiltonian_file)
+    magnetisation = 0 if H.number_spins % 2 == 0 else 1
+    AverageMachine = _make_machine(AverageNet)
+    with open(in_file, 'r') as f:
+        input_files = map(lambda x: x.strip(), f.readlines())
+    psi = AverageMachine(Net, H.number_spins, input_files)
+    thermalisation = int(0.1 * steps)
+    monte_carlo_steps = ( thermalisation * psi.number_spins
+                        , (thermalisation + steps) * psi.number_spins
+                        , psi.number_spins
+                        )
+    psi.normalise_(monte_carlo_steps, magnetisation)
+
+    monte_carlo_steps = ( thermalisation * psi.number_spins
+                        , (thermalisation + 50 * steps) * psi.number_spins
+                        , psi.number_spins
+                        )
+    spin_fmt = '{:0' + str(psi.number_spins) + 'b}'
+    for magical_spin in [
+        np.array([ 1,  1, -1, -1, -1,  1, -1, -1,  1,  1,  1, -1], dtype=np.float32),
+        np.array([ 1,  1, -1, -1, -1,  1,  1,  1, -1, -1, -1,  1], dtype=np.float32),
+        np.array([ 1, -1,  1, -1,  1, -1, -1,  1, -1,  1, -1,  1], dtype=np.float32),
+        np.array([ 1,  1, -1, -1,  1,  1,  1, -1, -1,  1, -1, -1], dtype=np.float32),
+        ]:
+        logging.info(('S = ' + spin_fmt).format(int(CompactSpin(magical_spin))))
+        psi.align_(magical_spin)
+        E, var_E, _ = monte_carlo_loop_for_lanczos(
+            psi, H, random_spin(psi.number_spins, magnetisation), monte_carlo_steps)
+        logging.info('    E = {} + {}'.format(E.real, E.imag))
+        logging.info('    Var[E] = {} + {}'.format(var_E.real, var_E.imag))
+
 
 @cli.command()
 @click.argument('nn-file',
@@ -902,6 +1066,8 @@ def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
         time_limit=time_limit
     )
     opt()
+    print(compute_l2_norm(psi, random_spin(psi.number_spins, magnetisation),
+                         (1000, 1000 + 10000 * psi.number_spins, psi.number_spins)))
 
 
 if __name__ == '__main__':

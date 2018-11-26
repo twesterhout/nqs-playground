@@ -45,12 +45,12 @@ class Net(nn.Module):
         self._number_spins = n
         # NOTE: Feel free to modify the rest to define your own custom
         # architecture.
-        self._dense1 = nn.Linear(n, 17)
-        self._dense2 = nn.Linear(17, 15)
+        self._dense1 = nn.Linear(n, 6 * n)
+        # self._dense2 = nn.Linear(17, 15)
         # self._dense3 = nn.Linear(15, 10)
         # self._dense4 = nn.Linear(10, 15)
         # self._dense5 = nn.Linear(15, 20)
-        self._dense6 = nn.Linear(15, 2, bias=False)
+        self._dense6 = nn.Linear(6 * n, 2, bias=False)
         nn.init.normal_(self._dense1.weight, mean=0, std=1e-2)
         nn.init.normal_(self._dense1.bias, mean=0, std=2e-2)
         # nn.init.normal_(self._dense2.weight, std=5e-1)
@@ -72,8 +72,8 @@ class Net(nn.Module):
 
         :param torch.Tensor x: Spin configuration as.
         """
-        x = torch.sigmoid(self._dense1(x))
-        x = torch.sigmoid(self._dense2(x))
+        x = torch.tanh(self._dense1(x))
+        # x = torch.sigmoid(self._dense2(x))
         # x = torch.tanh(self._dense3(x))
         # x = torch.tanh(self._dense4(x))
         # x = torch.tanh(self._dense5(x))
