@@ -33,6 +33,7 @@
 
 
 import cmath
+import copy
 import cProfile
 import importlib
 from itertools import islice
@@ -45,8 +46,9 @@ import time
 from typing import Dict, List, Tuple, Optional
 
 import click
-import mpmath # Just to be safe: for accurate computation of L2 norms
+import mpmath  # Just to be safe: for accurate computation of L2 norms
 from numba import jit, jitclass, uint8, int64, float32
+from numba.types import Bytes
 import numpy as np
 import scipy
 from scipy.sparse.linalg import lgmres, LinearOperator
@@ -69,21 +71,39 @@ def to_bytes(spin: np.ndarray) -> np.ndarray:
             b[0] = (b[0] << 1) | (spin[i] == 1.0)
     for i in range(chunks):
         j = 8 * i + rest
-        b[int(rest > 0) + i] = ((spin[j + 0] == 1.0) << 7) \
-                    | ((spin[j + 1] == 1.0) << 6) \
-                    | ((spin[j + 2] == 1.0) << 5) \
-                    | ((spin[j + 3] == 1.0) << 4) \
-                    | ((spin[j + 4] == 1.0) << 3) \
-                    | ((spin[j + 5] == 1.0) << 2) \
-                    | ((spin[j + 6] == 1.0) << 1) \
-                    | ((spin[j + 7] == 1.0) << 0)
+        b[int(rest > 0) + i] = (
+            ((spin[j + 0] == 1.0) << 7)
+            | ((spin[j + 1] == 1.0) << 6)
+            | ((spin[j + 2] == 1.0) << 5)
+            | ((spin[j + 3] == 1.0) << 4)
+            | ((spin[j + 4] == 1.0) << 3)
+            | ((spin[j + 5] == 1.0) << 2)
+            | ((spin[j + 6] == 1.0) << 1)
+            | ((spin[j + 7] == 1.0) << 0)
+        )
     return b
+
+
+@jit(float32[:](Bytes(uint8, 1, "C"), int64), nopython=True)
+def from_bytes(b: bytes, n: int) -> np.ndarray:
+    chunks, rest = divmod(n, 8)
+    spin = np.empty(n, dtype=np.float32)
+    get = lambda _b, i: -1.0 + 2.0 * int((_b >> (7 - i)) & 0x01)
+    if rest != 0:
+        offset = 8 - rest
+        for i in range(rest):
+            spin[i] = get(b[0], offset + i)
+    for i in range(chunks):
+        for j in range(8):
+            spin[rest + 8 * i + j] = get(b[int(rest != 0) + i], j)
+    return spin
 
 
 class CompactSpin(bytes):
     """
     Compact representation of a spin.
     """
+
     def __new__(cls, spin: np.ndarray):
         """
         Creates a new ``CompactSpin`` given the spin (ℝⁿ).
@@ -94,7 +114,7 @@ class CompactSpin(bytes):
         """
         Returns an int representation of the spin.
         """
-        return int.from_bytes(self, byteorder='big')
+        return int.from_bytes(self, byteorder="big")
 
 
 def _make_machine(BaseNet):
@@ -102,10 +122,12 @@ def _make_machine(BaseNet):
     Creates the ``Machine`` class by deriving from a user-defined Neural
     Network ``BaseNet``.
     """
+
     class Machine(BaseNet):
         """
         Our variational ansatz |Ψ〉.
         """
+
         class Cell(object):
             """
             Cache cell corresponding to a spin configuration |S〉. A cell stores
@@ -116,8 +138,10 @@ def _make_machine(BaseNet):
             :param gradient: ∇log(〈S|Ψ〉).
             :type gradient: np.ndarray of float32 or None.
             """
-            def __init__(self, wave_function: complex,
-                         gradient: Optional[np.ndarray] = None):
+
+            def __init__(
+                self, wave_function: complex, gradient: Optional[np.ndarray] = None
+            ):
                 self.log_wf = wave_function
                 self.der_log_wf = gradient
 
@@ -131,7 +155,9 @@ def _make_machine(BaseNet):
             #     raise ValueError("Invalid number of spins: {}".format(n_spins))
             super().__init__(*args, **kwargs)
             try:
-                self._size = sum(map(lambda p: reduce(int.__mul__, p.size()), self.parameters()))
+                self._size = sum(
+                    map(lambda p: reduce(int.__mul__, p.size()), self.parameters())
+                )
             except AttributeError:
                 self._size = None
             # Hash-table mapping CompactSpin to Machine.Cell
@@ -164,8 +190,12 @@ def _make_machine(BaseNet):
             """
             return self._size
 
-        def der_log_wf(self, x: np.ndarray, out: np.ndarray = None,
-                       key: Optional[CompactSpin] = None) -> np.ndarray:
+        def der_log_wf(
+            self,
+            x: np.ndarray,
+            out: np.ndarray = None,
+            key: Optional[CompactSpin] = None,
+        ) -> np.ndarray:
             """
             Computes ∇log(Ψ(x)).
 
@@ -190,12 +220,13 @@ def _make_machine(BaseNet):
                 result = self.forward(torch.from_numpy(x))
                 # Computes ∇Re[log(Ψ(x))]
                 self.zero_grad()
-                result.backward(torch.tensor([1, 0], dtype=torch.float32),
-                                retain_graph=True)
+                result.backward(
+                    torch.tensor([1, 0], dtype=torch.float32), retain_graph=True
+                )
                 # TODO(twesterhout): This is ugly and error-prone.
                 i = 0
                 for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                    out.real[i:i + p.size] = p
+                    out.real[i : i + p.size] = p
                     i += p.size
                 # Computes ∇Im[log(Ψ(x))]
                 self.zero_grad()
@@ -203,12 +234,13 @@ def _make_machine(BaseNet):
                 # TODO(twesterhout): This is ugly and error-prone.
                 i = 0
                 for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                    out.imag[i:i + p.size] = p
+                    out.imag[i : i + p.size] = p
                     i += p.size
                 # Save the results
                 # TODO(twesterhout): Remove the copy when it's safe to do so.
-                self._cache[key] = Machine.Cell(complex(result[0].item(), result[1].item()),
-                                                np.copy(out))
+                self._cache[key] = Machine.Cell(
+                    complex(result[0].item(), result[1].item()), np.copy(out)
+                )
             return out
 
         def clear_cache(self):
@@ -230,7 +262,7 @@ def _make_machine(BaseNet):
                 i = 0
                 for dp in map(lambda p_: p_.grad.data.view(-1), self.parameters()):
                     (n,) = dp.size()
-                    dp.copy_(gradients[i:i + n])
+                    dp.copy_(gradients[i : i + n])
                     i += n
 
         def __isub__(self, x: np.ndarray):
@@ -245,11 +277,12 @@ def _make_machine(BaseNet):
                 i = 0
                 for p in map(lambda p_: p_.data.view(-1), self.parameters()):
                     (n,) = p.size()
-                    p.add_(-1, delta[i:i + n])
+                    p.add_(-1, delta[i : i + n])
                     i += n
             # Changing the weights invalidates the cache.
             self._cache = {}
             return self
+
     return Machine
 
 
@@ -315,16 +348,12 @@ class MonteCarloState(object):
         return self
 
 
-@jitclass([
-    ('_ups', int64[:]),
-    ('_downs', int64[:]),
-    ('_n', int64),
-    ('_i', int64)
-])
+@jitclass([("_ups", int64[:]), ("_downs", int64[:]), ("_n", int64), ("_i", int64)])
 class _Flipper(object):
     """
     Magnetisation-preserving spin flipper.
     """
+
     def __init__(self, spin: np.ndarray):
         """
         Initialises the flipper with the given spin. Magnetisation is deduced
@@ -335,7 +364,7 @@ class _Flipper(object):
         self._n = min(self._ups.size, self._downs.size)
         self._i = 0
         if self._i >= self._n:
-            raise ValueError('Failed to initialise the Flipper.')
+            raise ValueError("Failed to initialise the Flipper.")
 
     def read(self) -> List[int]:
         """
@@ -367,6 +396,7 @@ class MetropolisMC(object):
     Markov chain constructed using Metropolis-Hasting algorithm. Elements of
     the chain are ``MonteCarloState``s.
     """
+
     def __init__(self, machine, spin: np.ndarray):
         """
         Initialises a Markov chain.
@@ -385,8 +415,9 @@ class MetropolisMC(object):
                 self._steps += 1
                 yield self._state
                 flips = self._flipper.read()
-                if min(1.0, math.exp(self._state.log_quot_wf(flips).real)**2) \
-                        > np.random.uniform(0, 1):
+                if min(
+                    1.0, math.exp(self._state.log_quot_wf(flips).real) ** 2
+                ) > np.random.uniform(0, 1):
                     self._accepted += 1
                     self._state.update(flips)
                     self._flipper.next(True)
@@ -406,6 +437,7 @@ class Heisenberg(object):
     """
     Isotropic Heisenberg Hamiltonian on a lattice.
     """
+
     def __init__(self, edges: List[Tuple[int, int]]):
         """
         Initialises the Hamiltonian given a list of edges.
@@ -414,8 +446,10 @@ class Heisenberg(object):
         smallest = min(map(min, edges))
         largest = max(map(max, edges))
         if smallest != 0:
-            ValueError('Invalid graph: Counting from 0, but the minimal index '
-                       'present is {}.'.format(smallest))
+            ValueError(
+                "Invalid graph: Counting from 0, but the minimal index "
+                "present is {}.".format(smallest)
+            )
         self._number_spins = largest + 1
 
     def __call__(self, state: MonteCarloState) -> np.complex64:
@@ -450,9 +484,10 @@ class Heisenberg(object):
 
 def _load_hamiltonian(in_file):
     specs = []
-    for (coupling, edges) in map(lambda x: x.strip().split(maxsplit=1),
-                                 filter(lambda x: not x.startswith('#'),
-                                        in_file)):
+    for (coupling, edges) in map(
+        lambda x: x.strip().split(maxsplit=1),
+        filter(lambda x: not x.startswith("#"), in_file),
+    ):
         coupling = float(coupling)
         # TODO: Parse the edges properly, it's not that difficult...
         edges = eval(edges)
@@ -460,7 +495,7 @@ def _load_hamiltonian(in_file):
     # TODO: Generalise Heisenberg to support multiple graphs with different
     # couplings
     if len(specs) != 1:
-        raise NotImplementedError('Multiple couplings are not yet supported.')
+        raise NotImplementedError("Multiple couplings are not yet supported.")
     (_, edges) = specs[0]
     return Heisenberg(edges)
 
@@ -494,13 +529,15 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     std_E = np.std(energies)
     force = np.mean(energies * derivatives.conj().transpose(), axis=1)
     force -= mean_O.conj() * mean_E
-    logging.info('Subspace dimension: {}'.format(len(energies_cache)))
-    logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
-    return derivatives, mean_O, mean_E, std_E**2, force
+    logging.info("Subspace dimension: {}".format(len(energies_cache)))
+    logging.info(
+        "Acceptance rate: {:.2f}%".format(chain._accepted / chain._steps * 100)
+    )
+    return derivatives, mean_O, mean_E, std_E ** 2, force
 
 
 def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
-    logging.info('Running Monte Carlo...')
+    logging.info("Running Monte Carlo...")
     energies = []
     energies_cache = {}
     wave_function = {}
@@ -518,10 +555,12 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
     energies = np.array(energies, dtype=np.complex64)
     mean_E = np.mean(energies)
     std_E = np.std(energies)
-    logging.info('Subspace dimension: {}'.format(len(wave_function)))
-    logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
-    logging.info('E = {}, Var[E] = {}'.format(mean_E, std_E**2))
-    return mean_E, std_E**2, wave_function
+    logging.info("Subspace dimension: {}".format(len(wave_function)))
+    logging.info(
+        "Acceptance rate: {:.2f}%".format(chain._accepted / chain._steps * 100)
+    )
+    logging.info("E = {}, Var[E] = {}".format(mean_E, std_E ** 2))
+    return mean_E, std_E ** 2, wave_function
 
 
 def compute_l2_norm(machine, initial_spin, steps):
@@ -533,14 +572,15 @@ def compute_l2_norm(machine, initial_spin, steps):
         spin = CompactSpin(state.spin)
         wave_function[spin] = mpmath.exp(mpmath.mpc(state.log_wf()))
     l2_norm = mpmath.sqrt(
-        sum(map(lambda x: mpmath.fabs(x)**2, wave_function.values()),
-            mpmath.mpf(0)) / len(wave_function))
+        sum(map(lambda x: mpmath.fabs(x) ** 2, wave_function.values()), mpmath.mpf(0))
+        / len(wave_function)
+    )
     mpmath.mp.dps = _old_dps
     return float(l2_norm)
 
 
 def monte_carlo(machine, hamiltonian, initial_spin, steps):
-    logging.info('Running Monte-Carlo...')
+    logging.info("Running Monte-Carlo...")
     start = time.time()
     restarts = 5
     spin = np.copy(initial_spin)
@@ -550,20 +590,104 @@ def monte_carlo(machine, hamiltonian, initial_spin, steps):
             answer = monte_carlo_loop(machine, hamiltonian, spin, steps)
         except WorthlessConfiguration as err:
             if restarts > 0:
-                logging.warning('Restarting the Monte-Carlo simulation...')
+                logging.warning("Restarting the Monte-Carlo simulation...")
                 restarts -= 1
                 spin[err.suggestion] *= -1
             else:
                 raise
     finish = time.time()
-    logging.info('Done in {:.2f} seconds!'.format(finish - start))
+    logging.info("Done in {:.2f} seconds!".format(finish - start))
     return answer
+
+
+#
+# NOTE(twesterhout): This class is a work in progress: please, don't use it (yet).
+#
+# class Covariance(LinearOperator):
+#     """
+#     Sparse representation of the covariance matrix matrix S in Stochastic
+#     Reconfiguration method [1].
+#     """
+#
+#     def __init__(self, gradients, mean_gradient, regulariser):
+#         """
+#         """
+#         (steps, n) = gradients.shape
+#         super().__init__(np.float32, (2 * n, n))
+#         gradients = gradients - mean_gradient
+#         self._Re_O = np.ascontiguousarray(gradients.real)
+#         self._Im_O = np.ascontiguousarray(gradients.imag)
+#         gradients = gradients.transpose().conj()
+#         self._Re_O_H = np.ascontiguousarray(gradients.real)
+#         self._Im_O_H = np.ascontiguousarray(gradients.imag)
+#         self._lambda = regulariser
+#         self._scale = 1 / steps
+#
+#     def _S(self, x: np.ndarray):
+#         assert x.dtype == np.float32
+#         (_, n) = self.shape
+#         assert x.size == n
+#         y = np.empty((2 * n,), dtype=np.float32)
+#         y[:n]  = np.matmul(self._Re_O_H, np.matmul(self._Re_O, x))
+#         y[:n] -= np.matmul(self._Im_O_H, np.matmul(self._Im_O, x))
+#         y[n:]  = np.matmul(self._Im_O_H, np.matmul(self._Re_O, x))
+#         y[n:] += np.matmul(self._Re_O_H, np.matmul(self._Im_O, x))
+#         y *= self._scale
+#         return y
+#
+#     def _S_H(self, y: np.ndarray):
+#         assert y.dtype == np.float32
+#         (_, n) = self.shape
+#         assert y.size == 2 * n
+#         x  = np.matmul(self._Re_O.transpose(), np.matmul(self._Re_O_H.transpose(), y[:n]))
+#         x -= np.matmul(self._Im_O.transpose(), np.matmul(self._Im_O_H.transpose(), y[:n]))
+#         x += np.matmul(self._Im_O.transpose(), np.matmul(self._Re_O_H.transpose(), y[n:]))
+#         x += np.matmul(self._Re_O.transpose(), np.matmul(self._Im_O_H.transpose(), y[n:]))
+#         x *= self._scale
+#         assert x.size == n
+#         assert x.dtype == np.float32
+#         return x
+#
+#     def _matvec(self, x):
+#         if x.dtype != self.dtype:
+#             logging.error('{} != {}'.format(x.dtype, self.dtype))
+#             assert false
+#         return self._S(x)
+#
+#     def _rmatvec(self, y):
+#         assert y.dtype == self.dtype
+#         return self._S_H(y)
+#
+#     def solve(self, b, x0=None):
+#         assert b.dtype == np.complex64
+#         start = time.time()
+#         logging.info("Calculating S⁻¹F...")
+#         (_, n) = self.shape
+#         b_ = np.empty((2 * n,), dtype=np.float32)
+#         b_[:n] = b.real
+#         b_[n:] = b.imag
+#         if x0 is None:
+#             x0 = np.zeros((n,), dtype=np.float32)
+#         else:
+#             x0_norm = np.linalg.norm(x0)
+#             x0 *= 1 / x0_norm
+#         x, istop, itn, r1norm, *_ = scipy.sparse.linalg.lsqr(self, b_, x0=x0)
+#         finish = time.time()
+#         if istop == 1:
+#             logging.info("Done in {:.2f} seconds! Solved Sx = F in {} "
+#                          "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
+#         else:
+#             logging.info("Done in {:.2f} seconds! Solved min||Sx - F|| in {} "
+#                          "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
+#         assert x.dtype == self.dtype
+#         return x
 
 
 class Covariance(LinearOperator):
     """
     Covariance matrix matrix S.
     """
+
     def __init__(self, gradients, mean_gradient, regulariser):
         """
         """
@@ -598,14 +722,12 @@ class Covariance(LinearOperator):
         """
         assert x.dtype == self.dtype
         return np.ascontiguousarray(
-            self._S(
-                self._S(
-                    np.ascontiguousarray(x, dtype=np.complex64)
-                )
-            ).real + self._lambda * x,
-            dtype=np.float32)
+            self._S(self._S(np.ascontiguousarray(x, dtype=np.complex64))).real
+            + self._lambda * x,
+            dtype=np.float32,
+        )
 
-    def solve(self, b, x0 = None):
+    def solve(self, b, x0=None):
         """
         Solves
 
@@ -617,29 +739,31 @@ class Covariance(LinearOperator):
         """
         assert b.dtype == np.complex64
         start = time.time()
-        logging.info('Calculating S⁻¹F...')
+        logging.info("Calculating S⁻¹F...")
         b_ = np.ascontiguousarray(self._S(b).real)
         x, info = scipy.sparse.linalg.lgmres(self, b_, x0)
         finish = time.time()
         if info == 0:
-            logging.info('Done in {:.2f} seconds!'.format(finish - start))
+            logging.info("Done in {:.2f} seconds!".format(finish - start))
             return x
         if info > 0:
-            logging.error('Failed to converge')
+            logging.error("Failed to converge")
             return 0.1 * b_
-        raise ValueError('The hell has just happened?')
+        raise ValueError("The hell has just happened?")
 
 
 def random_spin(n, magnetisation=None):
     if n <= 0:
-        raise ValueError('Invalid number of spins: {}'.format(n))
+        raise ValueError("Invalid number of spins: {}".format(n))
     if magnetisation is not None:
         if abs(magnetisation) > n:
             raise ValueError(
-                'Magnetisation exceeds the number of spins: |{}| > {}'
-                .format(magnetisation, n))
+                "Magnetisation exceeds the number of spins: |{}| > {}".format(
+                    magnetisation, n
+                )
+            )
         if (n + magnetisation) % 2 != 0:
-            raise ValueError('Invalid magnetisation: {}'.format(magnetisation))
+            raise ValueError("Invalid magnetisation: {}".format(magnetisation))
         number_ups = (n + magnetisation) // 2
         number_downs = (n - magnetisation) // 2
         spin = np.empty((n,), dtype=np.float32)
@@ -656,17 +780,19 @@ def random_spin(n, magnetisation=None):
 
 
 class Optimiser(object):
-    def __init__(self,
-                 machine,
-                 hamiltonian,
-                 magnetisation,
-                 epochs,
-                 monte_carlo_steps,
-                 learning_rate,
-                 use_sr,
-                 regulariser,
-                 model_file,
-                 time_limit):
+    def __init__(
+        self,
+        machine,
+        hamiltonian,
+        magnetisation,
+        epochs,
+        monte_carlo_steps,
+        learning_rate,
+        use_sr,
+        regulariser,
+        model_file,
+        time_limit,
+    ):
         self._machine = machine
         self._hamiltonian = hamiltonian
         self._magnetisation = magnetisation
@@ -679,45 +805,56 @@ class Optimiser(object):
         if use_sr:
             self._regulariser = regulariser
             self._delta = None
-            self._optimizer = torch.optim.SGD(self._machine.parameters(),
-                                              lr=self._learning_rate)
+            self._optimizer = torch.optim.SGD(
+                self._machine.parameters(), lr=self._learning_rate
+            )
         else:
-            self._optimizer = torch.optim.SGD(self._machine.parameters(),
-                                              lr=self._learning_rate)
+            self._optimizer = torch.optim.SGD(
+                self._machine.parameters(), lr=self._learning_rate
+            )
 
     def learning_cycle(self, iteration):
-        logging.info('==================== {} ===================='.format(iteration))
+        logging.info("==================== {} ====================".format(iteration))
         # Monte Carlo
         spin = random_spin(self._machine.number_spins, self._magnetisation)
-        (Os, mean_O, E, var_E, F) = \
-            monte_carlo(self._machine, self._hamiltonian, spin,
-                             self._monte_carlo_steps)
-        logging.info('E = {}, Var[E] = {}'.format(E, var_E))
+        (Os, mean_O, E, var_E, F) = monte_carlo(
+            self._machine, self._hamiltonian, spin, self._monte_carlo_steps
+        )
+        logging.info("E = {}, Var[E] = {}".format(E, var_E))
         # Calculate the "true" gradients
         if self._use_sr:
             # We also cache δ to use it as a guess the next time we're computing
             # S⁻¹F.
-            self._delta = Covariance(
-                Os, mean_O, self._regulariser(iteration)).solve(F, x0=self._delta)
+            self._delta = Covariance(Os, mean_O, self._regulariser(iteration)).solve(
+                F, x0=self._delta
+            )
             self._machine.set_gradients(self._delta)
-            logging.info('∥F∥₂ = {}, ∥δ∥₂ = {}'
-                         .format(np.linalg.norm(F), np.linalg.norm(self._delta)))
+            logging.info(
+                "∥F∥₂ = {}, ∥δ∥₂ = {}".format(
+                    np.linalg.norm(F), np.linalg.norm(self._delta)
+                )
+            )
         else:
             self._machine.set_gradients(F.real)
-            logging.info('∥F∥₂ = {}, ∥Re[F]∥₂ = {}'
-                         .format(np.linalg.norm(F), np.linalg.norm(F.real)))
+            logging.info(
+                "∥F∥₂ = {}, ∥Re[F]∥₂ = {}".format(
+                    np.linalg.norm(F), np.linalg.norm(F.real)
+                )
+            )
         # Update the variational parameters
         self._optimizer.step()
         self._machine.clear_cache()
 
     def __call__(self):
         if self._model_file is not None:
+
             def save():
                 # NOTE: This is important, because we want to overwrite the
                 # previous weights
                 self._model_file.seek(0)
                 self._model_file.truncate()
                 torch.save(self._machine.state_dict(), self._model_file)
+
         else:
             save = lambda: None
         if self._time_limit is not None:
@@ -760,21 +897,25 @@ def _make_normalised_machine(BaseNet):
             return super().log_wf(x) + self._scale
 
         def forward(self, x):
-            scale = torch.tensor([self._scale.real, self._scale.imag],
-                                 dtype=torch.float32, requires_grad=False)
+            scale = torch.tensor(
+                [self._scale.real, self._scale.imag],
+                dtype=torch.float32,
+                requires_grad=False,
+            )
             return super().forward(x) + scale
 
         def backward(self, x):
-            raise NotImplementedError('NormalisedMachine is not trainable')
+            raise NotImplementedError("NormalisedMachine is not trainable")
 
         def der_log_wf(self, x):
-            raise NotImplementedError('NormalisedMachine is not trainable')
+            raise NotImplementedError("NormalisedMachine is not trainable")
 
         def set_gradients(self, x):
-            raise NotImplementedError('NormalisedMachine is not trainable')
+            raise NotImplementedError("NormalisedMachine is not trainable")
 
         def __isub__(self, x):
-            raise NotImplementedError('NormalisedMachine is immutable')
+            raise NotImplementedError("NormalisedMachine is immutable")
+
     return NormalisedMachine
 
 
@@ -784,7 +925,7 @@ class AverageNet(nn.Module):
         self._number_spins = n
         Machine = _make_normalised_machine(BaseNet)
         for file_name in weight_files:
-            with open(file_name, 'rb') as in_file:
+            with open(file_name, "rb") as in_file:
                 psi = Machine(n)
                 psi.load_state_dict(torch.load(in_file))
                 self._machines.append(psi)
@@ -796,12 +937,20 @@ class AverageNet(nn.Module):
     def normalise_(self, steps, magnetisation=None):
         for psi in self._machines:
             n_runs = 10
-            l2_norms = np.array([
-                compute_l2_norm(psi, random_spin(psi.number_spins,
-                                                 magnetisation), steps)
-                    for _ in range(n_runs)])
+            l2_norms = np.array(
+                [
+                    compute_l2_norm(
+                        psi, random_spin(psi.number_spins, magnetisation), steps
+                    )
+                    for _ in range(n_runs)
+                ]
+            )
             l2_mean = np.mean(l2_norms)
-            logging.info('After {} runs: ||ψ||₂ = {} ± {}'.format(n_runs, l2_mean, np.std(l2_norms)))
+            logging.info(
+                "After {} runs: ||ψ||₂ = {} ± {}".format(
+                    n_runs, l2_mean, np.std(l2_norms)
+                )
+            )
             psi.scale = 1.0 / l2_mean
             psi.clear_cache()
 
@@ -811,13 +960,18 @@ class AverageNet(nn.Module):
 
     def forward(self, x):
         with torch.no_grad():
+
             def wf(psi, x):
                 (a, b) = psi.forward(x)
                 return cmath.exp(complex(a, b))
+
             avg_psi = np.mean(np.array([wf(psi, x) for psi in self._machines]))
             avg_log_psi = cmath.log(avg_psi)
-            x = torch.tensor([avg_log_psi.real, avg_log_psi.imag],
-                             dtype=torch.float32, requires_grad=False)
+            x = torch.tensor(
+                [avg_log_psi.real, avg_log_psi.imag],
+                dtype=torch.float32,
+                requires_grad=False,
+            )
             return x
 
 
@@ -829,41 +983,111 @@ def heisenberg6():
 
 def kagome12():
     # Generated using tipsi, Kagome(2, 2) with periodic boundary conditions.
-    edges = [(0, 1), (0, 2), (0, 4), (0, 8),
-             (1, 2), (1, 3), (1, 11),
-             (2, 6), (2, 10),
-             (3, 4), (3, 5), (3, 11),
-             (4, 5), (4, 8),
-             (5, 7), (5, 9),
-             (6, 7), (6, 8), (6, 10),
-             (7, 8), (7, 9),
-             (9, 10), (9, 11),
-             (10, 11)]
+    edges = [
+        (0, 1),
+        (0, 2),
+        (0, 4),
+        (0, 8),
+        (1, 2),
+        (1, 3),
+        (1, 11),
+        (2, 6),
+        (2, 10),
+        (3, 4),
+        (3, 5),
+        (3, 11),
+        (4, 5),
+        (4, 8),
+        (5, 7),
+        (5, 9),
+        (6, 7),
+        (6, 8),
+        (6, 10),
+        (7, 8),
+        (7, 9),
+        (9, 10),
+        (9, 11),
+        (10, 11),
+    ]
     hamiltonian = Heisenberg(edges)
     return hamiltonian
 
 
 def heisenberg3x3():
-    hamiltonian = Heisenberg([(0, 1), (1, 2), (2, 0),
-                              (3, 4), (4, 5), (5, 3),
-                              (6, 7), (7, 8), (8, 6),
-                              (0, 3), (3, 6), (6, 0),
-                              (1, 4), (4, 7), (7, 1),
-                              (2, 5), (5, 8), (8, 2)])
+    hamiltonian = Heisenberg(
+        [
+            (0, 1),
+            (1, 2),
+            (2, 0),
+            (3, 4),
+            (4, 5),
+            (5, 3),
+            (6, 7),
+            (7, 8),
+            (8, 6),
+            (0, 3),
+            (3, 6),
+            (6, 0),
+            (1, 4),
+            (4, 7),
+            (7, 1),
+            (2, 5),
+            (5, 8),
+            (8, 2),
+        ]
+    )
     return hamiltonian
 
 
 def import_network(nn_file):
     module_name, extension = os.path.splitext(os.path.basename(nn_file))
     module_dir = os.path.dirname(nn_file)
-    if extension != '.py':
+    if extension != ".py":
         raise ValueError(
-            'Could not import the network from {}: not a python source file.')
+            "Could not import the network from {}: not a python source file."
+        )
     # Insert in the beginning
     sys.path.insert(0, module_dir)
     module = importlib.import_module(module_name)
     sys.path.pop(0)
     return module.Net
+
+
+def int_to_spin(spin: int, n: int) -> np.ndarray:
+    return from_bytes(spin.to_bytes((n + 7) // 8, "big"), n)
+
+
+def negative_log_overlap(machine: torch.nn.Module, target_wf: Dict[int, complex]):
+    real_part = 0.0
+    imag_part = 0.0
+    l2_norm = 0.0
+    for spin, coeff in target_wf:
+        z = machine.forward(torch.from_numpy(int_to_spin(spin, machine.number_spins)))
+        temp = torch.exp(z[0])
+        wf_real = temp * torch.cos(z[1])
+        wf_imag = temp * torch.sin(z[1])
+        real_part += wf_real * coeff.real - wf_imag * coeff.imag
+        imag_part += wf_real * coeff.imag + wf_imag * coeff.real
+        l2_norm += temp * temp
+    loss = -0.5 * torch.log((real_part ** 2 + imag_part ** 2) / l2_norm)
+    return loss
+
+
+def load_explicit(stream):
+    psi = {}
+    number_spins = None
+    for line in stream:
+        if line.startswith(b"#"):
+            continue
+        (spin, real, imag) = line.split()
+        if number_spins is None:
+            number_spins = len(spin)
+        else:
+            assert number_spins == len(spin)
+        spin = int(spin, base=2)
+        coeff = complex(float(real), float(imag))
+        psi[spin] = coeff
+    return psi, number_spins
 
 
 @click.group()
@@ -872,30 +1096,162 @@ def cli():
 
 
 @cli.command()
-@click.argument('nn-file',
+@click.argument(
+    "nn-file",
     type=click.Path(exists=True, resolve_path=True, path_type=str),
-    metavar='<arch_file>')
-@click.option('-i', '--in-file',
-    type=click.File(mode='rb'),
+    metavar="<arch_file>",
+)
+@click.option(
+    "--train-file",
+    type=click.File(mode="rb"),
     required=True,
-    help='File containing the Neural Network weights as a PyTorch `state_dict` '
-         'serialised using `torch.save`. It is up to the user to ensure that '
-         'the weights are compatible with the architecture read from '
-         '<arch_file>.')
-@click.option('-o', '--out-file',
-    type=click.File(mode='w'),
+    help="File containing the explicit wave function representation as "
+    "generated by `sample`.",
+)
+@click.option(
+    "-i",
+    "--in-file",
+    type=click.File(mode="rb"),
+    help="File containing the initial Neural Network weights as a PyTorch "
+    "`state_dict` serialised using `torch.save`. It is up to the user to ensure "
+    "that the weights are compatible with the architecture read from <arch_file>.",
+)
+@click.option(
+    "-o",
+    "--out-file",
+    type=click.File(mode="wb"),
+    required=True,
+    help="Where to save the final state to. It will contain a "
+    "PyTorch `state_dict` serialised using `torch.save`.",
+)
+@click.option(
+    "--lr",
+    type=click.FloatRange(min=1.0e-10),
+    default=0.05,
+    show_default=True,
+    help="Learning rate.",
+)
+@click.option(
+    "--epochs",
+    type=click.IntRange(min=0),
+    default=200,
+    show_default=True,
+    help="Number of learning steps to perform.",
+)
+@click.option(
+    "--optimizer",
+    type=str,
+    default="SGD",
+    help="Optimizer to use. Valid values are names of classes in torch.optim "
+    "(i.e. 'SGD', 'Adam', 'Adamax', etc.). NOTE: this is a dirty hack and should "
+    "be improved later.",
+)
+@click.option(
+    "--time",
+    "time_limit",
+    type=click.FloatRange(min=1.0e-10),
+    show_default=True,
+    help="Time interval (in seconds) that specifies how often the model is written "
+    "to the output file. If not specified, the weights are saved after every iteration.",
+)
+def train(nn_file, train_file, out_file, in_file, lr, optimizer, epochs, time_limit):
+    """
+    Supervised learning.
+    """
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
+    Net = import_network(nn_file)
+    target_wf, number_spins = load_explicit(train_file)
+    psi = Net(number_spins)
+    if in_file is not None:
+        logging.info("Reading the initial weights...")
+        psi.load_state_dict(torch.load(in_file))
+
+    magnetisation = 0 if number_spins % 2 == 0 else 1
+    # NOTE(twesterhout): This is a hack :)
+    optimizer = getattr(torch.optim, optimizer)(psi.parameters(), lr=lr)
+
+    # Function to overwrite the neural network weights
+    def save():
+        out_file.seek(0)
+        out_file.truncate()
+        torch.save(psi.state_dict(), out_file)
+
+    def make_extented(wf):
+        # target_wf_extented = copy.deepcopy(target_wf)
+        # todo = len(target_wf)
+        # max_count = 0
+        # while todo > 0 and max_count < 10000:
+        #     spin = int(CompactSpin(random_spin(number_spins, magnetisation)))
+        #     if spin not in target_wf_extented:
+        #         target_wf_extented[spin] = complex(0.0)
+        #         todo -= 1
+        #     max_count += 1
+        return wf
+
+    start = time.time()
+    for i in range(epochs):
+        target_wf_extented = make_extented(target_wf)
+        optimizer.zero_grad()
+        loss = negative_log_overlap(psi, target_wf_extented.items())
+        logging.info("{}: Loss: {}".format(i + 1, loss))
+        loss.backward()
+        optimizer.step()
+        if time_limit is None or time.time() - start > time_limit:
+            save()
+            start = time.time()
+
+    # for i in range(epochs):
+    #     target_wf_extented = target_wf
+
+    #     optimizer.zero_grad()
+    #     loss = negative_log_overlap(psi, target_wf_extented.items())
+    #     logging.info("{}: Loss: {}".format(i + 1, loss))
+    #     loss.backward()
+    #     optimizer.step()
+    #     if i % 20 == 0:
+    #         save()
+
+
+@cli.command()
+@click.argument(
+    "nn-file",
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar="<arch_file>",
+)
+@click.option(
+    "-i",
+    "--in-file",
+    type=click.File(mode="rb"),
+    required=True,
+    help="File containing the Neural Network weights as a PyTorch `state_dict` "
+    "serialised using `torch.save`. It is up to the user to ensure that "
+    "the weights are compatible with the architecture read from "
+    "<arch_file>.",
+)
+@click.option(
+    "-o",
+    "--out-file",
+    type=click.File(mode="w"),
     default=sys.stdout,
     show_default=True,
-    help='Location where to save the sampled state.')
-@click.option('--hamiltonian', 'hamiltonian_file',
-    type=click.File(mode='r'),
+    help="Location where to save the sampled state.",
+)
+@click.option(
+    "--hamiltonian",
+    "hamiltonian_file",
+    type=click.File(mode="r"),
     required=True,
-    help='File containing the Heisenberg Hamiltonian specifications.')
-@click.option('--steps',
+    help="File containing the Heisenberg Hamiltonian specifications.",
+)
+@click.option(
+    "--steps",
     type=click.IntRange(min=1),
     default=2000,
     show_default=True,
-    help='Length of the Markov Chain.')
+    help="Length of the Markov Chain.",
+)
 def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     """
     Runs Monte Carlo on a NQS with given architecture and weights. The result
@@ -908,146 +1264,189 @@ def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     <S₂>\t<Re[ψ(S₂)]>\t<Im[ψ(S₂)]>
     ...
     """
-    logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
-                        level=logging.DEBUG)
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
     Machine = _make_machine(import_network(nn_file))
     H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
-    monte_carlo_steps = ( thermalisation * psi.number_spins
-                        , (thermalisation + steps) * psi.number_spins
-                        , psi.number_spins
-                        )
+    monte_carlo_steps = (
+        thermalisation * psi.number_spins,
+        (thermalisation + steps) * psi.number_spins,
+        psi.number_spins,
+    )
     E, var_E, wave_function = monte_carlo_loop_for_lanczos(
-        psi,
-        H,
-        random_spin(psi.number_spins, magnetisation),
-        monte_carlo_steps
+        psi, H, random_spin(psi.number_spins, magnetisation), monte_carlo_steps
     )
     # For normalisation
-    scale = 1.0 / math.sqrt(sum(map(lambda x: abs(x)**2, wave_function.values())))
-    out_file.write('# E = {} + {}\n'.format(E.real, E.imag))
-    out_file.write('# Var[E] = {} + {}'.format(var_E.real, var_E.imag))
-    fmt = '\n{:0' + str(psi.number_spins) + 'b}\t{}\t{}'
+    scale = 1.0 / math.sqrt(sum(map(lambda x: abs(x) ** 2, wave_function.values())))
+    out_file.write("# E = {} + {}\n".format(E.real, E.imag))
+    out_file.write("# Var[E] = {} + {}".format(var_E.real, var_E.imag))
+    fmt = "\n{:0" + str(psi.number_spins) + "b}\t{}\t{}"
     for (spin, coeff) in wave_function.items():
         out_file.write(fmt.format(int(spin), scale * coeff.real, scale * coeff.imag))
 
+
 @cli.command()
-@click.argument('nn-file',
+@click.argument(
+    "nn-file",
     type=click.Path(exists=True, resolve_path=True, path_type=str),
-    metavar='<arch_file>')
-@click.option('-i', '--in-file',
+    metavar="<arch_file>",
+)
+@click.option(
+    "-i",
+    "--in-file",
     type=click.Path(exists=True, resolve_path=True, path_type=str),
     required=True,
-    help='')
+    help="",
+)
 # @click.option('-o', '--out-file',
 #     type=click.File(mode='w'),
 #     default=sys.stdout,
 #     show_default=True,
 #     help='Location where to save the sampled state.')
-@click.option('--hamiltonian', 'hamiltonian_file',
-    type=click.File(mode='r'),
+@click.option(
+    "--hamiltonian",
+    "hamiltonian_file",
+    type=click.File(mode="r"),
     required=True,
-    help='File containing the Heisenberg Hamiltonian specifications.')
-@click.option('--steps',
+    help="File containing the Heisenberg Hamiltonian specifications.",
+)
+@click.option(
+    "--steps",
     type=click.IntRange(min=1),
     default=2000,
     show_default=True,
-    help='Length of the Markov Chain.')
+    help="Length of the Markov Chain.",
+)
 def sample_average(nn_file, in_file, hamiltonian_file, steps):
-    logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
-                        level=logging.DEBUG)
+    """
+    NOTE: DO NOT USE ME (YET).
+    """
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
     Net = import_network(nn_file)
     # Machine = _make_machine(Net)
     H = read_hamiltonian(hamiltonian_file)
     magnetisation = 0 if H.number_spins % 2 == 0 else 1
     AverageMachine = _make_machine(AverageNet)
-    with open(in_file, 'r') as f:
+    with open(in_file, "r") as f:
         input_files = map(lambda x: x.strip(), f.readlines())
     psi = AverageMachine(Net, H.number_spins, input_files)
     thermalisation = int(0.1 * steps)
-    monte_carlo_steps = ( thermalisation * psi.number_spins
-                        , (thermalisation + steps) * psi.number_spins
-                        , psi.number_spins
-                        )
+    monte_carlo_steps = (
+        thermalisation * psi.number_spins,
+        (thermalisation + steps) * psi.number_spins,
+        psi.number_spins,
+    )
     psi.normalise_(monte_carlo_steps, magnetisation)
 
-    monte_carlo_steps = ( thermalisation * psi.number_spins
-                        , (thermalisation + 50 * steps) * psi.number_spins
-                        , psi.number_spins
-                        )
-    spin_fmt = '{:0' + str(psi.number_spins) + 'b}'
+    monte_carlo_steps = (
+        thermalisation * psi.number_spins,
+        (thermalisation + 50 * steps) * psi.number_spins,
+        psi.number_spins,
+    )
+    spin_fmt = "{:0" + str(psi.number_spins) + "b}"
     for magical_spin in [
-        np.array([ 1,  1, -1, -1, -1,  1, -1, -1,  1,  1,  1, -1], dtype=np.float32),
-        np.array([ 1,  1, -1, -1, -1,  1,  1,  1, -1, -1, -1,  1], dtype=np.float32),
-        np.array([ 1, -1,  1, -1,  1, -1, -1,  1, -1,  1, -1,  1], dtype=np.float32),
-        np.array([ 1,  1, -1, -1,  1,  1,  1, -1, -1,  1, -1, -1], dtype=np.float32),
-        ]:
-        logging.info(('S = ' + spin_fmt).format(int(CompactSpin(magical_spin))))
+        np.array([1, 1, -1, -1, -1, 1, -1, -1, 1, 1, 1, -1], dtype=np.float32),
+        np.array([1, 1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1], dtype=np.float32),
+        np.array([1, -1, 1, -1, 1, -1, -1, 1, -1, 1, -1, 1], dtype=np.float32),
+        np.array([1, 1, -1, -1, 1, 1, 1, -1, -1, 1, -1, -1], dtype=np.float32),
+    ]:
+        logging.info(("S = " + spin_fmt).format(int(CompactSpin(magical_spin))))
         psi.align_(magical_spin)
         E, var_E, _ = monte_carlo_loop_for_lanczos(
-            psi, H, random_spin(psi.number_spins, magnetisation), monte_carlo_steps)
-        logging.info('    E = {} + {}'.format(E.real, E.imag))
-        logging.info('    Var[E] = {} + {}'.format(var_E.real, var_E.imag))
+            psi, H, random_spin(psi.number_spins, magnetisation), monte_carlo_steps
+        )
+        logging.info("    E = {} + {}".format(E.real, E.imag))
+        logging.info("    Var[E] = {} + {}".format(var_E.real, var_E.imag))
 
 
 @cli.command()
-@click.argument('nn-file',
+@click.argument(
+    "nn-file",
     type=click.Path(exists=True, resolve_path=True, path_type=str),
-    metavar='<arch_file>')
-@click.option('-i', '--in-file',
-    type=click.File(mode='rb'),
-    help='File containing the Neural Network weights as a PyTorch `state_dict` '
-         'serialised using `torch.save`. It is up to the user to ensure that '
-         'the weights are compatible with the architecture read from '
-         '<arch_file>.')
-@click.option('-o', '--out-file',
-    type=click.File(mode='wb'),
-    help='Where to save the final state to. It will contain a '
-         'PyTorch `state_dict` serialised using `torch.save`. If no file is '
-         'specified, the result will be discarded.')
-@click.option('--hamiltonian', 'hamiltonian_file',
-    type=click.File(mode='r'),
+    metavar="<arch_file>",
+)
+@click.option(
+    "-i",
+    "--in-file",
+    type=click.File(mode="rb"),
+    help="File containing the Neural Network weights as a PyTorch `state_dict` "
+    "serialised using `torch.save`. It is up to the user to ensure that "
+    "the weights are compatible with the architecture read from "
+    "<arch_file>.",
+)
+@click.option(
+    "-o",
+    "--out-file",
+    type=click.File(mode="wb"),
+    help="Where to save the final state to. It will contain a "
+    "PyTorch `state_dict` serialised using `torch.save`. If no file is "
+    "specified, the result will be discarded.",
+)
+@click.option(
+    "--hamiltonian",
+    "hamiltonian_file",
+    type=click.File(mode="r"),
     required=True,
-    help='File containing the Heisenberg Hamiltonian specifications.')
-@click.option('--use-sr',
+    help="File containing the Heisenberg Hamiltonian specifications.",
+)
+@click.option(
+    "--use-sr",
     type=bool,
     default=True,
     show_default=True,
-    help='Whether to use Stochastic Reconfiguration for optimisation.')
-@click.option('--epochs',
+    help="Whether to use Stochastic Reconfiguration for optimisation.",
+)
+@click.option(
+    "--epochs",
     type=click.IntRange(min=0),
     default=200,
     show_default=True,
-    help='Number of learning steps to perform.')
-@click.option('--lr',
-    type=click.FloatRange(min=1.0E-10),
+    help="Number of learning steps to perform.",
+)
+@click.option(
+    "--lr",
+    type=click.FloatRange(min=1.0e-10),
     default=0.05,
-    show_default=True, help='Learning rate.')
-@click.option('--time', 'time_limit',
-    type=click.FloatRange(min=1.0E-10),
     show_default=True,
-    help='Time interval that specifies how often the model is written to the '
-         'output file. If not specified, the weights are saved only once -- '
-         'after all the iterations.')
-@click.option('--steps',
+    help="Learning rate.",
+)
+@click.option(
+    "--time",
+    "time_limit",
+    type=click.FloatRange(min=1.0e-10),
+    show_default=True,
+    help="Time interval that specifies how often the model is written to the "
+    "output file. If not specified, the weights are saved only once -- "
+    "after all the iterations.",
+)
+@click.option(
+    "--steps",
     type=click.IntRange(min=1),
     default=2000,
-    show_default=True, help='Length of the Markov Chain.')
-def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
-             steps, time_limit):
+    show_default=True,
+    help="Length of the Markov Chain.",
+)
+def optimise(
+    nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr, steps, time_limit
+):
     """
     Variational Monte Carlo optimising E.
     """
-    logging.basicConfig(format='[%(asctime)s] [%(levelname)s] %(message)s',
-                        level=logging.DEBUG)
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
     Machine = _make_machine(import_network(nn_file))
     H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     if in_file is not None:
-        logging.info('Reading the weights...')
+        logging.info("Reading the weights...")
         psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
@@ -1056,20 +1455,27 @@ def optimise(nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr,
         H,
         magnetisation=magnetisation,
         epochs=epochs,
-        monte_carlo_steps=(thermalisation * psi.number_spins,
-                           (thermalisation + steps) * psi.number_spins,
-                           psi.number_spins),
+        monte_carlo_steps=(
+            thermalisation * psi.number_spins,
+            (thermalisation + steps) * psi.number_spins,
+            psi.number_spins,
+        ),
         learning_rate=lr,
         use_sr=use_sr,
-        regulariser=lambda i: 100.0 * 0.9**i + 0.01,
+        regulariser=lambda i: 100.0 * 0.9 ** i + 0.01,
         model_file=out_file,
-        time_limit=time_limit
+        time_limit=time_limit,
     )
     opt()
-    print(compute_l2_norm(psi, random_spin(psi.number_spins, magnetisation),
-                         (1000, 1000 + 10000 * psi.number_spins, psi.number_spins)))
+    print(
+        compute_l2_norm(
+            psi,
+            random_spin(psi.number_spins, magnetisation),
+            (1000, 1000 + 10000 * psi.number_spins, psi.number_spins),
+        )
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()
     # cProfile.run('main()')
