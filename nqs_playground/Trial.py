@@ -452,21 +452,63 @@ class Heisenberg(object):
             )
         self._number_spins = largest + 1
 
+
     def __call__(self, state: MonteCarloState) -> np.complex64:
         """
         Calculates local energy in the given state.
         """
         spin = state.spin
         energy = 0
-        for (i, j) in self._graph:
+        for (i, j, J, offdiagsign) in self._graph:
             if spin[i] == spin[j]:
-                energy += 1
+                energy += J
             else:
                 assert spin[i] == -spin[j]
                 x = state.log_quot_wf([i, j])
                 if x.real > 5.5:
                     raise WorthlessConfiguration([i, j])
-                energy += -1 + 2 * cmath.exp(x)
+                energy += -J + 2 * J * offdiagsign * cmath.exp(x)
+        return np.complex64(energy)
+
+
+    def energy2(self, state: MonteCarloState) -> np.complex64:
+        energy = 0
+        spin = state.spin
+        for (i, j, J1, offdiagsign1) in self._graph:
+            for (k, l, J2, offdiagsign2) in self._graph:
+                if spin[i] == spin[j] and spin[k] == spin[l]: # EASY
+                    energy += J1 * J2
+                elif spin[i] != spin[j] and spin[k] == spin[l]: # EASY
+                    x = state.log_quot_wf([i, j])
+                    energy += J2 * (-J1 + 2 * J1 * offdiagsign1 * cmath.exp(x))
+                else:
+                    if spin[i] == spin[j] and i not in [k, l] and j not in [k, l]: # EASY
+                        x = state.log_quot_wf([k, l])
+                        energy += J1 * (-J2 + 2 * J2 * offdiagsign2 * cmath.exp(x))
+                    elif spin[i] != spin[j] and i not in [k, l] and j not in [k, l]: # EASY
+                        x_ij = state.log_quot_wf([i, j])
+                        x_kl = state.log_quot_wf([k, l])
+                        x_ijkl = state.log_quot_wf([i, j, k, l])
+                        energy += J1 * J2 - J1 * 2 * J2 * offdiagsign2 * cmath.exp(x_kl) - J2 * 2 * J1 * offdiagsign1 * cmath.exp(x_ij) + 4 * J1 * J2 * offdiagsign1 * offdiagsign2 * cmath.exp(x_ijkl)
+                    elif i in [k, l] and j in [k, l]: # EASY
+                        x = state.log_quot_wf([i, j])
+                        energy += J1 * J2 - J1 * 2 * J2 * offdiagsign2 * cmath.exp(x) - J2 * 2 * J1 * offdiagsign1 * cmath.exp(x) + 4 * J1 * J2 * offdiagsign1 * offdiagsign2
+                    else:
+                        ind_2 = k
+                        cross = l
+                        if l not in [i, j]:
+                            ind_2 = l
+                            cross = k
+                        ind_1 = i
+                        if i in [k, l]:
+                            ind_1 = j
+                        x_ind1_cross = state.log_quot_wf([ind_1, cross])
+                        x_ind2_cross = state.log_quot_wf([ind_2, cross])
+                        x_ind1_ind2 = state.log_quot_wf([ind_1, ind_2])
+                        if spin[ind_1] == spin[ind_2]:
+                            energy += J1 * J2 + 2 * J1 * J2 * offdiagsign2 * cmath.exp(x_ind2_cross) - 2 * J1 * J2 * offdiagsign1 * cmath.exp(x_ind1_cross)
+                        else:
+                            energy += -J1 * J2 - 2 * J1 * J2 * offdiagsign2 * cmath.exp(x_ind2_cross) + 4 * J1 * J2 * offdiagsign1 * offdiagsign2 * cmath.exp(x_ind1_ind2)
         return np.complex64(energy)
 
     def reachable_from(self, spin):
@@ -510,30 +552,49 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
 
     :return: (all gradients, mean gradient, mean local energy, force)
     """
-    derivatives = []
+	derivatives = []
     energies = []
+    energies_final = []
     energies_cache = {}
+    energies_cache_final = {}
+    energies2_cache = {}
+    energies2 = []
     chain = MetropolisMC(machine, initial_spin)
-    for state in islice(chain, *steps):
+
+	for state in islice(chain, *steps):
         derivatives.append(state.der_log_wf())
         spin = CompactSpin(state.spin)
         e_loc = energies_cache.get(spin)
+        e_loc_final = energies_cache_final.get(spin)
+        e2_loc = energies2_cache.get(spin)
         if e_loc is None:
             e_loc = hamiltonian(state)
             energies_cache[spin] = e_loc
+        if e_loc_final is None:
+            e_loc_final = final_hamiltonian(state)
+            energies_cache_final[spin] = e_loc_final
+        if e2_loc is None:
+            e2_loc = hamiltonian.energy2(state)
+            energies2_cache[spin] = e2_loc
         energies.append(e_loc)
+        energies2.append(e2_loc)
+        energies_final.append(e_loc_final)
     derivatives = np.array(derivatives, dtype=np.complex64)
     energies = np.array(energies, dtype=np.complex64)
+    energies2 = np.array(energies2, dtype=np.complex64)
     mean_O = np.mean(derivatives, axis=0)
     mean_E = np.mean(energies)
     std_E = np.std(energies)
     force = np.mean(energies * derivatives.conj().transpose(), axis=1)
     force -= mean_O.conj() * mean_E
-    logging.info("Subspace dimension: {}".format(len(energies_cache)))
-    logging.info(
-        "Acceptance rate: {:.2f}%".format(chain._accepted / chain._steps * 100)
-    )
-    return derivatives, mean_O, mean_E, std_E ** 2, force
+
+    force_var = np.mean(energies2 * derivatives.conj().transpose(), axis=1)
+    force_var -= mean_O.conj() * np.mean(energies2)
+
+    logging.info('Subspace dimension: {}'.format(len(energies_cache)))
+    logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
+    logging.info('E_final: {}'.format(np.mean(np.array(energies_final, dtype = np.complex64))))
+    return derivatives, mean_O, mean_E, std_E**2, force + 1e-2 * force_var
 
 
 def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
@@ -978,6 +1039,34 @@ class AverageNet(nn.Module):
 def heisenberg6():
     hamiltonian = Heisenberg([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
     machine = Machine(6)
+    return hamiltonian
+
+
+def J1J2_heisenberg(nx, ny, J1, J2, with_transform):
+    sign = +1.0
+    if with_transform:
+        sign = -1.0
+    edges = []
+    for x in range(nx):
+        for y in range(ny):
+            edges.append((ny * y + x, ny * ((y + 1) % ny) + x, J1, sign))  # source | target | strength | off-diagonal sign
+            edges.append((ny * y + x, ny * y + ((x + 1) % nx), J1, sign))
+            edges.append((ny * y + x, ny * ((y + 1) % ny) + ((x + 1) % nx), J2, +1.0))
+            edges.append((ny * y + x, ny * ((y - 1) % ny) + ((x + 1) % nx), J2, +1.0))
+    hamiltonian = Heisenberg(edges)
+    # machine = Machine(nx * ny)
+    return hamiltonian
+
+
+def J1J2_kagome12(J1, J2, with_transform):
+    sign = +1.0
+    if with_transform:
+        sign = -1.0
+    edges = [(0, 1, J1, sign), (0, 4, J1, sign), (1, 4, J2, +1), (1, 2, J1, sign), (2, 3, J1, sign), (2, 5, J1, sign), (3, 5, J2, +1),
+             (4, 6, J1, sign), (0, 3, J1, sign), (0, 10, J1, sign), (6, 10, J1, sign), (6, 7, J1, sign), (7, 10, J2, +1), (7, 8, J1, sign),
+             (5, 8, J1, sign), (6, 9, J1, sign), (2, 11, J1, sign), (8, 9, J1, sign), (8, 11, J1, sign), (9, 11, J2, +1), (5, 7, J2, +1),
+             (3, 10, J2, +1), (2, 11, J2, +1), (4, 9, J2, +1)]
+    hamiltonian = Heisenberg(edges)
     return hamiltonian
 
 
