@@ -546,7 +546,7 @@ def read_hamiltonian(in_file):
     return _load_hamiltonian(in_file)
 
 
-def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
+def monte_carlo_loop(machine, hamiltonian, initial_spin, steps, var_weight):
     """
     Runs the Monte-Carlo simulation.
 
@@ -594,7 +594,7 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     logging.info('Subspace dimension: {}'.format(len(energies_cache)))
     logging.info('Acceptance rate: {:.2f}%'.format(chain._accepted / chain._steps * 100))
     logging.info('E_final: {}'.format(np.mean(np.array(energies_final, dtype = np.complex64))))
-    return derivatives, mean_O, mean_E, std_E**2, force + 1e-2 * force_var
+    return derivatives, mean_O, mean_E, std_E**2, (1.0 - var_weight) * force + var_weight * force_var
 
 
 def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
@@ -640,7 +640,7 @@ def compute_l2_norm(machine, initial_spin, steps):
     return float(l2_norm)
 
 
-def monte_carlo(machine, hamiltonian, initial_spin, steps):
+def monte_carlo(machine, hamiltonian, initial_spin, steps, var_weight=0.0):
     logging.info("Running Monte-Carlo...")
     start = time.time()
     restarts = 5
@@ -648,7 +648,7 @@ def monte_carlo(machine, hamiltonian, initial_spin, steps):
     answer = None
     while answer is None:
         try:
-            answer = monte_carlo_loop(machine, hamiltonian, spin, steps)
+            answer = monte_carlo_loop(machine, hamiltonian, spin, steps, var_weight)
         except WorthlessConfiguration as err:
             if restarts > 0:
                 logging.warning("Restarting the Monte-Carlo simulation...")
@@ -853,6 +853,7 @@ class Optimiser(object):
         regulariser,
         model_file,
         time_limit,
+        var_weight,
     ):
         self._machine = machine
         self._hamiltonian = hamiltonian
@@ -863,6 +864,7 @@ class Optimiser(object):
         self._use_sr = use_sr
         self._model_file = model_file
         self._time_limit = time_limit
+        self._var_weight = var_weight
         if use_sr:
             self._regulariser = regulariser
             self._delta = None
@@ -879,7 +881,7 @@ class Optimiser(object):
         # Monte Carlo
         spin = random_spin(self._machine.number_spins, self._magnetisation)
         (Os, mean_O, E, var_E, F) = monte_carlo(
-            self._machine, self._hamiltonian, spin, self._monte_carlo_steps
+            self._machine, self._hamiltonian, spin, self._monte_carlo_steps, self._var_weight
         )
         logging.info("E = {}, Var[E] = {}".format(E, var_E))
         # Calculate the "true" gradients
@@ -1507,6 +1509,13 @@ def sample_average(nn_file, in_file, hamiltonian_file, steps):
     help="Learning rate.",
 )
 @click.option(
+    "--var_weight",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=1e-2,
+    show_default=True,
+    help="Strength of the vatiance gradient contribution to force.",
+)
+@click.option(
     "--time",
     "time_limit",
     type=click.FloatRange(min=1.0e-10),
@@ -1523,7 +1532,7 @@ def sample_average(nn_file, in_file, hamiltonian_file, steps):
     help="Length of the Markov Chain.",
 )
 def optimise(
-    nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr, steps, time_limit
+    nn_file, in_file, out_file, hamiltonian_file, use_sr, epochs, lr, steps, time_limit, var_weight
 ):
     """
     Variational Monte Carlo optimising E.
@@ -1554,6 +1563,7 @@ def optimise(
         regulariser=lambda i: 100.0 * 0.9 ** i + 0.01,
         model_file=out_file,
         time_limit=time_limit,
+        var_weight=var_weight,
     )
     opt()
     print(
