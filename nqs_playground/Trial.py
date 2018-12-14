@@ -924,7 +924,60 @@ def _make_normalised_machine(BaseNet):
 
     return NormalisedMachine
 
+class AverageNet(nn.Module):
+    def __init__(self, BaseNet, n, weight_files):
+        self._machines = []
+        self._number_spins = n
+        Machine = _make_normalised_machine(BaseNet)
+        for file_name in weight_files:
+            with open(file_name, "rb") as in_file:
+                psi = Machine(n)
+                psi.load_state_dict(torch.load(in_file))
+                self._machines.append(psi)
 
+    @property
+    def number_spins(self):
+        return self._number_spins
+
+    def normalise_(self, steps, magnetisation=None):
+        for psi in self._machines:
+            n_runs = 10
+            l2_norms = np.array(
+                [
+                    compute_l2_norm(
+                        psi, random_spin(psi.number_spins, magnetisation), steps
+                    )
+                    for _ in range(n_runs)
+                ]
+            )
+            l2_mean = np.mean(l2_norms)
+            logging.info(
+                "After {} runs: ||ψ||₂ = {} ± {}".format(
+                    n_runs, l2_mean, np.std(l2_norms)
+                )
+            )
+            psi.scale = 1.0 / l2_mean
+            psi.clear_cache()
+
+    def align_(self, spin):
+        for psi in self._machines:
+            psi.phase = -psi.log_wf(spin).imag
+
+    def forward(self, x):
+        with torch.no_grad():
+
+            def wf(psi, x):
+                (a, b) = psi.forward(x)
+                return cmath.exp(complex(a, b))
+
+            avg_psi = np.mean(np.array([wf(psi, x) for psi in self._machines]))
+            avg_log_psi = cmath.log(avg_psi)
+            x = torch.tensor(
+                [avg_log_psi.real, avg_log_psi.imag],
+                dtype=torch.float32,
+                requires_grad=False,
+            )
+            return x
 
 class WeightedNet(nn.Module):
     def __init__(self, machines, n):
