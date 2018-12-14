@@ -34,6 +34,7 @@
 
 import cmath
 import copy
+from copy import deepcopy
 import cProfile
 import importlib
 from itertools import islice
@@ -46,6 +47,7 @@ import time
 from typing import Dict, List, Tuple, Optional
 
 import click
+import json
 import mpmath  # Just to be safe: for accurate computation of L2 norms
 from numba import jit, jitclass, uint8, int64, float32
 from numba.types import Bytes
@@ -220,11 +222,14 @@ def _make_machine(BaseNet):
                 result = self.forward(torch.from_numpy(x))
                 # Computes ∇Re[log(Ψ(x))]
                 self.zero_grad()
+                #print(result)
                 result.backward(
                     torch.tensor([1, 0], dtype=torch.float32), retain_graph=True
                 )
                 # TODO(twesterhout): This is ugly and error-prone.
                 i = 0
+                #for p in self.parameters():
+                #    print(p, p.grad, p.name)
                 for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
                     out.real[i : i + p.size] = p
                     i += p.size
@@ -256,6 +261,7 @@ def _make_machine(BaseNet):
 
             :param np.ndarray x: New value for ∇W. Must be a numpy array of
             ``float32`` of length ``self.size``.
+
             """
             with torch.no_grad():
                 gradients = torch.from_numpy(x)
@@ -919,17 +925,23 @@ def _make_normalised_machine(BaseNet):
     return NormalisedMachine
 
 
-class AverageNet(nn.Module):
-    def __init__(self, BaseNet, n, weight_files):
-        self._machines = []
-        self._number_spins = n
-        Machine = _make_normalised_machine(BaseNet)
-        for file_name in weight_files:
-            with open(file_name, "rb") as in_file:
-                psi = Machine(n)
-                psi.load_state_dict(torch.load(in_file))
-                self._machines.append(psi)
 
+class WeightedNet(nn.Module):
+    def __init__(self, machines, n):
+        super().__init__()
+        self._machines = machines
+        self._number_spins = n
+        
+        self._dense_re = nn.Linear(len(machines), 1, bias=False)
+        self._dense_im = nn.Linear(len(machines), 1, bias=False)
+        nn.init.normal_(self._dense_re.weight, mean=0, std=1e-2)
+        nn.init.normal_(self._dense_im.weight, mean=0, std=1e-2)
+        
+        for machine in self._machines:
+            for param in machine.parameters():
+                param.requires_grad = False
+            #for param in machine.parameters():
+            #    print(param)
     @property
     def number_spins(self):
         return self._number_spins
@@ -958,21 +970,32 @@ class AverageNet(nn.Module):
         for psi in self._machines:
             psi.phase = -psi.log_wf(spin).imag
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-
             def wf(psi, x):
                 (a, b) = psi.forward(x)
                 return cmath.exp(complex(a, b))
-
-            avg_psi = np.mean(np.array([wf(psi, x) for psi in self._machines]))
-            avg_log_psi = cmath.log(avg_psi)
-            x = torch.tensor(
-                [avg_log_psi.real, avg_log_psi.imag],
-                dtype=torch.float32,
-                requires_grad=False,
-            )
-            return x
+        
+            ampls = np.array([wf(psi, x) for psi in self._machines])
+            # print(ampls)
+            psis_re = torch.from_numpy(np.array(ampls.real, dtype=np.float32))
+            psis_im = torch.from_numpy(np.array(ampls.imag, dtype=np.float32))
+        #print(psis_im, psis_re)
+        #psis_re = torch.ones(10)
+        #psis_im = torch.ones(10)
+        psi_re = self._dense_re(psis_re) - self._dense_im(psis_im)
+        psi_im = self._dense_re(psis_im) + self._dense_im(psis_re)
+        #print(psi_re, psi_im)
+        log_psi_real = torch.log(torch.sqrt(psi_re * psi_re + psi_im * psi_im))
+        log_psi_imag = torch.atan2(psi_im, psi_re)
+        # log_psi = cmath.log(complex(psi_re, psi_im))
+      
+        #z = torch.tensor(
+        #    [self._dense_re(x) - self._dense_im(x), self._dense_re(x) + self._dense_im(x)],#log_psi_real, log_psi_imag],
+        #    dtype=torch.float32,
+        #    requires_grad=True,
+        #)
+        return torch.cat((log_psi_real, log_psi_imag), dim=-1)
 
 
 def heisenberg6():
@@ -1442,12 +1465,14 @@ def optimise(
     logging.basicConfig(
         format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
     )
-    Machine = _make_machine(import_network(nn_file))
+    #Machine = _make_machine(import_network(nn_file))
     H = read_hamiltonian(hamiltonian_file)
+    #psi = Machine(H.number_spins)
+    Machine = _make_machine(WeightedNet)
     psi = Machine(H.number_spins)
-    if in_file is not None:
-        logging.info("Reading the weights...")
-        psi.load_state_dict(torch.load(in_file))
+    #if in_file is not None:
+    #    logging.info("Reading the weights...")
+    #    psi.load_state_dict(torch.load(in_file))
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
     opt = Optimiser(
@@ -1474,6 +1499,123 @@ def optimise(
             (1000, 1000 + 10000 * psi.number_spins, psi.number_spins),
         )
     )
+
+
+@cli.command()
+@click.argument(
+    "nn-file",
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar="<arch_file>",
+)
+@click.option(
+    "-o",
+    "--out-file",
+    type=click.File(mode="wb"),
+    help="Where to save the final state to. It will contain a "
+    "PyTorch `state_dict` serialised using `torch.save`. If no file is "
+    "specified, the result will be discarded.",
+)
+@click.option(
+    "--hamiltonian",
+    "hamiltonian_file",
+    type=click.File(mode="r"),
+    required=True,
+    help="File containing the Heisenberg Hamiltonian specifications.",
+)
+@click.option(
+    "--use-sr",
+    type=bool,
+    default=True,
+    show_default=True,
+    help="Whether to use Stochastic Reconfiguration for optimisation.",
+)
+@click.option(
+    "--epochs",
+    type=click.IntRange(min=0),
+    default=200,
+    show_default=True,
+    help="Number of learning steps to perform.",
+)
+@click.option(
+    "--lr",
+    type=click.FloatRange(min=1.0e-10),
+    default=0.05,
+    show_default=True,
+    help="Learning rate.",
+)
+@click.option(
+    "--time",
+    "time_limit",
+    type=click.FloatRange(min=1.0e-10),
+    show_default=True,
+    help="Time interval that specifies how often the model is written to the "
+    "output file. If not specified, the weights are saved only once -- "
+    "after all the iterations.",
+)
+@click.option(
+    "--steps",
+    type=click.IntRange(min=1),
+    default=2000,
+    show_default=True,
+    help="Length of the Markov Chain.",
+)
+def optimise_meta(
+    nn_file, out_file, hamiltonian_file, use_sr, epochs, lr, steps, time_limit
+):
+    """
+    Variational Monte Carlo optimising E using meta-model of NN.
+    """
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
+    H = read_hamiltonian(hamiltonian_file)
+    thermalisation = int(0.1 * steps)
+    monte_carlo_steps = (
+        thermalisation * H.number_spins,
+        (thermalisation + steps) * H.number_spins,
+        H.number_spins,
+    )
+    magnetisation = 0 if H.number_spins % 2 == 0 else 1
+
+    machines = []
+    for line in open(nn_file, 'r'):
+        print(line.split(), line)
+        path_to_model, weights_path = line.split()
+        Net = import_network(path_to_model)
+        Machine = _make_normalised_machine(Net)
+        psi = Machine(H.number_spins)
+        psi.load_state_dict(torch.load(open(weights_path, "rb")))
+        machines.append(deepcopy(psi))
+
+    WeightedMachine = _make_machine(WeightedNet)
+    psi = WeightedMachine(machines, H.number_spins)
+    # psi.normalise_(monte_carlo_steps, magnetisation)
+ 
+    opt = Optimiser(
+        psi,
+        H,
+        magnetisation=magnetisation,
+        epochs=epochs,
+        monte_carlo_steps=(
+            thermalisation * psi.number_spins,
+            (thermalisation + steps) * psi.number_spins,
+            psi.number_spins,
+        ),
+        learning_rate=lr,
+        use_sr=use_sr,
+        regulariser=lambda i: 100.0 * 0.9 ** i + 0.01,
+        model_file=out_file,
+        time_limit=time_limit,
+    )
+    opt()
+    print(
+        compute_l2_norm(
+            psi,
+            random_spin(psi.number_spins, magnetisation),
+            (1000, 1000 + 10000 * psi.number_spins, psi.number_spins),
+        )
+    )
+
 
 
 if __name__ == "__main__":
