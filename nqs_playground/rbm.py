@@ -53,7 +53,7 @@ class Net(torch.nn.Module):
         # Extra factor 2 comes from the fact that a complex number is
         # equivalent to two real numbers.
         number_hidden = round(2 * alpha * n)
-        if n % 2 != 0:
+        if number_hidden % 2 != 0:
             raise ValueError(
                 "Invalid α: number of hidden spins must be even, but got {}".format(
                     number_hidden
