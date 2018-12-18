@@ -1642,7 +1642,7 @@ def optimise_meta(
 
     WeightedMachine = _make_machine(WeightedNet)
     psi = WeightedMachine(machines, H.number_spins)
-    # psi.normalise_(monte_carlo_steps, magnetisation)
+    psi.normalise_(monte_carlo_steps, magnetisation)
  
     opt = Optimiser(
         psi,
