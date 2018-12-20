@@ -48,7 +48,7 @@ class Net(torch.nn.Module):
         self._number_spins = n
 
         # NOTE: Feel free to tune alpha for your needs
-        alpha = 2.5
+        alpha = 2
 
         # Extra factor 2 comes from the fact that a complex number is
         # equivalent to two real numbers.
