@@ -21,6 +21,7 @@ setup(name='nqs_playground',
           'scipy',
           'torch',
           'numba',
-          'click'
+          'click',
+          'mpmath',
       ],
       zip_safe=False)
