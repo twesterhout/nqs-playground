@@ -1856,6 +1856,8 @@ def analyse(nn_file, in_file, out_file, n_spins, exact):
     Machine = _make_machine(import_network(nn_file))
     if exact is not None:
         exact_psi, n_spins = load_explicit(exact)
+    else:
+        exact_psi = None
     if n_spins is None:
         click.echo("Please, specify either `--exact` or `--spins`.")
         sys.exit(1)
