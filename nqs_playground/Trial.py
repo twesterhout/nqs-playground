@@ -47,8 +47,9 @@ from typing import Dict, List, Tuple, Optional
 
 import click
 import mpmath  # Just to be safe: for accurate computation of L2 norms
-from numba import jit, jitclass, uint8, int64, float32
+from numba import jit, jitclass, uint8, int64, uint64, float32
 from numba.types import Bytes
+import numba.extending
 import numpy as np
 import scipy
 from scipy.sparse.linalg import lgmres, LinearOperator
@@ -56,65 +57,466 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# TODO(twesterhout): This function is left as a backup only is should be removed.
+# @jit(uint8[:](float32[:]), nopython=True)
+# def to_bytes(spin: np.ndarray) -> np.ndarray:
+#     """
+#     Converts a spin to a bit array. It is assumed that a spin-up corresponds to
+#     1.0.
+#
+#     .. warning::
+#
+#        This function is deprecated and will be removed soon.
+#     """
+#     chunks, rest = divmod(spin.size, 8)
+#     b = np.empty(chunks + int(rest > 0), dtype=np.uint8)
+#     if rest != 0:
+#         b[0] = spin[0] == 1.0
+#         for i in range(1, rest):
+#             b[0] = (b[0] << 1) | (spin[i] == 1.0)
+#     for i in range(chunks):
+#         j = 8 * i + rest
+#         b[int(rest > 0) + i] = (
+#             ((spin[j + 0] == 1.0) << 7)
+#             | ((spin[j + 1] == 1.0) << 6)
+#             | ((spin[j + 2] == 1.0) << 5)
+#             | ((spin[j + 3] == 1.0) << 4)
+#             | ((spin[j + 4] == 1.0) << 3)
+#             | ((spin[j + 5] == 1.0) << 2)
+#             | ((spin[j + 6] == 1.0) << 1)
+#             | ((spin[j + 7] == 1.0) << 0)
+#         )
+#     return b
 
-@jit(uint8[:](float32[:]), nopython=True)
-def to_bytes(spin: np.ndarray) -> np.ndarray:
+
+# TODO(twesterhout): This function is left as a backup only and should be remvoed.
+# @jit(float32[:](Bytes(uint8, 1, "C"), int64), nopython=True)
+# def from_bytes(b: bytes, n: int) -> np.ndarray:
+#     """
+#     .. warning::
+#
+#        This function is deprecated and will be removed soon.
+#     """
+#     chunks, rest = divmod(n, 8)
+#     spin = np.empty(n, dtype=np.float32)
+#     get = lambda _b, i: -1.0 + 2.0 * int((_b >> (7 - i)) & 0x01)
+#     if rest != 0:
+#         offset = 8 - rest
+#         for i in range(rest):
+#             spin[i] = get(b[0], offset + i)
+#     for i in range(chunks):
+#         for j in range(8):
+#             spin[rest + 8 * i + j] = get(b[int(rest != 0) + i], j)
+#     return spin
+
+
+@jit(uint64(uint64), nopython=True)
+def _hash_uint64(x: int) -> int:
     """
-    Converts a spin to a bit array. It is assumed that a spin-up corresponds to
-    1.0.
+    Hashes an integer.
+
+    .. note::
+
+       The algorithm is taken from https://stackoverflow.com/a/12996028.
     """
-    chunks, rest = divmod(spin.size, 8)
-    b = np.empty(chunks + int(rest > 0), dtype=np.uint8)
-    if rest != 0:
-        b[0] = spin[0] == 1.0
-        for i in range(1, rest):
-            b[0] = (b[0] << 1) | (spin[i] == 1.0)
-    for i in range(chunks):
-        j = 8 * i + rest
-        b[int(rest > 0) + i] = (
-            ((spin[j + 0] == 1.0) << 7)
-            | ((spin[j + 1] == 1.0) << 6)
-            | ((spin[j + 2] == 1.0) << 5)
-            | ((spin[j + 3] == 1.0) << 4)
-            | ((spin[j + 4] == 1.0) << 3)
-            | ((spin[j + 5] == 1.0) << 2)
-            | ((spin[j + 6] == 1.0) << 1)
-            | ((spin[j + 7] == 1.0) << 0)
-        )
-    return b
+    x = (x ^ (x >> 30)) * uint64(0xBF58476D1CE4E5B9)
+    x = (x ^ (x >> 27)) * uint64(0x94D049BB133111EB)
+    x = x ^ (x >> 31)
+    return x
 
 
-@jit(float32[:](Bytes(uint8, 1, "C"), int64), nopython=True)
-def from_bytes(b: bytes, n: int) -> np.ndarray:
-    chunks, rest = divmod(n, 8)
-    spin = np.empty(n, dtype=np.float32)
-    get = lambda _b, i: -1.0 + 2.0 * int((_b >> (7 - i)) & 0x01)
-    if rest != 0:
-        offset = 8 - rest
+@jitclass([("_d0", uint64), ("_d1", uint64), ("_d2", uint64), ("_size", int64)])
+class _CompactSpin(object):
+    """
+    Compact representation of a spin configuration.
+
+    Spin quantum numbers are represented by bits:
+
+      * unset (``0``) means *spin down* and
+      * set (``1``) means *spin up*.
+
+    Currently, maximum supported size is 192.
+    """
+
+    def __init__(self, d0: uint64, d1: uint64, d2: uint64, n: uint64):
+        """
+        .. warning::
+
+           **Do not use this function unless you know what you're doing!**
+
+        ``_d0``, ``_d1``, and ``_d2`` form a bitarray of at most 192 bits.
+        """
+        assert n > 0
+        self._d0 = d0
+        self._d1 = d1
+        self._d2 = d2
+        self._size = n
+
+    @property
+    def size(self) -> uint64:
+        """
+        Returns the number of spins.
+        """
+        return self._size
+
+    @property
+    def hash(self) -> uint64:
+        """
+        Computes the hash of the spin configuration.
+
+        .. note::
+
+           The algorithm is taken from ``boost::hash_combine``.
+        """
+        seed = _hash_uint64(self._d0)
+        seed ^= _hash_uint64(self._d1) + uint64(0x9E3779B9) + (seed << 6) + (seed >> 2)
+        seed ^= _hash_uint64(self._d2) + uint64(0x9E3779B9) + (seed << 6) + (seed >> 2)
+        return seed
+
+    def as_int(self):
+        """
+        Returns integer representation of the spin configuration.
+
+        .. warning::
+
+           Only spin configurations shorted than 64 support this function.
+        """
+        if self._size > 63:
+            raise OverflowError(
+                "Spin configuration is too long to be represented by an int"
+            )
+        return self._d2
+
+    def equal_to(self, other) -> bool:
+        """
+        :return: ``self == other``
+        """
+        assert self._size == other._size
+        return self._d0 == other._d0 and self._d1 == other._d1 and self._d2 == other._d2
+
+    def less_than(self, other) -> bool:
+        """
+        :return: ``self < other``
+        """
+        assert self._size == other._size
+        if self._d0 < other._d0:
+            return True
+        elif self._d0 > other._d0:
+            return False
+        elif self._d1 < other._d1:
+            return True
+        elif self._d1 > other._d1:
+            return False
+        elif self._d2 < other._d2:
+            return True
+        else:
+            return False
+
+    def less_or_equal_to(self, other) -> bool:
+        """
+        :return: ``self <= other``
+        """
+        assert self._size == other._size
+        if self._d0 < other._d0:
+            return True
+        elif self._d0 > other._d0:
+            return False
+        elif self._d1 < other._d1:
+            return True
+        elif self._d1 > other._d1:
+            return False
+        elif self._d2 <= other._d2:
+            return True
+        else:
+            return False
+
+    def get(self, i):
+        """
+        Returns the spin at index ``i``.
+        """
+        i = self._size - 1 - i
+        chunk = i // 64
+        if chunk == 0:
+            return (self._d2 >> i) & 0x01
+        elif chunk == 1:
+            return (self._d1 >> (i - 64)) & 0x01
+        else:
+            assert chunk == 2
+            return (self._d0 >> (i - 128)) & 0x01
+
+    def as_str(self) -> np.ndarray:
+        """
+        Returns the string representation of the spin configuration.
+
+        .. warning::
+
+           This function is quite slow. Do not use it in performance-critical
+           parts.
+        """
+        code_of_zero = 48
+        code_of_one = 49
+        s = np.empty(self._size, dtype=np.uint8)
+        for i in range(self._size):
+            s[i] = code_of_one if self.get(i) else code_of_zero
+        return s
+
+
+@jit(numba.types.uint32(numba.types.uint32), nopython=True)
+def _popcount_32(v: int) -> int:
+    v = v - ((v >> 1) & 0x55555555)
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333)
+    return (((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) & 0xFFFFFFFF) >> 24
+
+
+@jit(uint64(uint64), nopython=True)
+def _popcount(x: int) -> int:
+    return _popcount_32(x & uint64(0x00000000FFFFFFFF)) + _popcount_32(x >> 32)
+
+
+@jit(
+    locals={
+        "chunks": uint64,
+        "rest": uint64,
+        "d0": uint64,
+        "d1": uint64,
+        "d2": uint64,
+        "i": uint64,
+    }
+)
+def _array2spin(x: np.ndarray) -> _CompactSpin:
+    """
+    Given a spin configuration as a numpy arrray, returns the compact
+    representation of it.
+    """
+    chunks = x.size // 64
+    rest = x.size % 64
+    d0 = 0
+    d1 = 0
+    d2 = 0
+    if chunks == 0:
         for i in range(rest):
-            spin[i] = get(b[0], offset + i)
-    for i in range(chunks):
-        for j in range(8):
-            spin[rest + 8 * i + j] = get(b[int(rest != 0) + i], j)
-    return spin
+            d2 |= uint64(x[i] > 0) << (rest - 1 - i)
+    elif chunks == 1:
+        for i in range(rest):
+            d1 |= uint64(x[i] > 0) << (rest - 1 - i)
+        for i in range(64):
+            d2 |= uint64(x[rest + i] > 0) << (63 - i)
+    else:
+        assert chunks == 2
+        for i in range(rest):
+            d0 |= uint64(x[i] > 0) << (rest - 1 - i)
+        for i in range(64):
+            d1 |= uint64(x[rest + i] > 0) << (63 - i)
+        for i in range(64):
+            d2 |= uint64(x[64 + rest + i] > 0) << (63 - i)
+    return _CompactSpin(d0, d1, d2, x.size)
 
 
-class CompactSpin(bytes):
+@jit(locals={"size": uint64, "chunks": uint64, "rest": uint64, "t": uint64, "i": int64})
+def _spin2array(
+    spin: _CompactSpin, out: Optional[np.ndarray] = None, dtype: np.dtype = np.float32
+) -> np.ndarray:
     """
-    Compact representation of a spin.
+    Unpacks a compact spin into a numpy array.
+    """
+    size = spin.size
+    if out is None:
+        out = np.empty(size, dtype=dtype)
+    chunks = size // 64
+    rest = size % 64
+    if chunks == 0:
+        t = spin._d2
+        i = size - 1
+        for _ in range(rest):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        assert i == -1
+    elif chunks == 1:
+        t = spin._d2
+        i = size - 1
+        for _ in range(64):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        assert i == rest - 1
+        t = spin._d1
+        for _ in range(rest):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        assert i == -1
+    else:  # chunks == 2
+        assert chunks == 2
+        t = spin._d2
+        i = size - 1
+        for _ in range(64):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        t = spin._d1
+        for _ in range(64):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        assert i == rest - 1
+        t = spin._d0
+        for _ in range(rest):
+            out[i] = -1.0 + 2.0 * (t & 0x01)
+            t >>= 1
+            i -= 1
+        assert i == -1
+    return out
+
+
+class Spin(object):
+    """
+    Compact representation of a spin configuration.
     """
 
-    def __new__(cls, spin: np.ndarray):
+    def __init__(self, x):
         """
-        Creates a new ``CompactSpin`` given the spin (ℝⁿ).
-        """
-        return bytes.__new__(cls, to_bytes(spin).tobytes())
+        .. warning::
 
-    def __int__(self):
+           **Do not use this function unless you know what you're doing!**
+           Instead, have a look at ``from_str`` and ``from_array`` functions.
         """
-        Returns an int representation of the spin.
+        assert isinstance(x, _CompactSpin)
+        self._jitted = x
+
+    def __str__(self) -> str:
         """
-        return int.from_bytes(self, byteorder="big")
+        Returns the string representation of the spin configuration.
+
+        .. warning::
+
+           This function is quite slow, so don't use it in performance-critical
+           parts.
+        """
+        return bytes(self._jitted.as_str().data).decode("utf-8")
+
+    def __int__(self) -> int:
+        """
+        Returns the integer representation of the spin configuration.
+        """
+        return self._jitted.as_int()
+
+    def __hash__(self) -> int:
+        """
+        Calculates the hash of the spin configuration.
+        """
+        return self._jitted.hash
+
+    def __eq__(self, other) -> bool:
+        """
+        :return: ``self == other``
+        """
+        return self._jitted.equal_to(other._jitted)
+
+    def __lt__(self, other) -> bool:
+        """
+        :return: ``self < other``
+        """
+        return self._jitted.less_than(other._jitted)
+
+    def __le__(self, other) -> bool:
+        """
+        :return: ``self <= other``
+        """
+        return self._jitted.less_or_equal_to(other._jitted)
+
+    def __gt__(self, other) -> bool:
+        """
+        :return: ``self > other``
+        """
+        return other._jitted.less_than(self._jitted)
+
+    def __ge__(self, other) -> bool:
+        """
+        :return: ``self >= other``
+        """
+        return other._jitted.less_or_equal_to(self._jitted)
+
+    def numpy(self) -> np.ndarray:
+        """
+        Unpacks the spin configuration into a numpy array of ``float32``. Spin
+        down is represented by ``-1.0`` and spin up -- by ``1.0``.
+        """
+        return _spin2array(self._jitted)
+
+    @property
+    def size(self) -> int:
+        """
+        :return: number of spins in the spin configuration
+        """
+        return self._jitted._size
+
+    @staticmethod
+    def from_array(x: np.ndarray):
+        """
+        Packs a numpy array of ``float32`` into a ``Spin``.
+        """
+        return Spin(_array2spin(x))
+
+    @staticmethod
+    def from_str(s: str):
+        """
+        Constructs a spin configuration from the string representation: '0' means spin down
+        and '1' means spin up.
+
+        .. warning:: Do not use this function in performance-critical code!
+        """
+        n = len(s)
+        if n > 192:
+            raise OverflowError(
+                "Spin configurations longer than 192 are not (yet) supported."
+            )
+        chunks = n // 64
+        if chunks == 0:
+            return Spin(_CompactSpin(0, 0, uint64(int(s, base=2)), n))
+        elif chunks == 1:
+            return Spin(
+                _CompactSpin(
+                    0, uint64(int(s[:-64], base=2)), uint64(int(s[-64:], base=2)), n
+                )
+            )
+        else:
+            assert chunks == 2
+            return Spin(
+                _CompactSpin(
+                    uint64(int(s[:-128], base=2)),
+                    uint64(int(s[-128:-64], base=2)),
+                    uint64(int(s[-64:], base=2)),
+                    n,
+                )
+            )
+
+
+def shuffle(spin: Spin, indices: np.ndarray):
+    return Spin.from_array(
+        np.fromiter(
+            (spin._jitted.get(i) for i in indices), dtype=np.float32, count=spin.size
+        )
+    )
+
+
+# CompactSpin = Spin.from_array
+# class CompactSpin(bytes):
+#     """
+#     Compact representation of a spin.
+#     """
+#
+#     def __new__(cls, spin: np.ndarray):
+#         """
+#         Creates a new ``CompactSpin`` given the spin (ℝⁿ).
+#         """
+#         return bytes.__new__(cls, to_bytes(spin).tobytes())
+#
+#     def __int__(self):
+#         """
+#         Returns an int representation of the spin.
+#         """
+#         return int.from_bytes(self, byteorder="big")
 
 
 def _make_machine(BaseNet):
@@ -148,22 +550,69 @@ def _make_machine(BaseNet):
         def __init__(self, *args, **kwargs):
             """
             Initialises the state with random values for the variational parameters.
-
-            :param int n_spins: Number of spins in the system.
             """
-            # if n_spins <= 0:
-            #     raise ValueError("Invalid number of spins: {}".format(n_spins))
             super().__init__(*args, **kwargs)
             try:
                 self._size = sum(
-                    map(lambda p: reduce(int.__mul__, p.size()), self.parameters())
+                    map(
+                        lambda p: reduce(int.__mul__, p.size()),
+                        filter(lambda p: p.requires_grad, self.parameters()),
+                    )
                 )
             except AttributeError:
+                logging.warning(
+                    "Could not determine the number of parameters in the Machine."
+                )
                 self._size = None
             # Hash-table mapping CompactSpin to Machine.Cell
             self._cache = {}
+            # TODO(twesterhout): Move this to BaseNet
+            # Automorphisms as a 2-dimensional array of indices
+            self._automorphisms = None
 
-        def log_wf(self, x: np.ndarray) -> complex:
+        def _find_smallest(self, spin: Spin) -> Spin:
+            """
+            Given a compact spin configuration, returns the canonical representation of it.
+            """
+            if self._automorphisms is None:
+                return spin
+
+            # TODO(twesterhout): Use numba to optimise this as it really slows
+            # down Monte Carlo loops.
+            smallest = spin
+            for permutation in self._automorphisms:
+                brother = shuffle(spin, permutation)
+                if brother < smallest:
+                    smallest = brother
+            return smallest
+
+        def _log_wf(self, spin: np.ndarray, compact_spin: Spin) -> complex:
+            cell = self._cache.get(compact_spin)
+            if cell is not None:
+                return cell.log_wf
+
+            canonical_compact_spin = self._find_smallest(compact_spin)
+            if canonical_compact_spin == compact_spin:
+                (amplitude, phase) = self.forward(torch.from_numpy(spin))
+            else:
+                if False:
+                    # Relatice phase is always 0
+                    z = self._log_wf(
+                        canonical_compact_spin.numpy(), canonical_compact_spin
+                    )
+                    amplitude = z.real
+                    phase = z.imag
+                else:
+                    # Support for arbitrary phase
+                    phase = self.forward(torch.from_numpy(spin))[1].item()
+                    amplitude = self._log_wf(
+                        canonical_compact_spin.numpy(), canonical_compact_spin
+                    ).real
+            log_wf = complex(amplitude, phase)
+            self._cache[compact_spin] = Machine.Cell(log_wf)
+            return log_wf
+
+        def log_wf(self, spin: np.ndarray) -> complex:
             """
             Computes log(Ψ(x)).
 
@@ -172,16 +621,7 @@ def _make_machine(BaseNet):
             :return: log(Ψ(x))
             :rtype: complex
             """
-            key = CompactSpin(x)
-            cell = self._cache.get(key)
-            if cell is not None:
-                return cell.log_wf
-            else:
-                with torch.no_grad():
-                    (a, b) = self.forward(torch.from_numpy(x))
-                    log_wf = complex(a, b)
-                    self._cache[key] = Machine.Cell(log_wf)
-                    return log_wf
+            return self._log_wf(spin, Spin.from_array(spin))
 
         @property
         def size(self) -> int:
@@ -190,12 +630,71 @@ def _make_machine(BaseNet):
             """
             return self._size
 
-        def der_log_wf(
-            self,
-            x: np.ndarray,
-            out: np.ndarray = None,
-            key: Optional[CompactSpin] = None,
-        ) -> np.ndarray:
+        def _copy_grad_to(self, out):
+            assert out.shape == (self.size,)
+            i = 0
+            for p in map(
+                lambda p_: p_.grad.view(-1).numpy(),
+                filter(lambda p_: p_.requires_grad, self.parameters()),
+            ):
+                out[i : i + p.size] = p
+                i += p.size
+
+        def _der_log_wf(self, spin, compact_spin, out=None):
+            if out is None:
+                out = np.empty((self.size,), dtype=np.complex64)
+            cell = self._cache.get(compact_spin)
+            if cell is None:
+                _ = self._log_wf(spin, compact_spin)
+            if cell.der_log_wf is not None:
+                out[:] = cell.der_log_wf
+                return out
+
+            canonical_compact_spin = self._find_smallest(compact_spin)
+            if canonical_compact_spin == compact_spin:
+                # Forward-propagation to construct the graph
+                result = self.forward(torch.from_numpy(spin))
+                (amplitude, phase) = result
+
+                # Computes ∇Re[log(Ψ(x))]
+                self.zero_grad()
+                result.backward(
+                    torch.tensor([1, 0], dtype=torch.float32), retain_graph=True
+                )
+                self._copy_grad_to(out.real)
+
+                # Computes ∇Im[log(Ψ(x))]
+                self.zero_grad()
+                result.backward(torch.tensor([0, 1], dtype=torch.float32))
+                self._copy_grad_to(out.imag)
+            else:
+                canonical_spin = canonical_compact_spin.numpy()
+                if False:
+                    # Relative phase always 0
+                    out[:] = self._der_log_wf(canonical_spin, canonical_compact_spin)
+                else:
+                    # Support for arbitrary phase
+
+                    # Computes ∇Re[log(Ψ(x))]
+                    out[:].real = self._der_log_wf(
+                        canonical_spin, canonical_compact_spin
+                    ).real
+
+                    # Forward-propagation to construct the graph
+                    result = self.forward(torch.from_numpy(spin))
+
+                    # Computes ∇Im[log(Ψ(x))]
+                    self.zero_grad()
+                    result.backward(torch.tensor([0, 1], dtype=torch.float32))
+                    self._copy_grad_to(out.imag)
+
+            # Save the results
+            # TODO(twesterhout): Remove the copy when it's safe to do so.
+            cell.der_log_wf = np.copy(out)
+            # assert np.isclose(complex(amplitude, phase), cell.log_wf)
+            return out
+
+        def der_log_wf(self, spin: np.ndarray, out: np.ndarray = None) -> np.ndarray:
             """
             Computes ∇log(Ψ(x)).
 
@@ -206,42 +705,7 @@ def _make_machine(BaseNet):
             :return: ∇log(Ψ(x)) as a numpy array of ``complex64``.
                      __Don't you dare modify it!__.
             """
-            if key is None:
-                key = CompactSpin(x)
-            # If out is not given, allocate a new array
-            if out is None:
-                out = np.empty((self.size,), dtype=np.complex64)
-            cell = self._cache.get(key)
-            if cell is not None and cell.der_log_wf is not None:
-                # Copy already known gradient
-                out[:] = cell.der_log_wf
-            else:
-                # Forward-propagation to construct the graph
-                result = self.forward(torch.from_numpy(x))
-                # Computes ∇Re[log(Ψ(x))]
-                self.zero_grad()
-                result.backward(
-                    torch.tensor([1, 0], dtype=torch.float32), retain_graph=True
-                )
-                # TODO(twesterhout): This is ugly and error-prone.
-                i = 0
-                for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                    out.real[i : i + p.size] = p
-                    i += p.size
-                # Computes ∇Im[log(Ψ(x))]
-                self.zero_grad()
-                result.backward(torch.tensor([0, 1], dtype=torch.float32))
-                # TODO(twesterhout): This is ugly and error-prone.
-                i = 0
-                for p in map(lambda p_: p_.grad.view(-1).numpy(), self.parameters()):
-                    out.imag[i : i + p.size] = p
-                    i += p.size
-                # Save the results
-                # TODO(twesterhout): Remove the copy when it's safe to do so.
-                self._cache[key] = Machine.Cell(
-                    complex(result[0].item(), result[1].item()), np.copy(out)
-                )
-            return out
+            return self._der_log_wf(spin, Spin.from_array(spin), out)
 
         def clear_cache(self):
             """
@@ -260,7 +724,10 @@ def _make_machine(BaseNet):
             with torch.no_grad():
                 gradients = torch.from_numpy(x)
                 i = 0
-                for dp in map(lambda p_: p_.grad.data.view(-1), self.parameters()):
+                for dp in map(
+                    lambda p_: p_.grad.data.view(-1),
+                    filter(lambda p_: p_.requires_grad, self.parameters()),
+                ):
                     (n,) = dp.size()
                     dp.copy_(gradients[i : i + n])
                     i += n
@@ -302,10 +769,6 @@ class MonteCarloState(object):
         self._machine = machine
         self._spin = np.copy(spin)
         self._log_wf = self._machine.log_wf(self._spin)
-        # TODO(twesterhout): Remove this.
-        # with torch.no_grad():
-        #     for p in self._machine.parameters():
-        #         logging.info('{}'.format(torch.norm(p.data)))
 
     @property
     def spin(self) -> np.ndarray:
@@ -391,6 +854,29 @@ class _Flipper(object):
             np.random.shuffle(self._downs)
 
 
+def all_spins(n: int, magnetisation: Optional[bool] = None):
+    if n >= 64:
+        raise OverflowError(
+            "Brute-force iteration is not supported for such long spin chains."
+        )
+    if magnetisation is not None:
+
+        def generate():
+            for i in range(2 ** n):
+                m = 2 * _popcount(i) - n
+                if m == magnetisation:
+                    yield Spin(_CompactSpin(0, 0, uint64(i), n))
+
+        return generate()
+    else:
+
+        def generate():
+            for i in range(2 ** n):
+                yield Spin(_CompactSpin(0, 0, uint64(i), n))
+
+        return generate()
+
+
 class MetropolisMC(object):
     """
     Markov chain constructed using Metropolis-Hasting algorithm. Elements of
@@ -425,6 +911,14 @@ class MetropolisMC(object):
                     self._flipper.next(False)
 
         return do_generate()
+
+    @property
+    def steps(self):
+        return self._steps
+
+    @property
+    def accepted(self):
+        return self._accepted
 
 
 class WorthlessConfiguration(Exception):
@@ -516,7 +1010,7 @@ def monte_carlo_loop(machine, hamiltonian, initial_spin, steps):
     chain = MetropolisMC(machine, initial_spin)
     for state in islice(chain, *steps):
         derivatives.append(state.der_log_wf())
-        spin = CompactSpin(state.spin)
+        spin = Spin.from_array(state.spin)
         e_loc = energies_cache.get(spin)
         if e_loc is None:
             e_loc = hamiltonian(state)
@@ -543,7 +1037,7 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
     wave_function = {}
     chain = MetropolisMC(machine, initial_spin)
     for state in islice(chain, *steps):
-        spin = CompactSpin(state.spin)
+        spin = Spin.from_array(state.spin)
         e_loc = energies_cache.get(spin)
         if e_loc is None:
             e_loc = hamiltonian(state)
@@ -551,7 +1045,7 @@ def monte_carlo_loop_for_lanczos(machine, hamiltonian, initial_spin, steps):
         energies.append(e_loc)
         wave_function[spin] = cmath.exp(state.log_wf())
         for s in hamiltonian.reachable_from(state.spin):
-            wave_function[CompactSpin(s)] = cmath.exp(state.machine.log_wf(s))
+            wave_function[Spin.from_array(s)] = cmath.exp(state.machine.log_wf(s))
     energies = np.array(energies, dtype=np.complex64)
     mean_E = np.mean(energies)
     std_E = np.std(energies)
@@ -569,7 +1063,7 @@ def compute_l2_norm(machine, initial_spin, steps):
     wave_function = {}
     chain = MetropolisMC(machine, initial_spin)
     for state in islice(chain, *steps):
-        spin = CompactSpin(state.spin)
+        spin = Spin.from_array(state.spin)
         wave_function[spin] = mpmath.exp(mpmath.mpc(state.log_wf()))
     l2_norm = mpmath.sqrt(
         sum(map(lambda x: mpmath.fabs(x) ** 2, wave_function.values()), mpmath.mpf(0))
@@ -603,84 +1097,58 @@ def monte_carlo(machine, hamiltonian, initial_spin, steps):
 #
 # NOTE(twesterhout): This class is a work in progress: please, don't use it (yet).
 #
-# class Covariance(LinearOperator):
-#     """
-#     Sparse representation of the covariance matrix matrix S in Stochastic
-#     Reconfiguration method [1].
-#     """
-#
-#     def __init__(self, gradients, mean_gradient, regulariser):
-#         """
-#         """
-#         (steps, n) = gradients.shape
-#         super().__init__(np.float32, (2 * n, n))
-#         gradients = gradients - mean_gradient
-#         self._Re_O = np.ascontiguousarray(gradients.real)
-#         self._Im_O = np.ascontiguousarray(gradients.imag)
-#         gradients = gradients.transpose().conj()
-#         self._Re_O_H = np.ascontiguousarray(gradients.real)
-#         self._Im_O_H = np.ascontiguousarray(gradients.imag)
-#         self._lambda = regulariser
-#         self._scale = 1 / steps
-#
-#     def _S(self, x: np.ndarray):
-#         assert x.dtype == np.float32
-#         (_, n) = self.shape
-#         assert x.size == n
-#         y = np.empty((2 * n,), dtype=np.float32)
-#         y[:n]  = np.matmul(self._Re_O_H, np.matmul(self._Re_O, x))
-#         y[:n] -= np.matmul(self._Im_O_H, np.matmul(self._Im_O, x))
-#         y[n:]  = np.matmul(self._Im_O_H, np.matmul(self._Re_O, x))
-#         y[n:] += np.matmul(self._Re_O_H, np.matmul(self._Im_O, x))
-#         y *= self._scale
-#         return y
-#
-#     def _S_H(self, y: np.ndarray):
-#         assert y.dtype == np.float32
-#         (_, n) = self.shape
-#         assert y.size == 2 * n
-#         x  = np.matmul(self._Re_O.transpose(), np.matmul(self._Re_O_H.transpose(), y[:n]))
-#         x -= np.matmul(self._Im_O.transpose(), np.matmul(self._Im_O_H.transpose(), y[:n]))
-#         x += np.matmul(self._Im_O.transpose(), np.matmul(self._Re_O_H.transpose(), y[n:]))
-#         x += np.matmul(self._Re_O.transpose(), np.matmul(self._Im_O_H.transpose(), y[n:]))
-#         x *= self._scale
-#         assert x.size == n
-#         assert x.dtype == np.float32
-#         return x
-#
-#     def _matvec(self, x):
-#         if x.dtype != self.dtype:
-#             logging.error('{} != {}'.format(x.dtype, self.dtype))
-#             assert false
-#         return self._S(x)
-#
-#     def _rmatvec(self, y):
-#         assert y.dtype == self.dtype
-#         return self._S_H(y)
-#
-#     def solve(self, b, x0=None):
-#         assert b.dtype == np.complex64
-#         start = time.time()
-#         logging.info("Calculating S⁻¹F...")
-#         (_, n) = self.shape
-#         b_ = np.empty((2 * n,), dtype=np.float32)
-#         b_[:n] = b.real
-#         b_[n:] = b.imag
-#         if x0 is None:
-#             x0 = np.zeros((n,), dtype=np.float32)
-#         else:
-#             x0_norm = np.linalg.norm(x0)
-#             x0 *= 1 / x0_norm
-#         x, istop, itn, r1norm, *_ = scipy.sparse.linalg.lsqr(self, b_, x0=x0)
-#         finish = time.time()
-#         if istop == 1:
-#             logging.info("Done in {:.2f} seconds! Solved Sx = F in {} "
-#                          "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
-#         else:
-#             logging.info("Done in {:.2f} seconds! Solved min||Sx - F|| in {} "
-#                          "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
-#         assert x.dtype == self.dtype
-#         return x
+class DenseCovariance(LinearOperator):
+    """
+    Sparse representation of the covariance matrix matrix S in Stochastic
+    Reconfiguration method [1].
+    """
+
+    def __init__(self, gradients, mean_gradient, regulariser):
+        """
+        """
+        (steps, n) = gradients.shape
+        super().__init__(np.float32, (2 * n, n))
+        gradients = gradients - mean_gradient
+        S = 1 / steps * np.matmul(gradients.transpose().conj(), gradients)
+        S[:n, :] += regulariser * np.eye(n, dtype=np.float32)
+        self._matrix = np.empty((2 * n, n), dtype=np.float32)
+        for i in range(n):
+            self._matrix[i, :] = S[i].real
+            self._matrix[n + i, :] = S[i].imag
+
+    def _matvec(self, x):
+        assert x.dtype == self.dtype
+        return np.matmul(self._matrix, x)
+
+    def _rmatvec(self, y):
+        assert y.dtype == self.dtype
+        return np.matmul(self._matrix.transpose(), y)
+
+    def solve(self, b, x0=None):
+        assert b.dtype == np.complex64
+        start = time.time()
+        logging.info("Calculating S⁻¹F...")
+        (_, n) = self.shape
+        b_ = np.empty((2 * n,), dtype=np.float32)
+        b_[:n] = b.real
+        b_[n:] = b.imag
+        if x0 is None:
+            x0 = np.zeros((n,), dtype=np.float32)
+        else:
+            # x0_norm = np.linalg.norm(x0)
+            # x0 *= 1 / x0_norm
+            pass
+        x = scipy.linalg.lstsq(self._matrix, b_)[0]
+        # x, istop, itn, r1norm, *_ = scipy.sparse.linalg.lsqr(self, b_, x0=x0)
+        finish = time.time()
+        # if istop == 1:
+        #     logging.info("Done in {:.2f} seconds! Solved Sx = F in {} "
+        #                  "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
+        # else:
+        #     logging.info("Done in {:.2f} seconds! Solved min||Sx - F|| in {} "
+        #                  "iterations, |Sx - F| = {}".format(finish - start, itn, r1norm))
+        assert x.dtype == self.dtype
+        return x
 
 
 class Covariance(LinearOperator):
@@ -809,7 +1277,7 @@ class Optimiser(object):
                 self._machine.parameters(), lr=self._learning_rate
             )
         else:
-            self._optimizer = torch.optim.SGD(
+            self._optimizer = torch.optim.Adam(
                 self._machine.parameters(), lr=self._learning_rate
             )
 
@@ -825,15 +1293,14 @@ class Optimiser(object):
         if self._use_sr:
             # We also cache δ to use it as a guess the next time we're computing
             # S⁻¹F.
-            self._delta = Covariance(Os, mean_O, self._regulariser(iteration)).solve(
-                F, x0=self._delta
-            )
+            self._delta = DenseCovariance(
+                Os, mean_O, self._regulariser(iteration)
+            ).solve(F, x0=self._delta)
+            delta_norm = np.linalg.norm(self._delta)
+            # if delta_norm > 10:
+            #     self._delta /= (delta_norm / 10)
             self._machine.set_gradients(self._delta)
-            logging.info(
-                "∥F∥₂ = {}, ∥δ∥₂ = {}".format(
-                    np.linalg.norm(F), np.linalg.norm(self._delta)
-                )
-            )
+            logging.info("∥F∥₂ = {}, ∥δ∥₂ = {}".format(np.linalg.norm(F), delta_norm))
         else:
             self._machine.set_gradients(F.real)
             logging.info(
@@ -1057,20 +1524,31 @@ def int_to_spin(spin: int, n: int) -> np.ndarray:
     return from_bytes(spin.to_bytes((n + 7) // 8, "big"), n)
 
 
-def negative_log_overlap(machine: torch.nn.Module, target_wf: Dict[int, complex]):
+def negative_log_overlap(
+    machine: torch.nn.Module, target_wf: Dict[Spin, complex], offset=None
+):
+    """
+    Calculates ``-log(|〈Ψ|Φ〉| / ‖Ψ‖₂)``, where Ψ is ``machine``
+    and Φ is ``target_wf``. Φ is assumed to be normalised.
+    """
+    if offset is None:
+        offset = 5.0
+    new_offset = 0.0
     real_part = 0.0
     imag_part = 0.0
     l2_norm = 0.0
-    for spin, coeff in target_wf:
-        z = machine.forward(torch.from_numpy(int_to_spin(spin, machine.number_spins)))
-        temp = torch.exp(z[0])
+    for spin, coeff in target_wf.items():
+        z = machine.forward(torch.from_numpy(spin.numpy()))
+        temp = torch.exp(z[0] - offset)
         wf_real = temp * torch.cos(z[1])
         wf_imag = temp * torch.sin(z[1])
         real_part += wf_real * coeff.real - wf_imag * coeff.imag
         imag_part += wf_real * coeff.imag + wf_imag * coeff.real
         l2_norm += temp * temp
+        if float(z[0]) > new_offset:
+            new_offset = float(z[0])
     loss = -0.5 * torch.log((real_part ** 2 + imag_part ** 2) / l2_norm)
-    return loss
+    return loss, new_offset
 
 
 def load_explicit(stream):
@@ -1084,7 +1562,7 @@ def load_explicit(stream):
             number_spins = len(spin)
         else:
             assert number_spins == len(spin)
-        spin = int(spin, base=2)
+        spin = Spin.from_str(spin)  # int(spin, base=2)
         coeff = complex(float(real), float(imag))
         psi[spin] = coeff
     return psi, number_spins
@@ -1102,11 +1580,12 @@ def cli():
     metavar="<arch_file>",
 )
 @click.option(
+    "-t",
     "--train-file",
     type=click.File(mode="rb"),
     required=True,
     help="File containing the explicit wave function representation as "
-    "generated by `sample`.",
+    "generated by `sample`. It will be used as the training data set.",
 )
 @click.option(
     "-i",
@@ -1121,7 +1600,7 @@ def cli():
     "--out-file",
     type=click.File(mode="wb"),
     required=True,
-    help="Where to save the final state to. It will contain a "
+    help="File where the final weights will be stored. It will contain a "
     "PyTorch `state_dict` serialised using `torch.save`.",
 )
 @click.option(
@@ -1136,15 +1615,15 @@ def cli():
     type=click.IntRange(min=0),
     default=200,
     show_default=True,
-    help="Number of learning steps to perform.",
+    help="Number of learning steps to perform. Here step is defined as a single "
+    "update of the parameters.",
 )
 @click.option(
     "--optimizer",
     type=str,
     default="SGD",
     help="Optimizer to use. Valid values are names of classes in torch.optim "
-    "(i.e. 'SGD', 'Adam', 'Adamax', etc.). NOTE: this is a dirty hack and should "
-    "be improved later.",
+    "(i.e. 'SGD', 'Adam', 'Adamax', etc.)",
 )
 @click.option(
     "--time",
@@ -1167,6 +1646,67 @@ def train(nn_file, train_file, out_file, in_file, lr, optimizer, epochs, time_li
     if in_file is not None:
         logging.info("Reading the initial weights...")
         psi.load_state_dict(torch.load(in_file))
+    # psi._automorphisms = np.array([
+    #     [0, 1, 2, 3, 4, 5],
+    #     [1, 2, 3, 4, 5, 0],
+    #     [2, 3, 4, 5, 0, 1],
+    #     [3, 4, 5, 0, 1, 2],
+    #     [4, 5, 0, 1, 2, 3],
+    #     [5, 0, 1, 2, 3, 4],
+    # ], dtype=np.int64)
+    psi._automorphisms = np.array(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            [0, 2, 1, 6, 8, 7, 3, 5, 4, 9, 11, 10],
+            [0, 4, 8, 3, 1, 11, 6, 10, 2, 9, 7, 5],
+            [0, 8, 4, 6, 2, 10, 3, 11, 1, 9, 5, 7],
+            [1, 0, 2, 4, 3, 5, 10, 9, 11, 7, 6, 8],
+            [1, 2, 0, 10, 11, 9, 4, 5, 3, 7, 8, 6],
+            [1, 3, 11, 4, 0, 8, 10, 6, 2, 7, 9, 5],
+            [1, 11, 3, 10, 2, 6, 4, 8, 0, 7, 5, 9],
+            [2, 0, 1, 8, 6, 7, 11, 9, 10, 5, 3, 4],
+            [2, 1, 0, 11, 10, 9, 8, 7, 6, 5, 4, 3],
+            [2, 6, 10, 8, 0, 4, 11, 3, 1, 5, 9, 7],
+            [2, 10, 6, 11, 1, 3, 8, 4, 0, 5, 7, 9],
+            [3, 1, 11, 0, 4, 8, 9, 7, 5, 6, 10, 2],
+            [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8],
+            [3, 5, 4, 9, 11, 10, 0, 2, 1, 6, 8, 7],
+            [3, 11, 1, 9, 5, 7, 0, 8, 4, 6, 2, 10],
+            [4, 0, 8, 1, 3, 11, 7, 9, 5, 10, 6, 2],
+            [4, 3, 5, 1, 0, 2, 7, 6, 8, 10, 9, 11],
+            [4, 5, 3, 7, 8, 6, 1, 2, 0, 10, 11, 9],
+            [4, 8, 0, 7, 5, 9, 1, 11, 3, 10, 2, 6],
+            [5, 3, 4, 11, 9, 10, 8, 6, 7, 2, 0, 1],
+            [5, 4, 3, 8, 7, 6, 11, 10, 9, 2, 1, 0],
+            [5, 7, 9, 8, 4, 0, 11, 1, 3, 2, 10, 6],
+            [5, 9, 7, 11, 3, 1, 8, 0, 4, 2, 6, 10],
+            [6, 2, 10, 0, 8, 4, 9, 5, 7, 3, 11, 1],
+            [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5],
+            [6, 8, 7, 0, 2, 1, 9, 11, 10, 3, 5, 4],
+            [6, 10, 2, 9, 7, 5, 0, 4, 8, 3, 1, 11],
+            [7, 5, 9, 4, 8, 0, 10, 2, 6, 1, 11, 3],
+            [7, 6, 8, 10, 9, 11, 4, 3, 5, 1, 0, 2],
+            [7, 8, 6, 4, 5, 3, 10, 11, 9, 1, 2, 0],
+            [7, 9, 5, 10, 6, 2, 4, 0, 8, 1, 3, 11],
+            [8, 0, 4, 2, 6, 10, 5, 9, 7, 11, 3, 1],
+            [8, 4, 0, 5, 7, 9, 2, 10, 6, 11, 1, 3],
+            [8, 6, 7, 2, 0, 1, 5, 3, 4, 11, 9, 10],
+            [8, 7, 6, 5, 4, 3, 2, 1, 0, 11, 10, 9],
+            [9, 5, 7, 3, 11, 1, 6, 2, 10, 0, 8, 4],
+            [9, 7, 5, 6, 10, 2, 3, 1, 11, 0, 4, 8],
+            [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2],
+            [9, 11, 10, 3, 5, 4, 6, 8, 7, 0, 2, 1],
+            [10, 2, 6, 1, 11, 3, 7, 5, 9, 4, 8, 0],
+            [10, 6, 2, 7, 9, 5, 1, 3, 11, 4, 0, 8],
+            [10, 9, 11, 7, 6, 8, 1, 0, 2, 4, 3, 5],
+            [10, 11, 9, 1, 2, 0, 7, 8, 6, 4, 5, 3],
+            [11, 1, 3, 2, 10, 6, 5, 7, 9, 8, 4, 0],
+            [11, 3, 1, 5, 9, 7, 2, 6, 10, 8, 0, 4],
+            [11, 9, 10, 5, 3, 4, 2, 0, 1, 8, 6, 7],
+            [11, 10, 9, 2, 1, 0, 5, 4, 3, 8, 7, 6],
+        ],
+        dtype=np.int64,
+    )
 
     magnetisation = 0 if number_spins % 2 == 0 else 1
     # NOTE(twesterhout): This is a hack :)
@@ -1190,28 +1730,18 @@ def train(nn_file, train_file, out_file, in_file, lr, optimizer, epochs, time_li
         #     max_count += 1
         return wf
 
+    offset = 5.0  # None
     start = time.time()
     for i in range(epochs):
         target_wf_extented = make_extented(target_wf)
         optimizer.zero_grad()
-        loss = negative_log_overlap(psi, target_wf_extented.items())
+        loss, _ = negative_log_overlap(psi, target_wf_extented, offset)
         logging.info("{}: Loss: {}".format(i + 1, loss))
         loss.backward()
         optimizer.step()
         if time_limit is None or time.time() - start > time_limit:
             save()
             start = time.time()
-
-    # for i in range(epochs):
-    #     target_wf_extented = target_wf
-
-    #     optimizer.zero_grad()
-    #     loss = negative_log_overlap(psi, target_wf_extented.items())
-    #     logging.info("{}: Loss: {}".format(i + 1, loss))
-    #     loss.backward()
-    #     optimizer.step()
-    #     if i % 20 == 0:
-    #         save()
 
 
 @cli.command()
@@ -1233,7 +1763,7 @@ def train(nn_file, train_file, out_file, in_file, lr, optimizer, epochs, time_li
 @click.option(
     "-o",
     "--out-file",
-    type=click.File(mode="w"),
+    type=click.File(mode='w'),
     default=sys.stdout,
     show_default=True,
     help="Location where to save the sampled state.",
@@ -1271,6 +1801,7 @@ def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     H = read_hamiltonian(hamiltonian_file)
     psi = Machine(H.number_spins)
     psi.load_state_dict(torch.load(in_file))
+
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
     monte_carlo_steps = (
@@ -1288,6 +1819,99 @@ def sample(nn_file, in_file, out_file, hamiltonian_file, steps):
     fmt = "\n{:0" + str(psi.number_spins) + "b}\t{}\t{}"
     for (spin, coeff) in wave_function.items():
         out_file.write(fmt.format(int(spin), scale * coeff.real, scale * coeff.imag))
+
+
+@cli.command()
+@click.argument(
+    "nn-file",
+    type=click.Path(exists=True, resolve_path=True, path_type=str),
+    metavar="<arch_file>",
+)
+@click.option(
+    "-i",
+    "--in-file",
+    type=click.File(mode="rb"),
+    required=True,
+    help="File containing the Neural Network weights as a PyTorch `state_dict` "
+    "serialised using `torch.save`. It is up to the user to ensure that "
+    "the weights are compatible with the architecture read from "
+    "<arch_file>.",
+)
+@click.option(
+    "-o",
+    "--out-file",
+    type=click.File(mode="w"),
+    default=sys.stdout,
+    show_default=True,
+    help="Location where to save the statistics.",
+)
+@click.option("--spins", "n_spins", type=int)
+@click.option("--exact", type=click.File(mode="rb"), help="Exact ground state")
+def analyse(nn_file, in_file, out_file, n_spins, exact):
+    """
+    """
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname)s] %(message)s", level=logging.DEBUG
+    )
+    Machine = _make_machine(import_network(nn_file))
+    if exact is not None:
+        exact_psi, n_spins = load_explicit(exact)
+    if n_spins is None:
+        click.echo("Please, specify either `--exact` or `--spins`.")
+        sys.exit(1)
+    psi = Machine(n_spins)
+    psi.load_state_dict(torch.load(in_file))
+    magnetisation = 0 if psi.number_spins % 2 == 0 else 1
+
+    l2_norm = mpmath.mpf(0)
+    stats = np.empty(
+        (int(scipy.special.comb(n_spins, (magnetisation + n_spins) // 2)),),
+        dtype=[
+            ("index", "i8"),
+            ("spin", "U{}".format(n_spins)),
+            ("real", "f4"),
+            ("imag", "f4"),
+            ("exact_real", "f4"),
+            ("exact_imag", "f4"),
+            ("key", "f4"),
+        ],
+    )
+    for i, compact_spin in enumerate(all_spins(n_spins, magnetisation)):
+        index = int(compact_spin)
+        spin = compact_spin.numpy()
+        wf = psi.log_wf(spin)
+        wf_exact = (
+            exact_psi.get(compact_spin, complex(0, 0))
+            if exact_psi is not None
+            else complex(float("nan"), float("nan"))
+        )
+        key = (
+            wf_exact.real ** 2 + wf_exact.imag ** 2
+            if exact_psi is not None
+            else wf.real
+        )
+        stats[i] = (
+            index,
+            str(compact_spin),
+            wf.real,
+            wf.imag,
+            wf_exact.real,
+            wf_exact.imag,
+            key,
+        )
+        l2_norm += mpmath.fabs(mpmath.exp(mpmath.mpc(wf))) ** 2
+    scale = float(mpmath.log(mpmath.sqrt(l2_norm)))
+    for i in range(stats.shape[0]):
+        wf = cmath.exp(complex(stats[i]["real"] - scale, stats[i]["imag"]))
+        stats[i]["real"] = wf.real
+        stats[i]["imag"] = wf.imag
+    stats.sort(order="key")
+    np.savetxt(
+        out_file,
+        stats,
+        fmt=["%i", "%s", "%.8e", "%.8e", "%.8e", "%.8e", "%.8e"],
+        delimiter="\t",
+    )
 
 
 @cli.command()
@@ -1357,7 +1981,7 @@ def sample_average(nn_file, in_file, hamiltonian_file, steps):
         np.array([1, -1, 1, -1, 1, -1, -1, 1, -1, 1, -1, 1], dtype=np.float32),
         np.array([1, 1, -1, -1, 1, 1, 1, -1, -1, 1, -1, -1], dtype=np.float32),
     ]:
-        logging.info(("S = " + spin_fmt).format(int(CompactSpin(magical_spin))))
+        logging.info(("S = " + spin_fmt).format(int(Spin.from_array(magical_spin))))
         psi.align_(magical_spin)
         E, var_E, _ = monte_carlo_loop_for_lanczos(
             psi, H, random_spin(psi.number_spins, magnetisation), monte_carlo_steps
@@ -1448,6 +2072,104 @@ def optimise(
     if in_file is not None:
         logging.info("Reading the weights...")
         psi.load_state_dict(torch.load(in_file))
+    # psi._automorphisms = np.array(
+    #     [
+    #         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    #         [0, 2, 1, 6, 8, 7, 3, 5, 4, 9, 11, 10],
+    #         [0, 4, 8, 3, 1, 11, 6, 10, 2, 9, 7, 5],
+    #         [0, 8, 4, 6, 2, 10, 3, 11, 1, 9, 5, 7],
+    #         [1, 0, 2, 4, 3, 5, 10, 9, 11, 7, 6, 8],
+    #         [1, 2, 0, 10, 11, 9, 4, 5, 3, 7, 8, 6],
+    #         [1, 3, 11, 4, 0, 8, 10, 6, 2, 7, 9, 5],
+    #         [1, 11, 3, 10, 2, 6, 4, 8, 0, 7, 5, 9],
+    #         [2, 0, 1, 8, 6, 7, 11, 9, 10, 5, 3, 4],
+    #         [2, 1, 0, 11, 10, 9, 8, 7, 6, 5, 4, 3],
+    #         [2, 6, 10, 8, 0, 4, 11, 3, 1, 5, 9, 7],
+    #         [2, 10, 6, 11, 1, 3, 8, 4, 0, 5, 7, 9],
+    #         [3, 1, 11, 0, 4, 8, 9, 7, 5, 6, 10, 2],
+    #         [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8],
+    #         [3, 5, 4, 9, 11, 10, 0, 2, 1, 6, 8, 7],
+    #         [3, 11, 1, 9, 5, 7, 0, 8, 4, 6, 2, 10],
+    #         [4, 0, 8, 1, 3, 11, 7, 9, 5, 10, 6, 2],
+    #         [4, 3, 5, 1, 0, 2, 7, 6, 8, 10, 9, 11],
+    #         [4, 5, 3, 7, 8, 6, 1, 2, 0, 10, 11, 9],
+    #         [4, 8, 0, 7, 5, 9, 1, 11, 3, 10, 2, 6],
+    #         [5, 3, 4, 11, 9, 10, 8, 6, 7, 2, 0, 1],
+    #         [5, 4, 3, 8, 7, 6, 11, 10, 9, 2, 1, 0],
+    #         [5, 7, 9, 8, 4, 0, 11, 1, 3, 2, 10, 6],
+    #         [5, 9, 7, 11, 3, 1, 8, 0, 4, 2, 6, 10],
+    #         [6, 2, 10, 0, 8, 4, 9, 5, 7, 3, 11, 1],
+    #         [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5],
+    #         [6, 8, 7, 0, 2, 1, 9, 11, 10, 3, 5, 4],
+    #         [6, 10, 2, 9, 7, 5, 0, 4, 8, 3, 1, 11],
+    #         [7, 5, 9, 4, 8, 0, 10, 2, 6, 1, 11, 3],
+    #         [7, 6, 8, 10, 9, 11, 4, 3, 5, 1, 0, 2],
+    #         [7, 8, 6, 4, 5, 3, 10, 11, 9, 1, 2, 0],
+    #         [7, 9, 5, 10, 6, 2, 4, 0, 8, 1, 3, 11],
+    #         [8, 0, 4, 2, 6, 10, 5, 9, 7, 11, 3, 1],
+    #         [8, 4, 0, 5, 7, 9, 2, 10, 6, 11, 1, 3],
+    #         [8, 6, 7, 2, 0, 1, 5, 3, 4, 11, 9, 10],
+    #         [8, 7, 6, 5, 4, 3, 2, 1, 0, 11, 10, 9],
+    #         [9, 5, 7, 3, 11, 1, 6, 2, 10, 0, 8, 4],
+    #         [9, 7, 5, 6, 10, 2, 3, 1, 11, 0, 4, 8],
+    #         [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2],
+    #         [9, 11, 10, 3, 5, 4, 6, 8, 7, 0, 2, 1],
+    #         [10, 2, 6, 1, 11, 3, 7, 5, 9, 4, 8, 0],
+    #         [10, 6, 2, 7, 9, 5, 1, 3, 11, 4, 0, 8],
+    #         [10, 9, 11, 7, 6, 8, 1, 0, 2, 4, 3, 5],
+    #         [10, 11, 9, 1, 2, 0, 7, 8, 6, 4, 5, 3],
+    #         [11, 1, 3, 2, 10, 6, 5, 7, 9, 8, 4, 0],
+    #         [11, 3, 1, 5, 9, 7, 2, 6, 10, 8, 0, 4],
+    #         [11, 9, 10, 5, 3, 4, 2, 0, 1, 8, 6, 7],
+    #         [11, 10, 9, 2, 1, 0, 5, 4, 3, 8, 7, 6],
+    #     ],
+    #     dtype=np.int64,
+    # )
+    # psi._automorphisms = np.array([
+    #     [0, 1, 2, 3, 4, 5],
+    #     [1, 2, 3, 4, 5, 0],
+    #     [2, 3, 4, 5, 0, 1],
+    #     [3, 4, 5, 0, 1, 2],
+    #     [4, 5, 0, 1, 2, 3],
+    #     [5, 0, 1, 2, 3, 4],
+    # ], dtype=np.int64)
+    # psi._automorphisms = np.array(
+    #     [
+    #         [0, 1, 2, 3, 4, 5],
+    #         [0, 5, 4, 3, 2, 1],
+    #         [1, 0, 5, 4, 3, 2],
+    #         [1, 2, 3, 4, 5, 0],
+    #         [2, 1, 0, 5, 4, 3],
+    #         [2, 3, 4, 5, 0, 1],
+    #         [3, 2, 1, 0, 5, 4],
+    #         [3, 4, 5, 0, 1, 2],
+    #         [4, 3, 2, 1, 0, 5],
+    #         [4, 5, 0, 1, 2, 3],
+    #         [5, 0, 1, 2, 3, 4],
+    #         [5, 4, 3, 2, 1, 0],
+    #     ],
+    #     dtype=np.int64,
+    # )
+    # psi._automorphisms = np.array([
+    #     [0, 1, 2, 3, 4, 5, 6],
+    #     [1, 2, 3, 4, 5, 6, 0],
+    #     [2, 3, 4, 5, 6, 0, 1],
+    #     [3, 4, 5, 6, 0, 1, 2],
+    #     [4, 5, 6, 0, 1, 2, 3],
+    #     [5, 6, 0, 1, 2, 3, 4],
+    #     [6, 0, 1, 2, 3, 4, 5],
+    # ], dtype=np.int64)
+    # psi._automorphisms = np.array([
+    #     [0, 1, 2, 3, 4, 5, 6, 7],
+    #     [1, 2, 3, 4, 5, 6, 7, 0],
+    #     [2, 3, 4, 5, 6, 7, 0, 1],
+    #     [3, 4, 5, 6, 7, 0, 1, 2],
+    #     [4, 5, 6, 7, 0, 1, 2, 3],
+    #     [5, 6, 7, 0, 1, 2, 3, 4],
+    #     [6, 7, 0, 1, 2, 3, 4, 5],
+    #     [7, 0, 1, 2, 3, 4, 5, 6],
+    # ], dtype=np.int64)
+
     magnetisation = 0 if psi.number_spins % 2 == 0 else 1
     thermalisation = int(0.1 * steps)
     opt = Optimiser(
