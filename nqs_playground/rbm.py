@@ -65,7 +65,10 @@ class Net(torch.nn.Module):
         """
         Runs the forward propagation.
         """
-        return logcosh(self._dense(x)).reshape(-1, 2).sum(0)
+        x = logcosh(self._dense(x)).view(-1, self._dense.out_features // 2, 2).sum(1)
+        if x.size(0) == 1:
+            x = x.view(x.size()[1:])
+        return x
 
     @property
     def number_spins(self) -> int:

@@ -103,8 +103,8 @@ class _LogCosh(Function):
         tanh_x = torch.tanh(x)
         out = torch.empty(z.size(), dtype=z.dtype, requires_grad=False)
         _log_cosh_forward_impl(
-            z.numpy().view(dtype=complex_type),
-            out.numpy().view(dtype=complex_type),
+            z.view(-1).numpy().view(dtype=complex_type),
+            out.view(-1).numpy().view(dtype=complex_type),
             tanh_x.numpy(),
         )
         ctx.save_for_backward(z, tanh_x)
@@ -147,8 +147,8 @@ class _LogCosh(Function):
         tan_y = torch.tan(y)
         out = torch.empty(z.size(), dtype=z.dtype, requires_grad=False)
         _log_cosh_backward_impl(
-            dz.detach().numpy().view(dtype=complex_type),
-            out.numpy().view(dtype=complex_type),
+            dz.view(-1).detach().numpy().view(dtype=complex_type),
+            out.view(-1).numpy().view(dtype=complex_type),
             tanh_x.numpy(),
             tan_y.numpy(),
         )
