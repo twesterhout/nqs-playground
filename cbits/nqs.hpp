@@ -13,8 +13,8 @@
 #include <stdexcept>
 #include <string>
 
-#include <immintrin.h>
 #include <endian.h>
+#include <immintrin.h>
 
 #if defined(__clang__)
 #    define TCM_CLANG                                                          \
@@ -80,31 +80,31 @@
 #endif
 
 #if defined(TCM_GCC)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic warning "-W"
-#pragma GCC diagnostic warning "-Wall"
-#pragma GCC diagnostic warning "-Wextra"
-#pragma GCC diagnostic warning "-Wcast-align"
-#pragma GCC diagnostic warning "-Wcast-qual"
-#pragma GCC diagnostic warning "-Wctor-dtor-privacy"
-#pragma GCC diagnostic warning "-Wdisabled-optimization"
-#pragma GCC diagnostic warning "-Wformat=2"
-#pragma GCC diagnostic warning "-Winit-self"
-#pragma GCC diagnostic warning "-Wlogical-op"
-#pragma GCC diagnostic warning "-Wmissing-declarations"
-#pragma GCC diagnostic warning "-Wmissing-include-dirs"
-#pragma GCC diagnostic warning "-Wnoexcept"
-#pragma GCC diagnostic warning "-Wold-style-cast"
-#pragma GCC diagnostic warning "-Woverloaded-virtual"
-#pragma GCC diagnostic warning "-Wredundant-decls"
-#pragma GCC diagnostic warning "-Wshadow"
-#pragma GCC diagnostic warning "-Wsign-conversion"
-#pragma GCC diagnostic warning "-Wsign-promo"
-#pragma GCC diagnostic warning "-Wstrict-null-sentinel"
-#pragma GCC diagnostic warning "-Wstrict-overflow=5"
-#pragma GCC diagnostic warning "-Wswitch-default"
-#pragma GCC diagnostic warning "-Wundef"
-#pragma GCC diagnostic warning "-Wunused"
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic warning "-W"
+#    pragma GCC diagnostic warning "-Wall"
+#    pragma GCC diagnostic warning "-Wextra"
+#    pragma GCC diagnostic warning "-Wcast-align"
+#    pragma GCC diagnostic warning "-Wcast-qual"
+#    pragma GCC diagnostic warning "-Wctor-dtor-privacy"
+#    pragma GCC diagnostic warning "-Wdisabled-optimization"
+#    pragma GCC diagnostic warning "-Wformat=2"
+#    pragma GCC diagnostic warning "-Winit-self"
+#    pragma GCC diagnostic warning "-Wlogical-op"
+#    pragma GCC diagnostic warning "-Wmissing-declarations"
+#    pragma GCC diagnostic warning "-Wmissing-include-dirs"
+#    pragma GCC diagnostic warning "-Wnoexcept"
+#    pragma GCC diagnostic warning "-Wold-style-cast"
+#    pragma GCC diagnostic warning "-Woverloaded-virtual"
+#    pragma GCC diagnostic warning "-Wredundant-decls"
+#    pragma GCC diagnostic warning "-Wshadow"
+#    pragma GCC diagnostic warning "-Wsign-conversion"
+#    pragma GCC diagnostic warning "-Wsign-promo"
+#    pragma GCC diagnostic warning "-Wstrict-null-sentinel"
+#    pragma GCC diagnostic warning "-Wstrict-overflow=5"
+#    pragma GCC diagnostic warning "-Wswitch-default"
+#    pragma GCC diagnostic warning "-Wundef"
+#    pragma GCC diagnostic warning "-Wunused"
 #endif
 
 TCM_NAMESPACE_BEGIN
@@ -127,7 +127,6 @@ constexpr UnsafeTag unsafe_tag;
 
 template <torch::ScalarType ScalarType>
 using dtype_tag_t = std::integral_constant<torch::ScalarType, ScalarType>;
-
 
 // Horizontally adds elements of a float4 vector.
 //
@@ -195,7 +194,6 @@ TCM_NORETURN TCM_NOINLINE auto error_float_not_isfinite(char const* function,
 } // namespace detail
 // [errors] }}}
 
-
 // [SpinVector] {{{
 class SpinVector {
 
@@ -221,6 +219,7 @@ class SpinVector {
 #endif
 
     class SpinReference;
+
   public:
     constexpr SpinVector() noexcept : _data{} {}
 
@@ -514,8 +513,8 @@ inline constexpr auto SpinVector::max_size() noexcept -> unsigned
     return 8 * sizeof(_data.spin);
 }
 
-inline constexpr auto SpinVector::
-                      operator[](unsigned const i) const& TCM_NOEXCEPT -> Spin
+inline constexpr auto SpinVector::operator[](unsigned const i) const
+    & TCM_NOEXCEPT -> Spin
 {
     TCM_ASSERT(i < size(), "Index out of bounds.");
     return unsafe_at(i);
@@ -764,7 +763,6 @@ SpinVector::SpinVector(torch::Tensor const& spins)
     copy_from(data, size);
 }
 
-
 TCM_NOINLINE SpinVector::SpinVector(pybind11::str str)
 {
     // PyUnicode_Check macro uses old style casts
@@ -980,7 +978,6 @@ auto values_from_tensor(torch::Tensor const& values, Map& map) -> void
 }
 #endif
 
-
 } // namespace detail
 
 // [QuantumState] {{{
@@ -1031,7 +1028,7 @@ class QuantumState
 /// \brief Represents the Heisenberg Hamiltonian.
 class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
   public:
-    using edge_type    = std::pair<unsigned, unsigned>;
+    using edge_type = std::pair<unsigned, unsigned>;
 
   private:
     std::vector<edge_type> _edges;
@@ -1138,9 +1135,9 @@ class Polynomial : public std::enable_shared_from_this<Polynomial> {
                std::vector<complex_type>   coeffs);
 
     Polynomial(Polynomial const&) = delete;
-    Polynomial(Polynomial &&) = delete;
+    Polynomial(Polynomial&&)      = delete;
     Polynomial& operator=(Polynomial const&) = delete;
-    Polynomial& operator=(Polynomial &&) = delete;
+    Polynomial& operator=(Polynomial&&) = delete;
 
     inline auto    size() const noexcept -> size_t;
     inline auto    clear() noexcept -> void;
@@ -1158,11 +1155,13 @@ class Polynomial : public std::enable_shared_from_this<Polynomial> {
 
     auto keys() const -> torch::Tensor { return detail::keys_to_tensor(_old); }
 
-    auto values() const -> torch::Tensor { return detail::values_to_tensor(_old); }
+    auto values() const -> torch::Tensor
+    {
+        return detail::values_to_tensor(_old);
+    }
 
   private:
-    template <class Map>
-    static auto check_all_real(Map const& map) -> void
+    template <class Map> static auto check_all_real(Map const& map) -> void
     {
         constexpr auto eps       = static_cast<real_type>(2e-3);
         auto           norm_full = real_type{0};
@@ -1387,9 +1386,9 @@ class ToDo {
 
         auto update() -> void
         {
-            auto count = size_t{0};
+            auto       count = size_t{0};
             auto const pred  = [](auto const& x) { return x.has_value(); };
-            auto const size = _buffer.size();
+            auto const size  = _buffer.size();
             for (auto const& item : _buffer) {
                 if (item.has_value()) {
                     _bias += item.value();
@@ -1399,7 +1398,8 @@ class ToDo {
             auto last = std::remove_if(_buffer.begin(), _buffer.end(), pred);
             _buffer.erase(last, _buffer.end());
             TCM_ASSERT(size - _buffer.size() == count, "");
-            TCM_ASSERT((std::none_of(_buffer.begin(), _buffer.end(), pred)), "");
+            TCM_ASSERT((std::none_of(_buffer.begin(), _buffer.end(), pred)),
+                       "");
             // auto const last  = _buffer.end();
             // auto       first = std::find_if(_buffer.begin(), last, pred);
 
@@ -1436,7 +1436,7 @@ class ToDo {
     size_t            _number_tasks;
 
   public:
-    ToDo() : _todo{}, _tasks{}/*, _number_tasks{0}*/ {}
+    ToDo() : _todo{}, _tasks{} /*, _number_tasks{0}*/ {}
     ToDo(ToDo const&) = delete;
     ToDo(ToDo&&)      = delete;
     ToDo& operator=(ToDo const&) = delete;
@@ -1574,10 +1574,10 @@ inline auto load_forward_fn(std::string const& filename)
             "Failed to load torch::jit::script::Module from '" + filename
             + "'"};
     }
-    auto fn = 
-        [module = std::move(m)](torch::Tensor const& input) -> torch::Tensor {
-            return module->forward({input}).toTensor();
-        };
+    auto fn = [module =
+                   std::move(m)](torch::Tensor const& input) -> torch::Tensor {
+        return module->forward({input}).toTensor();
+    };
     return fn;
 }
 } // namespace detail
@@ -1724,7 +1724,10 @@ auto Machine::forward(torch::Tensor const& input, bool use_cache)
 {
     constexpr auto const* function =
         "Machine::forward(torch::Tensor const&, bool)";
-    torch::NoGradGuard no_grad;
+    // NOTE: This is a bug in PyTorch (I think). Disabling gradients from a
+    // C++ extension causes Torch JIT in combination with Torch distributed
+    // to hang.
+    // torch::NoGradGuard no_grad;
     if (!use_cache) { return _psi(input); }
 
     auto const scalar_type = input.type().scalarType();
@@ -1745,7 +1748,7 @@ auto Machine::forward(torch::Tensor const& input, ForwardIterator begin,
 {
     constexpr auto const* function = "Machine::forward(torch::Tensor const&, "
                                      "ForwardIterator, ForwardIterator)";
-    torch::NoGradGuard no_grad;
+    // torch::NoGradGuard no_grad;
 
     auto const scalar_type = input.type().scalarType();
     if (TCM_UNLIKELY(scalar_type != torch::kFloat32))
@@ -1768,7 +1771,9 @@ auto Machine::forward(torch::Tensor const& input, ForwardIterator begin,
     return output;
 }
 
-class TargetStateImpl : public torch::nn::Module {
+class TargetStateImpl
+    : public std::enable_shared_from_this<
+          TargetStateImpl> /*torch::nn::Module*/ {
 
   private:
     std::shared_ptr<Machine>    _psi;
@@ -1821,8 +1826,7 @@ class TargetStateImpl : public torch::nn::Module {
     auto forward(torch::Tensor const& input) -> torch::Tensor;
 };
 
-template <>
-struct TargetStateImpl::ForwardFn<float, 1> {
+template <> struct TargetStateImpl::ForwardFn<float, 1> {
     auto operator()(TargetStateImpl& self, torch::Tensor const& input) const
         -> torch::Tensor
     {
@@ -1850,8 +1854,7 @@ struct TargetStateImpl::ForwardFn<float, 1> {
     }
 };
 
-template <>
-struct TargetStateImpl::ForwardFn<float, 2> {
+template <> struct TargetStateImpl::ForwardFn<float, 2> {
     auto operator()(TargetStateImpl& self, torch::Tensor const& input) const
         -> torch::Tensor
     {
@@ -1877,7 +1880,7 @@ struct TargetStateImpl::ForwardFn<float, 2> {
 auto TargetStateImpl::forward(torch::Tensor const& input) -> torch::Tensor
 {
     constexpr auto const* function = "TargetState::forward(Tensor const&)";
-    torch::NoGradGuard    no_grad;
+    // torch::NoGradGuard    no_grad;
 
     auto const scalar_type = input.type().scalarType();
     if (TCM_UNLIKELY(scalar_type != torch::kFloat32))
@@ -1891,12 +1894,10 @@ auto TargetStateImpl::forward(torch::Tensor const& input) -> torch::Tensor
     } // end switch
 }
 
-TORCH_MODULE(TargetState);
-
+// TORCH_MODULE(TargetState);
 
 TCM_NAMESPACE_END
 
-
 #if defined(TCM_GCC)
-#pragma GCC diagnostic pop
+#    pragma GCC diagnostic pop
 #endif

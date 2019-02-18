@@ -1,7 +1,8 @@
 #include "nqs.hpp"
 // #include <pybind11/numpy.h>
 // #include <pybind11/pybind11.h>
-// #include <pybind11/stl.h>
+#include <pybind11/complex.h>
+#include <pybind11/stl.h>
 // #include <pybind11/functional.h>
 
 // #if defined(TCM_PYTORCH_EXTENSION)
@@ -10,31 +11,31 @@
 // #endif
 
 #if defined(TCM_GCC)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic warning "-W"
-#pragma GCC diagnostic warning "-Wall"
-#pragma GCC diagnostic warning "-Wextra"
-#pragma GCC diagnostic warning "-Wcast-align"
-#pragma GCC diagnostic warning "-Wcast-qual"
-#pragma GCC diagnostic warning "-Wctor-dtor-privacy"
-#pragma GCC diagnostic warning "-Wdisabled-optimization"
-#pragma GCC diagnostic warning "-Wformat=2"
-#pragma GCC diagnostic warning "-Winit-self"
-#pragma GCC diagnostic warning "-Wlogical-op"
-#pragma GCC diagnostic warning "-Wmissing-declarations"
-#pragma GCC diagnostic warning "-Wmissing-include-dirs"
-#pragma GCC diagnostic warning "-Wnoexcept"
-#pragma GCC diagnostic warning "-Wold-style-cast"
-#pragma GCC diagnostic warning "-Woverloaded-virtual"
-#pragma GCC diagnostic warning "-Wredundant-decls"
-#pragma GCC diagnostic warning "-Wshadow"
-#pragma GCC diagnostic warning "-Wsign-conversion"
-#pragma GCC diagnostic warning "-Wsign-promo"
-#pragma GCC diagnostic warning "-Wstrict-null-sentinel"
-#pragma GCC diagnostic warning "-Wstrict-overflow=5"
-#pragma GCC diagnostic warning "-Wswitch-default"
-#pragma GCC diagnostic warning "-Wundef"
-#pragma GCC diagnostic warning "-Wunused"
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic warning "-W"
+#    pragma GCC diagnostic warning "-Wall"
+#    pragma GCC diagnostic warning "-Wextra"
+#    pragma GCC diagnostic warning "-Wcast-align"
+#    pragma GCC diagnostic warning "-Wcast-qual"
+#    pragma GCC diagnostic warning "-Wctor-dtor-privacy"
+#    pragma GCC diagnostic warning "-Wdisabled-optimization"
+#    pragma GCC diagnostic warning "-Wformat=2"
+#    pragma GCC diagnostic warning "-Winit-self"
+#    pragma GCC diagnostic warning "-Wlogical-op"
+#    pragma GCC diagnostic warning "-Wmissing-declarations"
+#    pragma GCC diagnostic warning "-Wmissing-include-dirs"
+#    pragma GCC diagnostic warning "-Wnoexcept"
+#    pragma GCC diagnostic warning "-Wold-style-cast"
+#    pragma GCC diagnostic warning "-Woverloaded-virtual"
+#    pragma GCC diagnostic warning "-Wredundant-decls"
+#    pragma GCC diagnostic warning "-Wshadow"
+#    pragma GCC diagnostic warning "-Wsign-conversion"
+#    pragma GCC diagnostic warning "-Wsign-promo"
+#    pragma GCC diagnostic warning "-Wstrict-null-sentinel"
+#    pragma GCC diagnostic warning "-Wstrict-overflow=5"
+#    pragma GCC diagnostic warning "-Wswitch-default"
+#    pragma GCC diagnostic warning "-Wundef"
+#    pragma GCC diagnostic warning "-Wunused"
 #endif
 
 TCM_NAMESPACE_BEGIN
@@ -146,13 +147,8 @@ auto error_float_not_isfinite(char const*                function,
 TCM_NAMESPACE_END
 
 #if defined(TCM_GCC)
-#pragma GCC diagnostic pop
+#    pragma GCC diagnostic pop
 #endif
-
-
-
-
-
 
 namespace py = pybind11;
 
@@ -161,18 +157,18 @@ PYBIND11_MODULE(_C_nqs, m)
     m.doc() = R"EOF()EOF";
 
     using ::TCM_NAMESPACE::Heisenberg;
+    using ::TCM_NAMESPACE::Machine;
     using ::TCM_NAMESPACE::Polynomial;
     using ::TCM_NAMESPACE::SpinVector;
-    using ::TCM_NAMESPACE::Machine;
     using ::TCM_NAMESPACE::TargetStateImpl;
 
-    using ::TCM_NAMESPACE::real_type;
     using ::TCM_NAMESPACE::complex_type;
+    using ::TCM_NAMESPACE::real_type;
 
-    m.def("say_hi",
-          [](std::function<torch::Tensor(torch::Tensor const&)> const& fn) {
-              return fn(torch::randn({10}, torch::kFloat32));
-          });
+    // m.def("say_hi",
+    //       [](std::function<torch::Tensor(torch::Tensor const&)> const& fn) {
+    //           return fn(torch::randn({10}, torch::kFloat32));
+    //       });
 
     // m.def("foo", [](torch::nn::ModuleHolder& x) { auto y = torch::randn({10}, torch::kFloat32); return x.forward(y); });
 
@@ -180,10 +176,12 @@ PYBIND11_MODULE(_C_nqs, m)
         .def(py::init<torch::Tensor const&>())
         .def(py::init<py::str>())
         .def(py::init<py::array_t<float, py::array::c_style>>())
-        .def("__copy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Copies the current spin configuration.)EOF")
-        .def("__deepcopy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Same as ``self.__copy__()``.)EOF")
+        .def(
+            "__copy__", [](SpinVector const& x) { return SpinVector{x}; },
+            R"EOF(Copies the current spin configuration.)EOF")
+        .def(
+            "__deepcopy__", [](SpinVector const& x) { return SpinVector{x}; },
+            R"EOF(Same as ``self.__copy__()``.)EOF")
         .def("__len__", &SpinVector::size, R"EOF(
             Returns the number of spins in the vector.
         )EOF")
@@ -204,23 +202,27 @@ PYBIND11_MODULE(_C_nqs, m)
                  };
                  x.at(i) = float2spin(spin);
              })
-        .def("__eq__",
-             [](SpinVector const& x, SpinVector const& y) { return x == y; },
-             py::is_operator())
-        .def("__ne__",
-             [](SpinVector const& x, SpinVector const& y) { return x != y; },
-             py::is_operator())
+        .def(
+            "__eq__",
+            [](SpinVector const& x, SpinVector const& y) { return x == y; },
+            py::is_operator())
+        .def(
+            "__ne__",
+            [](SpinVector const& x, SpinVector const& y) { return x != y; },
+            py::is_operator())
         .def_property_readonly("size", &SpinVector::size,
                                R"EOF(Same as ``self.__len__()``.)EOF")
         .def_property_readonly("magnetisation", &SpinVector::magnetisation)
-        .def("numpy", [](SpinVector const& x) { return x.numpy(); },
-             py::return_value_policy::move)
-        .def("numpy",
-             [](SpinVector const&                      x,
-                py::array_t<float, py::array::c_style> out) {
-                 return x.numpy(std::move(out));
-             },
-             py::return_value_policy::move)
+        .def(
+            "numpy", [](SpinVector const& x) { return x.numpy(); },
+            py::return_value_policy::move)
+        .def(
+            "numpy",
+            [](SpinVector const&                      x,
+               py::array_t<float, py::array::c_style> out) {
+                return x.numpy(std::move(out));
+            },
+            py::return_value_policy::move)
         .def("__hash__", &SpinVector::hash, R"EOF(
             Returns the hash of the spin configuration.
         )EOF");
@@ -231,11 +233,11 @@ PYBIND11_MODULE(_C_nqs, m)
              R"EOF(Constructs Heisenberg Hamiltonian from a list of edges.)EOF")
         .def("__len__", &Heisenberg::size,
              R"EOF(Returns the number of edges.)EOF")
-        .def_property("coupling",
-                      [](Heisenberg const& h) { return h.coupling(); },
-                      [](Heisenberg& h, real_type const coupling) {
-                          h.coupling(coupling);
-                      })
+        .def_property(
+            "coupling", [](Heisenberg const& h) { return h.coupling(); },
+            [](Heisenberg& h, real_type const coupling) {
+                h.coupling(coupling);
+            })
         .def("edges", &Heisenberg::edges,
              R"EOF(
                  Returns graph edges
@@ -294,19 +296,34 @@ PYBIND11_MODULE(_C_nqs, m)
         .def("forward", &TargetState<Fn>::forward);
     */
 
-    torch::python::bind_module<TargetStateImpl>(m, "TargetState")
-        .def(py::init<std::shared_ptr<Machine>, std::shared_ptr<Polynomial>, size_t>(),
-             py::arg("machine"), py::arg("poly"), py::arg("batch_size") = 512)
-        .def("forward", &TargetStateImpl::forward);
+    py::class_<TargetStateImpl, std::shared_ptr<TargetStateImpl>>(m,
+                                                                  "TargetState")
+        .def(py::init<std::shared_ptr<Machine>, std::shared_ptr<Polynomial>,
+                      size_t>(),
+             py::arg("machine"), py::arg("poly"), py::arg("batch_size") = 512,
+             py::call_guard<py::gil_scoped_release>())
+        .def("forward", &TargetStateImpl::forward,
+             py::call_guard<py::gil_scoped_release>());
 
     py::class_<Machine, std::shared_ptr<Machine>>(m, "Machine")
-        .def(py::init([](std::string const& filename) {
-            return std::make_shared<Machine>(
-                ::TCM_NAMESPACE::detail::load_forward_fn(filename));
-        }))
-        .def(py::init<std::function<torch::Tensor(torch::Tensor const&)>>())
+        // .def(py::init([](std::string const& filename) {
+        //     return std::make_shared<Machine>(
+        //         ::TCM_NAMESPACE::detail::load_forward_fn(filename));
+        // }))
+        .def(py::init([](std::shared_ptr<torch::jit::script::Module> module) {
+                 auto fn =
+                     [module](torch::Tensor const& input) -> torch::Tensor {
+                     return module->forward({input}).toTensor();
+                 };
+                 return std::make_shared<Machine>(std::move(fn));
+             }),
+             py::call_guard<py::gil_scoped_release>())
+        // .def(py::init<std::function<torch::Tensor(torch::Tensor const&)>>())
         // .def("psi", &MachineImpl<torch::jit::script::Module>::psi)
-        .def("forward", [](Machine& machine, torch::Tensor const& input) {
-            return machine.forward(input);
-        });
+        .def(
+            "forward",
+            [](Machine& machine, torch::Tensor const& input) {
+                return machine.forward(input);
+            },
+            py::call_guard<py::gil_scoped_release>());
 }
