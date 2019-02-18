@@ -34,7 +34,7 @@ setup(name='nqs_playground',
               include_dirs=[
                   'cbits',
                   'external',
-                  'external/pybind11/include',
+                  # 'external/pybind11/include',
                   'external/boost/libs/pool/include',
                   ],
               extra_compile_args=["-std=c++14", # "-UNDEBUG", "-O1",
@@ -45,11 +45,12 @@ setup(name='nqs_playground',
           'build_ext': BuildExtension
       },
       install_requires=[
-          'numpy',
+          'torch>=1.0',
+          'numpy>=0.15',
           'scipy',
-          'torch',
           'numba',
           'click',
           'mpmath',
+          'psutil',
       ],
       zip_safe=False)
