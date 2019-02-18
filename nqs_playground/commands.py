@@ -59,8 +59,9 @@ import torch
 
 # from ._C_nqs import CompactSpin
 
+from .core import negative_log_overlap_real
 from .hamiltonian import read_hamiltonian
-from .swo import SWOConfig, swo_step
+from .swo import swo_step, split_between_two
 
 
 def import_network(nn_file: str):
@@ -80,6 +81,7 @@ def import_network(nn_file: str):
 def cli():
     pass
 
+from small import Net as AmplitudeNet
 
 @cli.command()
 @click.argument(
@@ -184,12 +186,12 @@ def swo(
     number_spins = H.number_spins
     magnetisation = 0 if number_spins % 2 == 0 else 1
 
-    thermalisation = steps // 10
-    m_c_steps = (
-        thermalisation * number_spins,
-        (thermalisation + steps) * number_spins,
-        1,
-    )
+    # thermalisation = steps // 10
+    # m_c_steps = (
+    #     thermalisation * number_spins,
+    #     (thermalisation + steps) * number_spins,
+    #     1,
+    # )
 
     ψ_amplitude = import_network(amplitude_nn_file)(number_spins)
     if in_amplitude is not None:
@@ -205,21 +207,27 @@ def swo(
     else:
         logging.info("Using random weights...")
 
+    config = {
+        "hamiltonian": H,
+        "magnetisation": magnetisation,
+        "affinity": split_between_two(),
+        "amplitude": {
+            "epochs": epochs_amplitude,
+            "optimiser": lambda p: torch.optim.Adam(p, lr=lr_amplitude),
+            "loss": lambda x, y: negative_log_overlap_real(x.view(-1), y),
+            "batch_size": 64,
+        },
+        "phase": {
+            "epochs": epochs_phase,
+            "optimiser": lambda p: torch.optim.Adam(p, lr=lr_phase),
+            "loss": torch.nn.CrossEntropyLoss(),
+            "batch_size": 64,
+        },
+    }
+
     for i in range(epochs_outer):
         logging.info("\t#{}".format(i))
-        swo_step(
-            (ψ_amplitude, ψ_phase),
-            SWOConfig(
-                H=H,
-                τ=tau,
-                steps=(5,) + m_c_steps,
-                magnetisation=magnetisation,
-                lr_amplitude=lr_amplitude,
-                lr_phase=lr_phase,
-                epochs_amplitude=epochs_amplitude,
-                epochs_phase=epochs_phase,
-            ),
-        )
+        swo_step((ψ_amplitude, ψ_phase), config)
         torch.save(ψ_amplitude.state_dict(), "{}.{}.amplitude.weights".format(out_file, i))
         torch.save(ψ_phase.state_dict(), "{}.{}.phase.weights".format(out_file, i))
 
