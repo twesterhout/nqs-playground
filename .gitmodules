@@ -10,3 +10,6 @@
 [submodule "external/gsl-lite"]
 	path = external/gsl-lite
 	url = https://github.com/martinmoene/gsl-lite.git
+[submodule "external/fmt"]
+	path = external/fmt
+	url = https://github.com/fmtlib/fmt.git
