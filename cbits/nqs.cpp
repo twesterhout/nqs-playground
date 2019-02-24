@@ -1,4 +1,8 @@
 #include "nqs.hpp"
+#include <ska_sort.hpp>
+
+#include <boost/sort/spreadsort/integer_sort.hpp>
+#include <parallel/algorithm>
 // #include <pybind11/numpy.h>
 // #include <pybind11/pybind11.h>
 // #include <pybind11/stl.h>
@@ -143,16 +147,36 @@ auto error_float_not_isfinite(char const*                function,
 // [errors.implementation] }}}
 } // namespace detail
 
+
+
+namespace detail {
+auto make_what_message(char const* file, size_t const line,
+                       char const* function, std::string const& description)
+    -> std::string
+{
+    return fmt::format("{}:{}: {}: {}", file, line, function, description);
+}
+
+auto spin_configuration_to_string(gsl::span<float const> spin) -> std::string
+{
+    std::ostringstream msg;
+    msg << '[';
+    if (spin.size() > 0) {
+        msg << spin[0];
+        for (auto i = size_t{1}; i < spin.size(); ++i) {
+            msg << ", " << spin[i];
+        }
+    }
+    msg << ']';
+    return msg.str();
+}
+} // namespace detail
+
 TCM_NAMESPACE_END
 
 #if defined(TCM_GCC)
 #pragma GCC diagnostic pop
 #endif
-
-
-
-
-
 
 namespace py = pybind11;
 
@@ -162,21 +186,48 @@ PYBIND11_MODULE(_C_nqs, m)
 
     using ::TCM_NAMESPACE::Heisenberg;
     using ::TCM_NAMESPACE::Polynomial;
+    using ::TCM_NAMESPACE::PolynomialState;
     using ::TCM_NAMESPACE::SpinVector;
-    using ::TCM_NAMESPACE::Machine;
-    using ::TCM_NAMESPACE::TargetStateImpl;
+    // using ::TCM_NAMESPACE::Machine;
+    // using ::TCM_NAMESPACE::TargetStateImpl;
 
     using ::TCM_NAMESPACE::real_type;
     using ::TCM_NAMESPACE::complex_type;
 
-    m.def("say_hi",
-          [](std::function<torch::Tensor(torch::Tensor const&)> const& fn) {
-              return fn(torch::randn({10}, torch::kFloat32));
-          });
+    m.def("say_hi", [](torch::optional<int> const& x) {
+        if (x.has_value()) { py::print("Has value:", x); }
+        else {
+            py::print("No value!");
+        }
+    });
+
+    m.def("do_sort", [](Polynomial const& p) {
+        using MicroSecondsT =
+            std::chrono::duration<double, std::chrono::microseconds::period>;
+        std::vector<std::pair<SpinVector, std::complex<double>>> array;
+        array.reserve(p.size());
+        std::transform(
+            std::begin(p.vectors()), std::end(p.vectors()),
+            std::back_inserter(array), [](auto const s) {
+                return std::pair<SpinVector, std::complex<double>>{s, 0.0};
+            });
+        auto time_start = std::chrono::steady_clock::now();
+        // __gnu_parallel::sort(std::begin(array), std::end(array),
+        //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
+        ska_sort(std::begin(array), std::end(array),
+                 [](auto const& x) { return x.first.ska_key(); });
+        // boost::sort::spreadsort::integer_sort(std::begin(array), std::end(array),
+        //     [](auto const& a, unsigned const offset) { return a.first.ska_key() >> offset; },
+        //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
+        auto time_interval =
+            MicroSecondsT(std::chrono::steady_clock::now() - time_start);
+        return time_interval.count();
+    });
 
     // m.def("foo", [](torch::nn::ModuleHolder& x) { auto y = torch::randn({10}, torch::kFloat32); return x.forward(y); });
 
-    py::class_<SpinVector>(m, "CompactSpin")
+    py::class_<SpinVector>(m, "CompactSpin",
+        R"EOF( Hello world! )EOF")
         .def(py::init<torch::Tensor const&>())
         .def(py::init<py::str>())
         .def(py::init<py::array_t<float, py::array::c_style>>())
@@ -243,12 +294,25 @@ PYBIND11_MODULE(_C_nqs, m)
                  .. warning:: This function copies the edges
              )EOF");
 
-    py::class_<Polynomial, std::shared_ptr<Polynomial>>(m, "Polynomial",
-                                                        R"EOF(
+    py::class_<Polynomial>(m, "Polynomial",
+                           R"EOF(
             Represents polynomials in H.
         )EOF")
-        .def(py::init<std::shared_ptr<Heisenberg>, std::vector<complex_type>>(),
-             py::arg("hamiltonian"), py::arg("coeffs"),
+        .def(py::init(
+                 [](std::shared_ptr<Heisenberg>                           h,
+                    std::vector<std::pair<
+                        complex_type, torch::optional<real_type>>> const& ts) {
+                     std::vector<Polynomial::Term> terms;
+                     terms.reserve(ts.size());
+                     std::transform(ts.cbegin(), ts.cend(),
+                                    std::back_inserter(terms),
+                                    [](auto const& t) -> Polynomial::Term {
+                                        return {t.first, t.second};
+                                    });
+                     return std::make_unique<Polynomial>(std::move(h),
+                                                         std::move(terms));
+                 }),
+             py::arg("hamiltonian"), py::arg("terms"),
              R"EOF(
                 Given a Hamiltonian H and coefficients cᵢ (i ∈ {0, 1, ..., n-1})
                 constructs the following polynomial
@@ -267,8 +331,23 @@ PYBIND11_MODULE(_C_nqs, m)
         // .def("print", &Polynomial::print)
         .def("__call__", &Polynomial::operator(), py::arg("coeff"),
              py::arg("spin"))
-        .def("keys", [](Polynomial const& p) { return p.keys(); })
-        .def("values", [](Polynomial const& p) { return p.values(); })
+        .def("keys",
+             [](Polynomial const& p) {
+                 if (p.size() == 0) {
+                     return ::TCM_NAMESPACE::detail::make_f32_tensor(0);
+                 }
+                 auto const number_spins = p.vectors().front().size();
+                 auto       output = ::TCM_NAMESPACE::detail::make_f32_tensor(
+                     p.size(), number_spins);
+                 auto* data = p.vectors().data();
+                 ::TCM_NAMESPACE::detail::unpack_to_tensor(
+                     /*first=*/data, /*last=*/data + p.size(),
+                     /*destination=*/output);
+                 return output;
+             },
+             py::return_value_policy::move)
+        .def("values",
+             [](Polynomial const& p) { return torch::Tensor{p.coefficients()}; })
 #if 0
         .def("keys",
              [](Polynomial const&                      p,
@@ -294,6 +373,24 @@ PYBIND11_MODULE(_C_nqs, m)
         .def("forward", &TargetState<Fn>::forward);
     */
 
+    py::class_<PolynomialState>(m, "TargetState")
+        .def(py::init([](std::string const& filename, Polynomial const& poly,
+                         size_t batch_size) {
+            return std::make_unique<PolynomialState>(
+                ::TCM_NAMESPACE::detail::load_forward_fn(filename), poly,
+                batch_size);
+        }))
+        .def("__call__", [](PolynomialState& state,
+                            SpinVector const input) { return state(input); })
+        .def("__call__",
+             [](PolynomialState& state, torch::Tensor const& input) {
+                 return state(SpinVector{input});
+             })
+        .def_property_readonly("time_poly", &PolynomialState::time_poly)
+        .def_property_readonly("time_psi", &PolynomialState::time_psi)
+        ;
+
+#if 0
     torch::python::bind_module<TargetStateImpl>(m, "TargetState")
         .def(py::init<std::shared_ptr<Machine>, std::shared_ptr<Polynomial>, size_t>(),
              py::arg("machine"), py::arg("poly"), py::arg("batch_size") = 512)
@@ -309,4 +406,5 @@ PYBIND11_MODULE(_C_nqs, m)
         .def("forward", [](Machine& machine, torch::Tensor const& input) {
             return machine.forward(input);
         });
+#endif
 }
