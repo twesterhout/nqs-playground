@@ -34,500 +34,66 @@
 import cmath
 import collections
 from copy import deepcopy
-import cProfile
-import importlib
+# import cProfile
+# import importlib
 from itertools import islice
 from functools import reduce
 import logging
 import math
-import os
-import sys
-import time
+# import os
+# import sys
+# import time
 from typing import Dict, List, Tuple, Optional
 
-import click
-import mpmath  # Just to be safe: for accurate computation of L2 norms
-from numba import jit, jitclass, uint8, int64, uint64, float32
-from numba.types import Bytes
-import numba.extending
+# import click
+# import mpmath  # Just to be safe: for accurate computation of L2 norms
+# from numba import jit, jitclass, uint8, int64, uint64, float32
+# from numba.types import Bytes
+# import numba.extending
 import numpy as np
-import scipy
-from scipy.sparse.linalg import lgmres, LinearOperator
+# import scipy
+# from scipy.sparse.linalg import lgmres, LinearOperator
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn as nn
+# import torch.nn.functional as F
 
+from . import _C_nqs
 from ._C_nqs import CompactSpin
 
 ################################################################################
 # NQS
 ################################################################################
 
-# TODO(twesterhout): Replace by C++ code
-# @jit(uint64(uint64), nopython=True)
-# def _hash_uint64(x: int) -> int:
+# def random_spin(n: int, magnetisation: int = None) -> np.ndarray:
 #     """
-#     Hashes a 64-bit integer.
-# 
-#     .. note::
-# 
-#        The algorithm is taken from https://stackoverflow.com/a/12996028.
+#     :return:
+#         a random spin configuration of length ``n``
+#         with magnetisation ``magnetisation``.
 #     """
-#     x = (x ^ (x >> 30)) * uint64(0xBF58476D1CE4E5B9)
-#     x = (x ^ (x >> 27)) * uint64(0x94D049BB133111EB)
-#     x = x ^ (x >> 31)
-#     return x
-
-# TODO(twesterhout): Replace by C++ code
-# @jitclass([("_d0", uint64), ("_d1", uint64), ("_d2", uint64), ("_size", int64)])
-# class _CompactSpin(object):
-#     """
-#     .. warning::
-#         
-#         This class is an implementation detail! **Use at your own risk.**
-# 
-#     Compact representation of a spin configuration.
-# 
-#     Spin quantum numbers are represented by bits:
-# 
-#       * unset (``0``) means *spin down* and
-#       * set (``1``) means *spin up*.
-# 
-#     Currently, the maximum supported size is 192.
-#     """
-# 
-#     def __init__(self, d0: uint64, d1: uint64, d2: uint64, n: uint64):
-#         """
-#         .. warning::
-# 
-#            **Do not use this function unless you know what you're doing!**
-# 
-#         ``_d0``, ``_d1``, and ``_d2`` form a bitarray of at most 192 bits.
-#         """
-#         assert n > 0
-#         self._d0 = d0
-#         self._d1 = d1
-#         self._d2 = d2
-#         self._size = n
-# 
-#     @property
-#     def size(self) -> uint64:
-#         """
-#         Returns the number of spins.
-#         """
-#         return self._size
-# 
-#     @property
-#     def hash(self) -> uint64:
-#         """
-#         Computes the hash of the spin configuration.
-# 
-#         .. note::
-# 
-#            The algorithm is taken from ``boost::hash_combine``.
-#         """
-#         seed = _hash_uint64(self._d0)
-#         seed ^= _hash_uint64(self._d1) + uint64(0x9E3779B9) + (seed << 6) + (seed >> 2)
-#         seed ^= _hash_uint64(self._d2) + uint64(0x9E3779B9) + (seed << 6) + (seed >> 2)
-#         return seed
-# 
-#     def as_int(self):
-#         """
-#         Returns the integer representation of the spin configuration.
-# 
-#         .. warning::
-# 
-#            Only spin configurations shorter than 64 spins support this function.
-#         """
-#         if self._size > 63:
-#             raise OverflowError(
-#                 "Spin configuration is too long to be represented by an int"
+#     if n <= 0:
+#         raise ValueError("Invalid number of spins: {}".format(n))
+#     if magnetisation is not None:
+#         if abs(magnetisation) > n:
+#             raise ValueError(
+#                 "Magnetisation exceeds the number of spins: |{}| > {}".format(
+#                     magnetisation, n
+#                 )
 #             )
-#         return self._d2
-# 
-#     def as_str(self) -> np.ndarray:
-#         """
-#         Returns the string representation of the spin configuration.
-# 
-#         .. warning::
-# 
-#            This function is quite slow. Do not use it in performance-critical
-#            parts.
-# 
-#         :return: NumPy array of ``uint8``.
-#         """
-#         code_of_zero = 48
-#         code_of_one = 49
-#         s = np.empty(self._size, dtype=np.uint8)
-#         for i in range(self._size):
-#             s[i] = code_of_one if self.get(i) else code_of_zero
-#         return s
-# 
-#     def equal_to(self, other) -> bool:
-#         """
-#         :return: ``self == other``.
-#         """
-#         assert self._size == other._size
-#         return self._d0 == other._d0 and self._d1 == other._d1 and self._d2 == other._d2
-# 
-#     def less_than(self, other) -> bool:
-#         """
-#         :return: ``self < other``.
-#         """
-#         assert self._size == other._size
-#         if self._d0 < other._d0:
-#             return True
-#         elif self._d0 > other._d0:
-#             return False
-#         elif self._d1 < other._d1:
-#             return True
-#         elif self._d1 > other._d1:
-#             return False
-#         elif self._d2 < other._d2:
-#             return True
-#         else:
-#             return False
-# 
-#     def less_or_equal_to(self, other) -> bool:
-#         """
-#         :return: ``self <= other``.
-#         """
-#         assert self._size == other._size
-#         if self._d0 < other._d0:
-#             return True
-#         elif self._d0 > other._d0:
-#             return False
-#         elif self._d1 < other._d1:
-#             return True
-#         elif self._d1 > other._d1:
-#             return False
-#         elif self._d2 <= other._d2:
-#             return True
-#         else:
-#             return False
-# 
-#     def get(self, i):
-#         """
-#         Returns the spin at index ``i``.
-#         """
-#         i = self._size - 1 - i
-#         chunk = i // 64
-#         if chunk == 0:
-#             return (self._d2 >> i) & 0x01
-#         elif chunk == 1:
-#             return (self._d1 >> (i - 64)) & 0x01
-#         else:
-#             assert chunk == 2
-#             return (self._d0 >> (i - 128)) & 0x01
-
-
-# TODO(twesterhout): Replace by C++ code
-# @jit(numba.types.uint32(numba.types.uint32), nopython=True)
-# def _popcount_32(v: int) -> int:
-#     """
-#     .. warning::
-# 
-#        **Do not use this function unless you know what you're doing!**
-# 
-#     :return: Number of set (1) bits in a 32-bit integer.
-#     """
-#     v = v - ((v >> 1) & 0x55555555)
-#     v = (v & 0x33333333) + ((v >> 2) & 0x33333333)
-#     return (((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) & 0xFFFFFFFF) >> 24
-
-
-# TODO(twesterhout): Replace by C++ code
-# @jit(uint64(uint64), nopython=True)
-# def _popcount(x: int) -> int:
-#     """
-#     .. warning::
-# 
-#        **Do not use this function unless you know what you're doing!**
-# 
-#     :return: Number of set (1) bits in a 64-bit integer.
-#     """
-#     return _popcount_32(x & uint64(0x00000000FFFFFFFF)) + _popcount_32(x >> 32)
-
-
-# TODO(twesterhout): Replace by C++ code
-# @jit(
-#     locals={
-#         "chunks": uint64,
-#         "rest": uint64,
-#         "d0": uint64,
-#         "d1": uint64,
-#         "d2": uint64,
-#         "i": uint64,
-#     },
-#     nopython=True,
-# )
-# def _array2spin(x: np.ndarray) -> _CompactSpin:
-#     """
-#     Given a spin configuration as a numpy arrray, returns the compact
-#     representation of it.
-#     """
-#     chunks = x.size // 64
-#     rest = x.size % 64
-#     d0 = 0
-#     d1 = 0
-#     d2 = 0
-#     if chunks == 0:
-#         for i in range(rest):
-#             d2 |= uint64(x[i] > 0) << (rest - 1 - i)
-#     elif chunks == 1:
-#         for i in range(rest):
-#             d1 |= uint64(x[i] > 0) << (rest - 1 - i)
-#         for i in range(64):
-#             d2 |= uint64(x[rest + i] > 0) << (63 - i)
+#         if (n + magnetisation) % 2 != 0:
+#             raise ValueError("Invalid magnetisation: {}".format(magnetisation))
+#         number_ups = (n + magnetisation) // 2
+#         number_downs = (n - magnetisation) // 2
+#         spin = np.empty((n,), dtype=np.float32)
+#         spin[:number_ups] = 1.0
+#         spin[number_ups:] = -1.0
+#         np.random.shuffle(spin)
+#         assert int(spin.sum()) == magnetisation
+#         return spin
 #     else:
-#         assert chunks == 2
-#         for i in range(rest):
-#             d0 |= uint64(x[i] > 0) << (rest - 1 - i)
-#         for i in range(64):
-#             d1 |= uint64(x[rest + i] > 0) << (63 - i)
-#         for i in range(64):
-#             d2 |= uint64(x[64 + rest + i] > 0) << (63 - i)
-#     return _CompactSpin(d0, d1, d2, x.size)
-
-
-# TODO(twesterhout): Replace by C++ code
-# @jit(
-#     locals={"size": uint64, "chunks": uint64, "rest": uint64, "t": uint64, "i": int64},
-#     nopython=True,
-# )
-# def _spin2array(
-#     spin: _CompactSpin, out: Optional[np.ndarray] = None, dtype: np.dtype = np.float32
-# ) -> np.ndarray:
-#     """
-#     Unpacks a compact spin into a numpy array.
-#     """
-#     size = spin.size
-#     if out is None:
-#         out = np.empty(size, dtype=dtype)
-#     chunks = size // 64
-#     rest = size % 64
-#     if chunks == 0:
-#         t = spin._d2
-#         i = size - 1
-#         for _ in range(rest):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         assert i == -1
-#     elif chunks == 1:
-#         t = spin._d2
-#         i = size - 1
-#         for _ in range(64):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         assert i == rest - 1
-#         t = spin._d1
-#         for _ in range(rest):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         assert i == -1
-#     else:  # chunks == 2
-#         assert chunks == 2
-#         t = spin._d2
-#         i = size - 1
-#         for _ in range(64):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         t = spin._d1
-#         for _ in range(64):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         assert i == rest - 1
-#         t = spin._d0
-#         for _ in range(rest):
-#             out[i] = -1.0 + 2.0 * (t & 0x01)
-#             t >>= 1
-#             i -= 1
-#         assert i == -1
-#     return out
-
-
-# TODO(twesterhout): Replace by C++ code
-# class Spin(object):
-#     """
-#     Compact representation of a spin configuration.
-#     """
-# 
-#     def __init__(self, x):
-#         """
-#         .. warning::
-# 
-#            **Do not use this function unless you know what you're doing!**
-#            Instead, have a look at :py:func:`Spin.from_str` and :py:func:`from_array` functions.
-#         """
-#         assert isinstance(x, _CompactSpin)
-#         self._jitted = x
-# 
-#     def __copy__(self):
-#         """
-#         :return: a copy of the spin configuration.
-#         """
-#         return Spin(
-#             _CompactSpin(
-#                 self._jitted._d0, self._jitted._d1, self._jitted._d2, self._jitted._size
-#             )
-#         )
-# 
-#     def __deepcopy__(self):
-#         """
-#         :return: a copy of the spin configuration.
-#         """
-#         return self.__copy__()
-# 
-#     def __str__(self) -> str:
-#         """
-#         .. warning::
-# 
-#            This function is quite slow, so don't use it in performance-critical
-#            parts.
-# 
-#         :return: the string representation of the spin configuration.
-#         """
-#         return bytes(self._jitted.as_str().data).decode("utf-8")
-# 
-#     def __int__(self) -> int:
-#         """
-#         .. note::
-# 
-#            This function is only works for spin chains shorted than 64
-# 
-#         :return: the integer representation of the spin configuration.
-#         """
-#         return self._jitted.as_int()
-# 
-#     def __len__(self) -> int:
-#         """
-#         :return: number of spins in the spin configuration
-#         """
-#         return self._jitted._size
-# 
-#     def __hash__(self) -> int:
-#         """
-#         Calculates the hash of the spin configuration.
-#         """
-#         return self._jitted.hash
-# 
-#     def __eq__(self, other) -> bool:
-#         """
-#         :return: ``self == other``
-#         """
-#         return self._jitted.equal_to(other._jitted)
-# 
-#     def __lt__(self, other) -> bool:
-#         """
-#         :return: ``self < other``
-#         """
-#         return self._jitted.less_than(other._jitted)
-# 
-#     def __le__(self, other) -> bool:
-#         """
-#         :return: ``self <= other``
-#         """
-#         return self._jitted.less_or_equal_to(other._jitted)
-# 
-#     def __gt__(self, other) -> bool:
-#         """
-#         :return: ``self > other``
-#         """
-#         return other._jitted.less_than(self._jitted)
-# 
-#     def __ge__(self, other) -> bool:
-#         """
-#         :return: ``self >= other``
-#         """
-#         return other._jitted.less_or_equal_to(self._jitted)
-# 
-#     def numpy(self) -> np.ndarray:
-#         """
-#         Unpacks the spin configuration into a numpy array of ``float32``. Spin
-#         down is represented by ``-1.0`` and spin up -- by ``1.0``.
-#         """
-#         return _spin2array(self._jitted)
-# 
-#     @property
-#     def size(self) -> int:
-#         """
-#         :return: number of spins in the spin configuration
-#         """
-#         return self._jitted._size
-# 
-#     @staticmethod
-#     def from_array(x: np.ndarray):
-#         """
-#         Packs a numpy array of ``float32`` into a ``Spin``.
-#         """
-#         return Spin(_array2spin(x))
-# 
-#     @staticmethod
-#     def from_str(s: str):
-#         """
-#         Constructs a spin configuration from the string representation: '0' means spin down
-#         and '1' means spin up.
-# 
-#         .. warning:: Do not use this function in performance-critical code!
-#         """
-#         n = len(s)
-#         if n > 192:
-#             raise OverflowError(
-#                 "Spin configurations longer than 192 are not (yet) supported."
-#             )
-#         chunks = n // 64
-#         if chunks == 0:
-#             return Spin(_CompactSpin(0, 0, uint64(int(s, base=2)), n))
-#         elif chunks == 1:
-#             return Spin(
-#                 _CompactSpin(
-#                     0, uint64(int(s[:-64], base=2)), uint64(int(s[-64:], base=2)), n
-#                 )
-#             )
-#         else:
-#             assert chunks == 2
-#             return Spin(
-#                 _CompactSpin(
-#                     uint64(int(s[:-128], base=2)),
-#                     uint64(int(s[-128:-64], base=2)),
-#                     uint64(int(s[-64:], base=2)),
-#                     n,
-#                 )
-#             )
-
+#         return np.random.choice([np.float32(-1.0), np.float32(1.0)], size=n)
 
 def random_spin(n: int, magnetisation: int = None) -> np.ndarray:
-    """
-    :return:
-        a random spin configuration of length ``n``
-        with magnetisation ``magnetisation``.
-    """
-    if n <= 0:
-        raise ValueError("Invalid number of spins: {}".format(n))
-    if magnetisation is not None:
-        if abs(magnetisation) > n:
-            raise ValueError(
-                "Magnetisation exceeds the number of spins: |{}| > {}".format(
-                    magnetisation, n
-                )
-            )
-        if (n + magnetisation) % 2 != 0:
-            raise ValueError("Invalid magnetisation: {}".format(magnetisation))
-        number_ups = (n + magnetisation) // 2
-        number_downs = (n - magnetisation) // 2
-        spin = np.empty((n,), dtype=np.float32)
-        spin[:number_ups] = 1.0
-        spin[number_ups:] = -1.0
-        np.random.shuffle(spin)
-        assert int(spin.sum()) == magnetisation
-        return spin
-    else:
-        return np.random.choice([np.float32(-1.0), np.float32(1.0)], size=n)
+    return _C_nqs.random_spin(n, magnetisation).numpy()
 
 
 class Machine(torch.nn.Module):
@@ -565,8 +131,7 @@ class Machine(torch.nn.Module):
         """
         :return: number of spins in the system
         """
-        return 18
-        # return self._ψ.number_spins
+        return self._ψ.number_spins
 
     @property
     def ψ(self) -> torch.nn.Module:
@@ -668,19 +233,6 @@ class Machine(torch.nn.Module):
         out[:] = cell.der_log_wf
         return out
 
-    # def forward(self, x, use_cache=False):
-    #     if not use_cache:
-    #         return self._ψ.forward(x)
-    #     c2t = lambda z: torch.tensor([z.real, z.imag], dtype=torch.float32)
-    #     if x.dim() == 1:
-    #         return c2t(self.log_wf(x.numpy()))
-    #     else:
-    #         assert x.dim() == 2
-    #         out = torch.empty((x.size(0), 2), dtype=torch.float32)
-    #         for i in range(x.size(0)):
-    #             out[i] = c2t(self.log_wf(x[i].numpy()))
-    #         return out
-
     def clear_cache(self):
         """
         Clears the internal cache.
@@ -721,8 +273,8 @@ class ExplicitState(torch.nn.Module):
     def __init__(self, state: Dict[CompactSpin, complex], apply_log=False):
         """
         If ``apply_log=False``, then ``state`` is a dictionary mapping spins ``σ``
-        to their corresponding ``log(⟨σ|ψ⟩)``.  Otherwise, ``state`` maps ``σ``
-        to ``⟨σ|ψ⟩``.
+        to their corresponding ``log(⟨σ|ψ⟩)``. Otherwise, ``state`` maps ``σ`` to
+        ``⟨σ|ψ⟩``.
         """
         super().__init__()
         self._state = state
@@ -785,48 +337,48 @@ class ExplicitState(torch.nn.Module):
         """
         raise NotImplementedError()
 
-
-class CombiningState(torch.nn.Module):
-    """
-    Given two neural networks: one mapping ``σ``s to log amplitudes ``r``s and
-    the other mapping ``σ`` to phases ``φ``s, combines them into a single neural
-    network mapping ``σ``s to ``r + iφ``s.
-    """
-
-    def __init__(self, log_amplitude: torch.nn.Module, phase: torch.nn.Module):
-        super().__init__()
-        assert log_amplitude.number_spins == phase.number_spins
-        self._log_amplitude = log_amplitude
-        self._phase = phase
-
-    @property
-    def number_spins(self):
-        """
-        :return: number of spins in the system.
-        """
-        return self._log_amplitude.number_spins
-
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        if x.dim() == 1:
-            return torch.cat(
-                [
-                    self._log_amplitude(x),
-                    math.pi * torch.max(self._phase(x), dim=0, keepdim=True)[1].float(),
-                ]
-            )
-        else:
-            assert x.dim() == 2
-            return torch.cat(
-                [
-                    self._log_amplitude(x),
-                    math.pi * torch.max(self._phase(x), dim=1)[1].view(-1, 1).float(),
-                ],
-                dim=1,
-            )
-
-    def backward(self, x):
-        raise NotImplementedError()
-
+# 
+# class CombiningState(torch.nn.Module):
+#     """
+#     Given two neural networks: one mapping ``σ``s to log amplitudes ``r``s and
+#     the other mapping ``σ`` to phases ``φ``s, combines them into a single neural
+#     network mapping ``σ``s to ``r + iφ``s.
+#     """
+# 
+#     def __init__(self, log_amplitude: torch.nn.Module, phase: torch.nn.Module):
+#         super().__init__()
+#         assert log_amplitude.number_spins == phase.number_spins
+#         self._log_amplitude = log_amplitude
+#         self._phase = phase
+# 
+#     @property
+#     def number_spins(self):
+#         """
+#         :return: number of spins in the system.
+#         """
+#         return self._log_amplitude.number_spins
+# 
+#     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+#         if x.dim() == 1:
+#             return torch.cat(
+#                 [
+#                     self._log_amplitude(x),
+#                     math.pi * torch.max(self._phase(x), dim=0, keepdim=True)[1].float(),
+#                 ]
+#             )
+#         else:
+#             assert x.dim() == 2
+#             return torch.cat(
+#                 [
+#                     self._log_amplitude(x),
+#                     math.pi * torch.max(self._phase(x), dim=1)[1].view(-1, 1).float(),
+#                 ],
+#                 dim=1,
+#             )
+# 
+#     def backward(self, x):
+#         raise NotImplementedError()
+ 
 # Calculates ``log(1/‖ψ‖₂)``
 #
 #     (‖ψ‖₂)² = ∑|ψᵢ|² = ∑exp(log(|ψᵢ|²)) = ∑exp(2 * log(|ψᵢ|) - log(ψₘₐₓ) + log(ψₘₐₓ))
@@ -840,21 +392,26 @@ class CombiningState(torch.nn.Module):
 # :return:      ``log(1/‖ψ‖₂)``.
 @torch.jit.script
 def normalisation_constant(log_psi):
-    # log_psi = log_psi.detach()
+    log_psi = log_psi.view([-1])
     max_log_amplitude = torch.max(log_psi)
     scale = -0.5 * (
         max_log_amplitude
-        + torch.log(torch.sum(torch.exp(2 * log_psi.view([-1]) - max_log_amplitude)))
+        + torch.log(torch.sum(torch.exp(2 * log_psi - max_log_amplitude)))
     )
     return scale
 
 
-# @torch.jit.script
+@torch.jit.script
 def negative_log_overlap_real(predicted, expected):
+    predicted = predicted.view([-1])
+    expected = expected.view([-1])
     sqr_l2_expected = torch.dot(expected, expected)
     sqr_l2_predicted = torch.dot(predicted, predicted)
     expected_dot_predicted = torch.dot(expected, predicted)
-    return -0.5 * torch.log(expected_dot_predicted * expected_dot_predicted / (sqr_l2_expected * sqr_l2_predicted))
+    return -0.5 * torch.log(
+        expected_dot_predicted * expected_dot_predicted
+        / (sqr_l2_expected * sqr_l2_predicted)
+    )
 
 ################################################################################
 # Markov chains
@@ -1549,22 +1106,61 @@ def negative_log_overlap(φ: torch.Tensor, ψ: torch.Tensor) -> torch.Tensor:
 # SWO
 ################################################################################
 
+# "Borrowed" from pytorch/torch/serialization.py.
+# All credit goes to PyTorch developers.
+def _with_file_like(f, mode, body):
+    """
+    Executes a body function with a file object for f, opening
+    it in 'mode' if it is a string filename.
+    """
+    new_fd = False
+    if isinstance(f, str) or \
+            (sys.version_info[0] == 2 and isinstance(f, unicode)) or \
+            (sys.version_info[0] == 3 and isinstance(f, pathlib.Path)):
+        new_fd = True
+        f = open(f, mode)
+    try:
+        return body(f)
+    finally:
+        if new_fd:
+            f.close()
 
-def load_explicit(stream):
+def _load_explicit(stream):
     psi = {}
     number_spins = None
     for line in stream:
         if line.startswith(b"#"):
             continue
         (spin, real, imag) = line.split()
-        if number_spins is None:
-            number_spins = len(spin)
-        else:
-            assert number_spins == len(spin)
-        spin = CompactSpin(spin)  # int(spin, base=2)
-        coeff = complex(float(real), float(imag))
-        psi[spin] = coeff
+        number_spins = len(spin)
+        psi[CompactSpin(spin)] = complex(float(real), float(imag))
+        break
+    for line in stream:
+        if line.startswith(b"#"):
+            continue
+        (spin, real, imag) = line.split()
+        if len(spin) != number_spins:
+            raise ValueError("A single state cannot contain spin "
+                             "configurations of different sizes")
+        psi[CompactSpin(spin)] = complex(float(real), float(imag))
     return psi, number_spins
+
+def load_explicit(stream):
+    return _with_file_like(stream, "rb", _load_explicit)
+    # psi = {}
+    # number_spins = None
+    # for line in stream:
+    #     if line.startswith(b"#"):
+    #         continue
+    #     (spin, real, imag) = line.split()
+    #     if number_spins is None:
+    #         number_spins = len(spin)
+    #     else:
+    #         assert number_spins == len(spin)
+    #     spin = CompactSpin(spin)  # int(spin, base=2)
+    #     coeff = complex(float(real), float(imag))
+    #     psi[spin] = coeff
+    # return psi, number_spins
 
 
 # class ChebyshevTargetState(torch.nn.Module):

@@ -34,7 +34,7 @@
 # import cmath
 # import collections
 # from copy import deepcopy
-import cProfile
+# import cProfile
 import importlib
 # from itertools import islice
 # from functools import reduce
@@ -59,6 +59,7 @@ import torch
 
 # from ._C_nqs import CompactSpin
 
+from .core import negative_log_overlap_real
 from .hamiltonian import read_hamiltonian
 from .swo import SWOConfig, swo_step
 
@@ -147,13 +148,6 @@ def cli():
     help="Learning rate for training the phase net.",
 )
 @click.option(
-    "--tau",
-    type=click.FloatRange(min=1.0e-10),
-    default=0.2,
-    show_default=True,
-    help="τ",
-)
-@click.option(
     "--steps",
     type=click.IntRange(min=1),
     default=2000,
@@ -172,7 +166,6 @@ def swo(
     epochs_phase,
     lr_amplitude,
     lr_phase,
-    tau,
     steps,
 ):
     logging.basicConfig(
@@ -183,13 +176,6 @@ def swo(
     H = read_hamiltonian(hamiltonian_file)
     number_spins = H.number_spins
     magnetisation = 0 if number_spins % 2 == 0 else 1
-
-    thermalisation = steps // 10
-    m_c_steps = (
-        thermalisation * number_spins,
-        (thermalisation + steps) * number_spins,
-        1,
-    )
 
     ψ_amplitude = import_network(amplitude_nn_file)(number_spins)
     if in_amplitude is not None:
@@ -205,23 +191,43 @@ def swo(
     else:
         logging.info("Using random weights...")
 
+    config = {
+        "number_spins": number_spins,
+        "magnetisation": magnetisation,
+        "hamiltonian": H,
+        "roots": [(1, None), (1, None)],
+        "amplitude": {
+            "optimiser": lambda p: torch.optim.Adam(p, lr=lr_amplitude),
+            "epochs": epochs_amplitude,
+            "batch_size": 1024,
+            "loss": lambda x, y: negative_log_overlap_real(x, y),
+        },
+        "phase": {
+            "optimiser": lambda p: torch.optim.Adam(p, lr=lr_phase),
+            "epochs": epochs_phase,
+            "batch_size": 10240,
+            "loss": torch.nn.CrossEntropyLoss(),
+        },
+    }
+
     for i in range(epochs_outer):
-        logging.info("\t#{}".format(i))
+        logging.info("-" * 10 + str(i) + "-" * 10)
         swo_step(
             (ψ_amplitude, ψ_phase),
-            SWOConfig(
-                H=H,
-                τ=tau,
-                steps=(5,) + m_c_steps,
-                magnetisation=magnetisation,
-                lr_amplitude=lr_amplitude,
-                lr_phase=lr_phase,
-                epochs_amplitude=epochs_amplitude,
-                epochs_phase=epochs_phase,
-            ),
+            config,
+            # SWOConfig(
+            #     H=H,
+            #     τ=tau,
+            #     steps=(5,) + m_c_steps,
+            #     magnetisation=magnetisation,
+            #     lr_amplitude=lr_amplitude,
+            #     lr_phase=lr_phase,
+            #     epochs_amplitude=epochs_amplitude,
+            #     epochs_phase=epochs_phase,
+            # ),
         )
-        torch.save(ψ_amplitude.state_dict(), "{}.{}.amplitude.weights".format(out_file, i))
-        torch.save(ψ_phase.state_dict(), "{}.{}.phase.weights".format(out_file, i))
+        ψ_amplitude.save("{}.{}.amplitude.weights".format(out_file, i))
+        ψ_phase.save("{}.{}.phase.weights".format(out_file, i))
 
 
 if __name__ == "__main__":
