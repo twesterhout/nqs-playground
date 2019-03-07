@@ -1,154 +1,8 @@
 #include "nqs.hpp"
-#include <ska_sort.hpp>
-
-#include <boost/sort/spreadsort/integer_sort.hpp>
-#include <parallel/algorithm>
-// #include <pybind11/numpy.h>
-// #include <pybind11/pybind11.h>
-// #include <pybind11/stl.h>
-// #include <pybind11/functional.h>
-
-// #if defined(TCM_PYTORCH_EXTENSION)
-// #include <torch/extension.h>
-// #include <torch/script.h>
-// #endif
-
-#if defined(TCM_GCC)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic warning "-W"
-#pragma GCC diagnostic warning "-Wall"
-#pragma GCC diagnostic warning "-Wextra"
-#pragma GCC diagnostic warning "-Wcast-align"
-#pragma GCC diagnostic warning "-Wcast-qual"
-#pragma GCC diagnostic warning "-Wctor-dtor-privacy"
-#pragma GCC diagnostic warning "-Wdisabled-optimization"
-#pragma GCC diagnostic warning "-Wformat=2"
-#pragma GCC diagnostic warning "-Winit-self"
-#pragma GCC diagnostic warning "-Wlogical-op"
-#pragma GCC diagnostic warning "-Wmissing-declarations"
-#pragma GCC diagnostic warning "-Wmissing-include-dirs"
-#pragma GCC diagnostic warning "-Wnoexcept"
-#pragma GCC diagnostic warning "-Wold-style-cast"
-#pragma GCC diagnostic warning "-Woverloaded-virtual"
-#pragma GCC diagnostic warning "-Wredundant-decls"
-#pragma GCC diagnostic warning "-Wshadow"
-#pragma GCC diagnostic warning "-Wsign-conversion"
-#pragma GCC diagnostic warning "-Wsign-promo"
-#pragma GCC diagnostic warning "-Wstrict-null-sentinel"
-#pragma GCC diagnostic warning "-Wstrict-overflow=5"
-#pragma GCC diagnostic warning "-Wswitch-default"
-#pragma GCC diagnostic warning "-Wundef"
-#pragma GCC diagnostic warning "-Wunused"
-#endif
 
 TCM_NAMESPACE_BEGIN
 
-namespace detail {
-// [errors.implementation] {{{
-auto error_wrong_dim(char const* function, int64_t const dim,
-                     int64_t const expected) -> void
-{
-    TCM_ASSERT(dim != expected, "What are you complaining about?");
-    throw std::domain_error{std::string{function} + ": wrong dimension "
-                            + std::to_string(dim) + "; expected "
-                            + std::to_string(expected)};
-}
-
-auto error_wrong_dim(char const* function, int64_t const dim,
-                     int64_t const expected1, int64_t const expected2) -> void
-{
-    TCM_ASSERT(dim != expected1 && dim != expected2,
-               "What are you complaining about?");
-    TCM_ASSERT(expected1 != expected2, "Use the other overload instead");
-    throw std::domain_error{std::string{function} + ": wrong dimension "
-                            + std::to_string(dim) + "; expected either "
-                            + std::to_string(expected1) + " or "
-                            + std::to_string(expected2)};
-}
-
-auto error_wrong_shape(char const* function, int64_t const shape,
-                       int64_t const expected) -> void
-{
-    TCM_ASSERT(shape != expected, "What are you complaining about?");
-    throw std::domain_error{std::string{function} + ": wrong shape ["
-                            + std::to_string(shape) + "]; expected ["
-                            + std::to_string(expected) + "]"};
-}
-
-auto error_wrong_shape(char const*                         function,
-                       std::tuple<int64_t, int64_t> const& shape,
-                       std::tuple<int64_t, int64_t> const& expected) -> void
-{
-    TCM_ASSERT(shape != expected, "What are you complaining about?");
-    throw std::domain_error{std::string{function} + ": wrong shape ["
-                            + std::to_string(std::get<0>(shape)) + ", "
-                            + std::to_string(std::get<1>(shape))
-                            + "]; expected ["
-                            + std::to_string(std::get<0>(expected)) + ", "
-                            + std::to_string(std::get<1>(expected)) + "]"};
-}
-
-auto error_not_contiguous(char const* function) -> void
-{
-    throw std::invalid_argument{std::string{function}
-                                + ": input must be contiguous"};
-}
-
-auto error_wrong_type(char const* function, torch::ScalarType const type,
-                      torch::ScalarType const expected) -> void
-{
-    TCM_ASSERT(type != expected, "What are you complaining about?");
-    std::ostringstream msg;
-    msg << function << ": wrong type " << type << "; expected " << expected;
-    throw std::domain_error{msg.str()};
-}
-
-auto error_index_out_of_bounds(char const* function, size_t const i,
-                               size_t const max) -> void
-{
-    TCM_ASSERT(i >= max, "What are you complaining about?");
-    throw std::invalid_argument{std::string{function} + ": index out of bounds "
-                                + std::to_string(i) + "; expected <"
-                                + std::to_string(max)};
-}
-
-auto error_float_not_isfinite(char const* function, float const x) -> void
-{
-    TCM_ASSERT(!std::isfinite(x), "What are you complaining about?");
-    throw std::runtime_error{std::string{function}
-                             + ": expected a finite float (i.e. either "
-                               "normal, subnormal or zero); got "
-                             + std::to_string(x)};
-}
-
-auto error_float_not_isfinite(char const* function, std::complex<float> const x)
-    -> void
-{
-    TCM_ASSERT(!std::isfinite(x.real()) || !std::isfinite(x.imag()),
-               "What are you complaining about?");
-    throw std::runtime_error{
-        std::string{function}
-        + ": expected a finite complex number (i.e. either "
-          "normal, subnormal or zero); got "
-        + std::to_string(x.real()) + " + " + std::to_string(x.imag()) + "i"};
-}
-
-auto error_float_not_isfinite(char const*                function,
-                              std::complex<double> const x) -> void
-{
-    TCM_ASSERT(!std::isfinite(x.real()) || !std::isfinite(x.imag()),
-               "What are you complaining about?");
-    throw std::runtime_error{
-        std::string{function}
-        + ": expected a finite complex number (i.e. either "
-          "normal, subnormal or zero); got "
-        + std::to_string(x.real()) + " + " + std::to_string(x.imag()) + "i"};
-}
-// [errors.implementation] }}}
-} // namespace detail
-
-
-
+// [Errors] {{{
 namespace detail {
 auto make_what_message(char const* file, size_t const line,
                        char const* function, std::string const& description)
@@ -171,240 +25,682 @@ auto spin_configuration_to_string(gsl::span<float const> spin) -> std::string
     return msg.str();
 }
 } // namespace detail
+// }}}
 
-TCM_NAMESPACE_END
+// [SpinVector] {{{
+namespace detail {
+namespace {
+    template <
+        int ExtraFlags,
+        class = std::enable_if_t<ExtraFlags & pybind11::array::c_style
+                                 || ExtraFlags & pybind11::array::f_style> /**/>
+    auto copy_to_numpy_array(SpinVector const&                     spin,
+                             pybind11::array_t<float, ExtraFlags>& out) -> void
+    {
+        TCM_CHECK_DIM(out.ndim(), 1);
+        TCM_CHECK_SHAPE(out.shape(0), spin.size());
 
-#if defined(TCM_GCC)
-#pragma GCC diagnostic pop
-#endif
+        auto const spin2float = [](Spin const s) noexcept->float
+        {
+            return s == Spin::up ? 1.0f : -1.0f;
+        };
 
-namespace py = pybind11;
-
-PYBIND11_MODULE(_C_nqs, m)
-{
-    m.doc() = R"EOF()EOF";
-
-    using ::TCM_NAMESPACE::Heisenberg;
-    using ::TCM_NAMESPACE::Polynomial;
-    using ::TCM_NAMESPACE::PolynomialState;
-    using ::TCM_NAMESPACE::SpinVector;
-    // using ::TCM_NAMESPACE::Machine;
-    // using ::TCM_NAMESPACE::TargetStateImpl;
-
-    using ::TCM_NAMESPACE::real_type;
-    using ::TCM_NAMESPACE::complex_type;
-
-    m.def("say_hi", [](torch::optional<int> const& x) {
-        if (x.has_value()) { py::print("Has value:", x); }
-        else {
-            py::print("No value!");
+        auto access = out.template mutable_unchecked<1>();
+        for (auto i = 0u; i < spin.size(); ++i) {
+            access(i) = spin2float(spin[i]);
         }
-    });
+    }
+} // unnamed namespace
+} // namespace detail
 
-    m.def("do_sort", [](Polynomial const& p) {
-        using MicroSecondsT =
-            std::chrono::duration<double, std::chrono::microseconds::period>;
-        std::vector<std::pair<SpinVector, std::complex<double>>> array;
-        array.reserve(p.size());
-        std::transform(
-            std::begin(p.vectors()), std::end(p.vectors()),
-            std::back_inserter(array), [](auto const s) {
-                return std::pair<SpinVector, std::complex<double>>{s, 0.0};
-            });
-        auto time_start = std::chrono::steady_clock::now();
-        // __gnu_parallel::sort(std::begin(array), std::end(array),
-        //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
-        ska_sort(std::begin(array), std::end(array),
-                 [](auto const& x) { return x.first.ska_key(); });
-        // boost::sort::spreadsort::integer_sort(std::begin(array), std::end(array),
-        //     [](auto const& a, unsigned const offset) { return a.first.ska_key() >> offset; },
-        //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
-        auto time_interval =
-            MicroSecondsT(std::chrono::steady_clock::now() - time_start);
-        return time_interval.count();
-    });
+auto SpinVector::numpy() const
+    -> pybind11::array_t<float, pybind11::array::c_style>
+{
+    pybind11::array_t<float, pybind11::array::c_style> out{size()};
+    detail::copy_to_numpy_array(*this, out);
+    return out;
+}
 
-    // m.def("foo", [](torch::nn::ModuleHolder& x) { auto y = torch::randn({10}, torch::kFloat32); return x.forward(y); });
+auto SpinVector::tensor() const -> torch::Tensor
+{
+    auto out = detail::make_f32_tensor(size());
+    copy_to({out.data<float>(), size()});
+    return out;
+}
 
-    py::class_<SpinVector>(m, "CompactSpin",
-        R"EOF( Hello world! )EOF")
-        .def(py::init<torch::Tensor const&>())
-        .def(py::init<py::str>())
-        .def(py::init<py::array_t<float, py::array::c_style>>())
-        .def("__copy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Copies the current spin configuration.)EOF")
-        .def("__deepcopy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Same as ``self.__copy__()``.)EOF")
-        .def("__len__", &SpinVector::size, R"EOF(
-            Returns the number of spins in the vector.
-        )EOF")
-        .def("__int__", &SpinVector::operator std::size_t)
-        .def("__str__", &SpinVector::operator std::string)
-        .def("__getitem__",
-             [](SpinVector const& x, unsigned const i) {
-                 return x.at(i) == ::TCM_NAMESPACE::Spin::up ? 1.0f : -1.0f;
-             })
-        .def("__setitem__",
-             [](SpinVector& x, unsigned const i, float const spin) {
-                 auto const float2spin = [](auto const s) {
-                     if (s == -1.0f) { return ::TCM_NAMESPACE::Spin::down; }
-                     if (s == 1.0f) { return ::TCM_NAMESPACE::Spin::up; }
-                     throw std::invalid_argument{
-                         "Invalid spin: expected either -1 or +1, but got "
-                         + std::to_string(s) + "."};
-                 };
-                 x.at(i) = float2spin(spin);
-             })
-        .def("__eq__",
-             [](SpinVector const& x, SpinVector const& y) { return x == y; },
-             py::is_operator())
-        .def("__ne__",
-             [](SpinVector const& x, SpinVector const& y) { return x != y; },
-             py::is_operator())
-        .def_property_readonly("size", &SpinVector::size,
-                               R"EOF(Same as ``self.__len__()``.)EOF")
-        .def_property_readonly("magnetisation", &SpinVector::magnetisation)
-        .def("numpy", [](SpinVector const& x) { return x.numpy(); },
-             py::return_value_policy::move)
-        .def("numpy",
-             [](SpinVector const&                      x,
-                py::array_t<float, py::array::c_style> out) {
-                 return x.numpy(std::move(out));
-             },
-             py::return_value_policy::move)
-        .def("__hash__", &SpinVector::hash, R"EOF(
-            Returns the hash of the spin configuration.
-        )EOF");
+SpinVector::SpinVector(gsl::span<float const> spin)
+{
+    check_range(spin);
+    copy_from(spin);
+    TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
+}
 
-    py::class_<Heisenberg, std::shared_ptr<Heisenberg>>(m, "Heisenberg")
-        .def(py::init<std::vector<std::pair<unsigned, unsigned>>, real_type>(),
-             py::arg("edges"), py::arg("coupling"),
-             R"EOF(Constructs Heisenberg Hamiltonian from a list of edges.)EOF")
-        .def("__len__", &Heisenberg::size,
-             R"EOF(Returns the number of edges.)EOF")
-        .def_property("coupling",
-                      [](Heisenberg const& h) { return h.coupling(); },
-                      [](Heisenberg& h, real_type const coupling) {
-                          h.coupling(coupling);
-                      })
-        .def("edges", &Heisenberg::edges,
-             R"EOF(
-                 Returns graph edges
+SpinVector::SpinVector(torch::Tensor const& spins)
+{
+    TCM_CHECK_DIM(spins.dim(), 1);
+    TCM_CHECK(spins.is_contiguous(), std::invalid_argument,
+              "input tensor must be contiguous");
+    TCM_CHECK_TYPE(spins.scalar_type(), torch::kFloat32);
 
-                 .. warning:: This function copies the edges
-             )EOF");
+    auto buffer = gsl::span<float const>{spins.data<float>(),
+                                         static_cast<size_t>(spins.size(0))};
+    check_range(buffer);
+    copy_from(buffer);
+    TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
+}
 
-    py::class_<Polynomial>(m, "Polynomial",
-                           R"EOF(
-            Represents polynomials in H.
-        )EOF")
-        .def(py::init(
-                 [](std::shared_ptr<Heisenberg>                           h,
-                    std::vector<std::pair<
-                        complex_type, torch::optional<real_type>>> const& ts) {
-                     std::vector<Polynomial::Term> terms;
-                     terms.reserve(ts.size());
-                     std::transform(ts.cbegin(), ts.cend(),
-                                    std::back_inserter(terms),
-                                    [](auto const& t) -> Polynomial::Term {
-                                        return {t.first, t.second};
-                                    });
-                     return std::make_unique<Polynomial>(std::move(h),
-                                                         std::move(terms));
-                 }),
-             py::arg("hamiltonian"), py::arg("terms"),
-             R"EOF(
-                Given a Hamiltonian H and coefficients cᵢ (i ∈ {0, 1, ..., n-1})
-                constructs the following polynomial
-
-                (H - c₀)(H - c₁)(H - c₂)...(H - cₙ₋₁)
-
-                Even though each cᵢ is complex, after expanding the brackets all
-                coefficients should be real.
-             )EOF")
-        .def_property_readonly("size", &Polynomial::size,
-                               R"EOF(
-                Returns the number of different spin configurations in the current
-                state.
-            )EOF")
-        .def("__len__", &Polynomial::size, R"EOF(Same as ``size``.)EOF")
-        // .def("print", &Polynomial::print)
-        .def("__call__", &Polynomial::operator(), py::arg("coeff"),
-             py::arg("spin"))
-        .def("keys",
-             [](Polynomial const& p) {
-                 if (p.size() == 0) {
-                     return ::TCM_NAMESPACE::detail::make_f32_tensor(0);
-                 }
-                 auto const number_spins = p.vectors().front().size();
-                 auto       output = ::TCM_NAMESPACE::detail::make_f32_tensor(
-                     p.size(), number_spins);
-                 auto* data = p.vectors().data();
-                 ::TCM_NAMESPACE::detail::unpack_to_tensor(
-                     /*first=*/data, /*last=*/data + p.size(),
-                     /*destination=*/output);
-                 return output;
-             },
-             py::return_value_policy::move)
-        .def("values",
-             [](Polynomial const& p) { return torch::Tensor{p.coefficients()}; })
-#if 0
-        .def("keys",
-             [](Polynomial const&                      p,
-                py::array_t<float, py::array::c_style> out) {
-                 p.keys(std::move(out));
-             })
-        .def("values",
-             [](Polynomial const&                                     p,
-                py::array_t<std::complex<float>, py::array::c_style>& out) {
-                 p.values(out);
-             })
-        .def("values", [](Polynomial const&                       p,
-                          py::array_t<float, py::array::c_style>& out) {
-            p.values(out);
-        })
+SpinVector::SpinVector(pybind11::str str)
+{
+    // PyUnicode_Check macro uses old style casts
+#if defined(TCM_GCC)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wold-style-cast"
 #endif
-        ;
+    // Borrowed from pybind11/pytypes.h
+    pybind11::object temp = str;
+    if (PyUnicode_Check(str.ptr())) {
+        temp = pybind11::reinterpret_steal<pybind11::object>(
+            PyUnicode_AsUTF8String(str.ptr()));
+        if (!temp)
+            throw std::runtime_error{
+                "Unable to extract string contents! (encoding issue)"};
+    }
+    char*             buffer;
+    pybind11::ssize_t length;
+    if (PYBIND11_BYTES_AS_STRING_AND_SIZE(temp.ptr(), &buffer, &length)) {
+        throw std::runtime_error{
+            "Unable to extract string contents! (invalid type)"};
+    }
+    TCM_CHECK(length <= static_cast<pybind11::ssize_t>(max_size()),
+              std::overflow_error,
+              fmt::format("spin chain too long {}; expected <={}", length,
+                          max_size()));
 
-    /*
-    using Fn = std::function<torch::Tensor(torch::Tensor const&)>;
-    py::class_<TargetState<Fn>>(m, "TargetState")
-        .def(py::init<Polynomial, Fn>())
-        .def("forward", &TargetState<Fn>::forward);
-    */
+    _data.as_ints = _mm_set1_epi32(0);
+    _data.size    = static_cast<std::uint16_t>(length);
+    for (auto i = 0u; i < _data.size; ++i) {
+        auto const s = buffer[i];
+        TCM_CHECK(s == '0' || s == '1', std::domain_error,
+                  fmt::format("invalid spin '{}'; expected '0' or '1'", s));
+        unsafe_at(i) = (s == '1') ? Spin::up : Spin::down;
+    }
+#if defined(TCM_GCC)
+#    pragma GCC diagnostic pop
+#endif
+    TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
+}
+// }}}
 
-    py::class_<PolynomialState>(m, "TargetState")
-        .def(py::init([](std::string const& filename, Polynomial const& poly,
-                         size_t batch_size) {
-            return std::make_unique<PolynomialState>(
-                ::TCM_NAMESPACE::detail::load_forward_fn(filename), poly,
-                batch_size);
-        }))
-        .def("__call__", [](PolynomialState& state,
-                            SpinVector const input) { return state(input); })
-        .def("__call__",
-             [](PolynomialState& state, torch::Tensor const& input) {
-                 return state(SpinVector{input});
-             })
-        .def_property_readonly("time_poly", &PolynomialState::time_poly)
-        .def_property_readonly("time_psi", &PolynomialState::time_psi)
-        ;
+// [Heisenberg] {{{
+Heisenberg::Heisenberg(std::vector<edge_type> edges, real_type const coupling)
+    : _edges{std::move(edges)}
+    , _coupling{coupling}
+    , _max_index{std::numeric_limits<unsigned>::max()}
+{
+    TCM_CHECK(std::isnormal(coupling), std::invalid_argument,
+              fmt::format("invalid coupling: {}; expected a normal (i.e. "
+                          "neither zero, subnormal, infinite or NaN) float",
+                          coupling));
+    if (!_edges.empty()) {
+        _max_index = find_max_index(std::begin(_edges), std::end(_edges));
+    }
+}
+// }}}
+
+// [Polynomial] {{{
+Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
+                       std::vector<Term>                 terms)
+    : _current{}
+    , _old{}
+    , _hamiltonian{std::move(hamiltonian)}
+    , _terms{std::move(terms)}
+    , _basis{}
+    , _coeffs{}
+{
+    if (_hamiltonian == nullptr) {
+        throw std::invalid_argument{
+            "Polynomial(shared_ptr<Heisenberg>, vector<pair<complex_type, "
+            "optional<real_type>>>): hamiltonian must not be nullptr"};
+    }
+    auto const estimated_size =
+        std::min(static_cast<size_t>(std::round(
+                     std::pow(_hamiltonian->size() / 2, _terms.size()))),
+                 size_t{4096});
+    _old.reserve(estimated_size);
+    _current.reserve(estimated_size);
+}
+
+auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
+    -> Polynomial&
+{
+    using std::swap;
+    TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
+              std::runtime_error,
+              fmt::format("invalid coefficient ({}, {}); expected a finite "
+                          "(i.e. either normal, subnormal or zero)",
+                          coeff.real(), coeff.imag()));
+    TCM_CHECK(_hamiltonian->max_index() < spin.size(), std::out_of_range,
+              fmt::format("spin configuration too short {}; expected >{}",
+                          spin.size(), _hamiltonian->max_index()));
+    if (_terms.empty()) {
+        _old.clear();
+        _old.emplace(spin, coeff);
+        save_results(_old, torch::nullopt);
+        return *this;
+    }
+
+    // The zeroth iteration: goal is to perform `_old := coeff * (H - root)|spin⟩`
+    {
+        // `|_old⟩ := - coeff * root|spin⟩`
+        _old.clear();
+        _old.emplace(spin, -_terms[0].root * coeff);
+        // `|_old⟩ += coeff * H|spin⟩`
+        (*_hamiltonian)(coeff, spin, _old);
+    }
+    // Other iterations
+    TCM_ASSERT(_current.empty(), "Bug!");
+    for (auto i = size_t{1}; i < _terms.size(); ++i) {
+        auto const  root    = _terms[i].root;
+        auto const& epsilon = _terms[i - 1].epsilon;
+        if (epsilon.has_value()) {
+            // Performs `|_current⟩ := (H - root)P[epsilon]|_old⟩` in two steps:
+            // 1) `|_current⟩ := - root * P[epsilon]|_old⟩`
+            for (auto const& item : _old) {
+                if (std::abs(item.second.real()) >= *epsilon) {
+                    _current.emplace(item.first, -root * item.second);
+                }
+            }
+            // 2) `|_current⟩ += H P[epsilon]|_old⟩`
+            for (auto const& item : _old) {
+                if (std::abs(item.second.real()) >= *epsilon) {
+                    (*_hamiltonian)(item.second, item.first, _current);
+                }
+            }
+        }
+        else {
+            // Performs `|_current⟩ := (H - root)|_old⟩` in two steps:
+            // 1) `|_current⟩ := - root|_old⟩`
+            for (auto const& item : _old) {
+                _current.emplace(item.first, -root * item.second);
+            }
+            // 2) `|_current⟩ += H |_old⟩`
+            for (auto const& item : _old) {
+                (*_hamiltonian)(item.second, item.first, _current);
+            }
+        }
+        // |_old⟩ := |_current⟩, but to not waste allocated memory, we use
+        // `swap + clear` instead.
+        swap(_old, _current);
+        _current.clear();
+    }
+    // Final filtering, i.e. `P[epsilon] |_old⟩`
+    save_results(_old, _terms.back().epsilon);
+    return *this;
+}
+// }}}
+
+// [PolynomialState] {{{
+template <class Factory>
+auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
+                       int64_t cutoff) -> void
+{
+    static_assert(std::is_nothrow_copy_constructible<Factory>::value,
+                  "Factory must be nothrow copy constructible to be usable "
+                  "with OpenMP's firstprivate.");
+    TCM_CHECK(begin <= end, std::invalid_argument,
+              fmt::format("invalid range [{}, {})", begin, end));
+    if (begin == end) { return; }
+    if (end - begin <= cutoff) {
+        auto f = factory();
+        for (auto i = begin; i < end; ++i) {
+            f(i);
+        }
+        return;
+    }
+
+    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
+    std::exception_ptr err_ptr{nullptr};
+#pragma omp parallel default(none) firstprivate(begin, end, factory)           \
+    shared(err_flag, err_ptr)
+    {
+        auto const num_threads  = omp_get_num_threads();
+        auto const thread_id    = omp_get_thread_num();
+        auto const size         = end - begin;
+        auto const chunk_size   = size / num_threads;
+        auto const rest         = size % num_threads;
+        auto const thread_begin = begin + thread_id * chunk_size;
+        if (thread_begin < end) {
+            try {
+                auto f = factory();
+                for (auto i = thread_begin; i < thread_begin + chunk_size;
+                     ++i) {
+                    f(i);
+                }
+                if (thread_id < rest) {
+                    f(begin + num_threads * chunk_size + thread_id);
+                }
+            }
+            catch (...) {
+                if (!err_flag.test_and_set()) {
+                    err_ptr = std::current_exception();
+                }
+            }
+        }
+    }
+    if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
+}
+
+namespace detail {
+struct _PolynomialState::Body {
+  private:
+    ForwardT const&             _forward;
+    gsl::span<SpinVector const> _vectors;
+    torch::Tensor               _coefficients;
+    torch::Tensor               _buffer;
+    size_t                      _batch_size;
+    float&                      _sum;
+
+  public:
+    Body(ForwardT const& forward, Polynomial const& polynomial,
+         size_t const batch_size, size_t const number_spins, float& dest)
+        : _forward{forward}
+        , _vectors{polynomial.vectors()}
+        , _coefficients{polynomial.coefficients()}
+        , _buffer{detail::make_f32_tensor(batch_size, number_spins)}
+        , _batch_size{batch_size}
+        , _sum{dest}
+    {}
+
+    Body(Body const&) = delete;
+    Body(Body&&)      = default;
+    Body& operator=(Body const&) = delete;
+    Body& operator=(Body&&) = delete;
+
+    auto operator()(int64_t const _i) -> void
+    {
+        TCM_ASSERT(_i >= 0, "Invalid index");
+        auto const i    = static_cast<size_t>(_i);
+        auto const size = _vectors.size();
+        TCM_CHECK(i * _batch_size < size, std::logic_error,
+                  fmt::format("invalid batch index {}; expected <{}", i,
+                              size / _batch_size));
+        if ((i + 1) * _batch_size <= size) {
+            _sum += forward_propagate_batch(i);
+        }
+        else {
+            _sum += forward_propagate_rest(i);
+        }
+    }
+
+    TCM_NOINLINE auto forward_propagate_batch(size_t i) -> float;
+    TCM_NOINLINE auto forward_propagate_rest(size_t i) -> float;
+};
+
+auto _PolynomialState::Body::forward_propagate_batch(size_t const i) -> float
+{
+    TCM_ASSERT((i + 1) * _batch_size <= _vectors.size(), "Index out of bounds");
+    // Stores the `i`th batch of `_poly.vectors()` into `_buffer`.
+    auto* data = _vectors.data() + i * _batch_size;
+    detail::unpack_to_tensor(/*first=*/data, /*last=*/data + _batch_size,
+                             /*destination=*/_buffer);
+    // Forward propagates the batch through the network.
+    auto output = _forward(_buffer).view({-1});
+    // Extracts the `i`th batch of `_poly.coefficients()`.
+    auto coefficients = _coefficients.slice(
+        /*dim=*/0, /*start=*/static_cast<int64_t>(i * _batch_size),
+        /*end=*/static_cast<int64_t>((i + 1) * _batch_size), /*step=*/1);
+    // Computes the final result.
+    // NOTE: This can't be optimised much because `_forward` is a user supplied
+    // function which might return tensors of wrong shape.
+    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
+}
+
+auto _PolynomialState::Body::forward_propagate_rest(size_t const i) -> float
+{
+    auto const size = _vectors.size();
+    auto const rest = size - i * _batch_size;
+    TCM_ASSERT(rest < _batch_size, "Go use forward_propagate_batch instead");
+    TCM_ASSERT(i * _batch_size + rest == size, "Precondition violated");
+    // Stores part of batch which we're given into `_input`.
+    auto* data = _vectors.data() + i * _batch_size;
+    detail::unpack_to_tensor(
+        /*first=*/data, /*last=*/data + rest,
+        /*destination=*/
+        _buffer.slice(/*dim=*/0, /*start=*/0,
+                      /*end=*/static_cast<int64_t>(rest),
+                      /*step=*/1));
+    // Fills the remaining part of the batch with spin ups.
+    _buffer.slice(/*dim=*/0, /*start=*/static_cast<int64_t>(rest),
+                  /*end=*/static_cast<int64_t>(_batch_size),
+                  /*step=*/1) = 1.0f;
+    // Forward progates the batch through out network `_psi`. Only the first
+    // `rest` components contain meaningful info.
+    auto output = _forward(_buffer)
+                      .slice(/*dim=*/0, /*start=*/0,
+                             /*end=*/static_cast<int64_t>(rest), /*rest=*/1)
+                      .view({-1});
+    // Extracts part of the `n`th batch of `_poly.coefficients()`.
+    auto coefficients = _coefficients.slice(
+        /*dim=*/0, /*start=*/static_cast<int64_t>(i * _batch_size),
+        /*end=*/static_cast<int64_t>(i * _batch_size + rest), /*step=*/1);
+    // Computes the final result.
+    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
+}
+
+auto _PolynomialState::time_poly() const -> std::pair<real_type, real_type>
+{
+    return {_poly_time.mean(), std::sqrt(_poly_time.variance())};
+}
+
+auto _PolynomialState::time_psi() const -> std::pair<real_type, real_type>
+{
+    return {_psi_time.mean(), std::sqrt(_psi_time.variance())};
+}
+
+template <size_t N>
+inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
+{
+    constexpr auto vector_size = size_t{8};
+    static_assert(N % vector_size == 0, "");
+    TCM_ASSERT(reinterpret_cast<uintptr_t>(xs) % 32 == 0,
+               "Input not aligned properly");
+    for (auto i = size_t{0}; i < N / vector_size; ++i) {
+        _mm256_stream_ps(xs + i * vector_size, _mm256_set1_ps(0.0f));
+    }
+}
+
+template <size_t N>
+inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
+{
+    constexpr auto vector_size = size_t{8};
+    static_assert(N % vector_size == 0, "");
+    TCM_ASSERT(reinterpret_cast<uintptr_t>(xs) % 32 == 0,
+               "Input not aligned properly");
+    auto sum = _mm256_set1_ps(0.0f);
+    for (auto i = size_t{0}; i < N / vector_size; ++i) {
+        sum = _mm256_add_ps(sum, _mm256_load_ps(xs + i * vector_size));
+    }
+    return detail::hadd(sum);
+}
+
+auto _PolynomialState::operator()(SpinVector const input,
+                                  ForwardT const&  forward,
+                                  std::string const& filename) -> float
+{
+    using MicroSecondsT =
+        std::chrono::duration<real_type, std::chrono::microseconds::period>;
+    // TODO(twesterhout): It'd be nice to time how much time this function
+    // spends applying `_poly` to `input` and how much on forward propagation
+    // through `_psi`.
+    auto time_start = std::chrono::steady_clock::now();
+    _poly(real_type{1}, input);
+    auto time_interval =
+        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
+    _poly_time(time_interval.count());
+
+    std::vector<ForwardT> forward_functions;
+    for (auto i = 0; i < 64; ++i) {
+        forward_functions.emplace_back(detail::load_forward_fn(filename));
+    }
+
+    time_start                = std::chrono::steady_clock::now();
+    auto const size           = _poly.size();
+    auto const number_spins   = input.size();
+    auto const number_batches = (size + batch_size() - 1) / batch_size();
+
+    alignas(32) float results[64];
+    zero_results(results);
+    auto factory = [/*forward = std::cref(forward), &filename,*/ p = forward_functions.data(), poly = std::cref(_poly),
+                    batch_size = batch_size(), number_spins = number_spins,
+                    &results]() -> Body {
+        auto const i = omp_get_thread_num();
+        TCM_CHECK(i < 64, std::runtime_error,
+                  fmt::format("too many OpenMP threads: {}; expected <=128.",
+                              omp_get_num_threads()));
+        return {p[i], poly, batch_size, number_spins, results[i]};
+    };
+    static_assert(std::is_nothrow_copy_constructible<decltype(factory)>::value,
+                  "");
+    parallel_for_lazy(0, static_cast<int64_t>(number_batches),
+                      std::move(factory), 10);
+    auto const sum = sum_results(results);
+
+    time_interval =
+        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
+    _psi_time(time_interval.count());
+    return sum;
+}
+} // namespace detail
 
 #if 0
-    torch::python::bind_module<TargetStateImpl>(m, "TargetState")
-        .def(py::init<std::shared_ptr<Machine>, std::shared_ptr<Polynomial>, size_t>(),
-             py::arg("machine"), py::arg("poly"), py::arg("batch_size") = 512)
-        .def("forward", &TargetStateImpl::forward);
+auto PolynomialState::operator()(SpinVector const input) -> float
+{
+    using MicroSecondsT =
+        std::chrono::duration<real_type, std::chrono::microseconds::period>;
+    // TODO(twesterhout): Add a lookup in the table shared between multiple
+    // parallel Markov chains.
+    // Upon construction of the state, we don't know the number of spins in the
+    // system. We extract it from the input.
+    if (!_input.defined() || _input.size(1) != input.size()) {
+        _input = detail::make_f32_tensor(batch_size(), input.size());
+    }
+    // TODO(twesterhout): It'd be nice to time how much time this function
+    // spends applying `_poly` to `input` and how much on forward propagation
+    // through `_psi`.
+    auto time_start = std::chrono::steady_clock::now();
+    _poly(real_type{1}, input);
+    auto time_interval =
+        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
+    _poly_time(time_interval.count());
 
-    py::class_<Machine, std::shared_ptr<Machine>>(m, "Machine")
-        .def(py::init([](std::string const& filename) {
-            return std::make_shared<Machine>(
-                ::TCM_NAMESPACE::detail::load_forward_fn(filename));
-        }))
-        .def(py::init<std::function<torch::Tensor(torch::Tensor const&)>>())
-        // .def("psi", &MachineImpl<torch::jit::script::Module>::psi)
-        .def("forward", [](Machine& machine, torch::Tensor const& input) {
-            return machine.forward(input);
-        });
+    time_start                = std::chrono::steady_clock::now();
+    auto const size           = _poly.size();
+    auto const number_batches = size / batch_size();
+    auto const rest           = size % batch_size();
+    auto       sum            = 0.0f;
+    for (auto i = size_t{0}; i < number_batches; ++i) {
+        sum += forward_propagate_batch(i);
+    }
+    if (rest != 0) { sum += forward_propagate_rest(number_batches, rest); }
+    time_interval =
+        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
+    _psi_time(time_interval.count());
+    return sum;
+}
+
+auto PolynomialState::forward_propagate_batch(size_t const n) -> float
+{
+    TCM_ASSERT(_input.defined(),
+               "You should allocate the storage before calling this function");
+    TCM_ASSERT((n + 1) * _batch_size <= _poly.size(), "Index out of bounds");
+    // Stores the `n`th batch of `_poly.vectors()` into `_input`.
+    auto* data = _poly.vectors().data() + n * batch_size();
+    detail::unpack_to_tensor(/*first=*/data, /*last=*/data + batch_size(),
+                             /*destination=*/_input);
+    // Forward propagates the batch through our network `_psi`.
+    auto output = _psi(_input).view({-1});
+    // Extracts the `n`th batch of `_poly.coefficients()`.
+    auto coefficients = _poly.coefficients().slice(
+        /*dim=*/0, /*start=*/static_cast<int64_t>(n * batch_size()),
+        /*end=*/static_cast<int64_t>((n + 1) * batch_size()), /*step=*/1);
+    // Computes the final result.
+    // NOTE: This can't be optimised much because `_psi` is a user supplied
+    // function which might return tensors of wrong shape.
+    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
+}
+
+auto PolynomialState::forward_propagate_rest(size_t const n, size_t const rest)
+    -> float
+{
+    TCM_ASSERT(_input.defined(),
+               "You should allocate the storage before calling this function");
+    TCM_ASSERT(rest < batch_size(), "Go use forward_propagate_batch instead");
+    TCM_ASSERT(n * batch_size() + rest == _poly.size(),
+               "Precondition violated");
+    // Stores part of batch which we're given into `_input`.
+    auto* data = _poly.vectors().data() + n * batch_size();
+    detail::unpack_to_tensor(
+        /*first=*/data, /*last=*/data + rest,
+        /*destination=*/
+        _input.slice(/*dim=*/0, /*start=*/0, /*end=*/static_cast<int64_t>(rest),
+                     /*step=*/1));
+    // Fills the remaining part of the batch with spin ups.
+    _input.slice(/*dim=*/0, /*start=*/static_cast<int64_t>(rest),
+                 /*end=*/static_cast<int64_t>(batch_size()),
+                 /*step=*/1) = 1.0f;
+    // Forward progates the batch through out network `_psi`. Only the first
+    // `rest` components contain meaningful info.
+    auto output = _psi(_input)
+                      .slice(/*dim=*/0, /*start=*/0,
+                             /*end=*/static_cast<int64_t>(rest), /*rest=*/1)
+                      .view({-1});
+    // Extracts part of the `n`th batch of `_poly.coefficients()`.
+    auto coefficients = _poly.coefficients().slice(
+        /*dim=*/0, /*start=*/static_cast<int64_t>(n * batch_size()),
+        /*end=*/static_cast<int64_t>(n * batch_size() + rest), /*step=*/1);
+    // Computes the final result.
+    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
+}
+#endif
+// }}}
+
+// [Random] {{{
+namespace detail {
+inline auto really_need_that_random_seed_now() -> uint64_t
+{
+    std::random_device                      random_device;
+    std::uniform_int_distribution<uint64_t> dist;
+    return dist(random_device);
+}
+} // namespace detail
+
+auto global_random_generator() -> RandomGenerator&
+{
+    static thread_local RandomGenerator generator{
+        detail::really_need_that_random_seed_now()};
+    return generator;
+}
+// }}}
+
+// [RandomFlipper] {{{
+constexpr RandomFlipper::index_type RandomFlipper::number_flips;
+
+RandomFlipper::RandomFlipper(SpinVector const initial_spin,
+                             RandomGenerator& generator)
+    : _storage(initial_spin.size())
+    , _generator{std::addressof(generator)}
+    , _i{0}
+{
+    using std::begin;
+    using std::end;
+    TCM_CHECK(initial_spin.size() >= number_flips, std::invalid_argument,
+              fmt::format("requested number of spin-flips exceeds the number "
+                          "of spins in the system: {} > {}.",
+                          number_flips, initial_spin.size()));
+    std::iota(begin(_storage), end(_storage), 0);
+    auto const number_ups =
+        static_cast<size_t>(std::partition(begin(_storage), end(_storage),
+                                           [spin = initial_spin](auto const i) {
+                                               return spin[i] == Spin::up;
+                                           })
+                            - begin(_storage));
+    _ups   = gsl::span<index_type>{_storage.data(), number_ups};
+    _downs = gsl::span<index_type>{_storage.data() + number_ups,
+                                   _storage.size() - number_ups};
+    TCM_CHECK((_ups.size() >= number_flips / 2)
+                  && (_downs.size() >= number_flips / 2),
+              std::invalid_argument,
+              fmt::format("initial spin is invalid. Given {} spins up and {} "
+                          "spins down, it's impossible to perform {} "
+                          "spin-flips and still preserve the magnetisation.",
+                          _ups.size(), _downs.size(), number_flips));
+    shuffle();
+}
+
+auto RandomFlipper::shuffle() -> void
+{
+    using std::begin;
+    using std::end;
+    std::shuffle(begin(_ups), end(_ups), *_generator);
+    std::shuffle(begin(_downs), end(_downs), *_generator);
+}
+// }}}
+
+auto random_spin(size_t const size, int const magnetisation,
+                 RandomGenerator& generator) -> SpinVector
+{
+    return SpinVector::random(size, magnetisation, generator);
+#if 0
+    TCM_CHECK(size <= SpinVector::max_size(), std::invalid_argument,
+              fmt::format("invalid size {}; expected <={}", size,
+                          SpinVector::max_size()));
+    TCM_CHECK(
+        static_cast<size_t>(std::abs(magnetisation)) <= size,
+        std::invalid_argument,
+        fmt::format("magnetisation exceeds the number of spins: |{}| > {}",
+                    magnetisation, size));
+    TCM_CHECK((static_cast<int>(size) + magnetisation) % 2 == 0,
+              std::runtime_error,
+              fmt::format("{} spins cannot have a magnetisation of {}. `size + "
+                          "magnetisation` must be even",
+                          size, magnetisation));
+    float      buffer[SpinVector::max_size()];
+    auto const spin = gsl::span<float>{buffer, size};
+    auto const number_ups =
+        static_cast<size_t>((static_cast<int>(size) + magnetisation) / 2);
+    auto const middle = std::begin(spin) + number_ups;
+    std::fill(std::begin(spin), middle, 1.0f);
+    std::fill(middle, std::end(spin), -1.0f);
+    std::shuffle(std::begin(spin), std::end(spin), generator);
+    auto compact_spin = SpinVector{spin};
+    TCM_ASSERT(compact_spin.magnetisation() == magnetisation, "");
+    return compact_spin;
 #endif
 }
+
+// [ChainResult] {{{
+auto ChainResult::extract_vectors() const -> torch::Tensor
+{
+    return detail::unpack_to_tensor(
+        std::begin(_samples), std::end(_samples),
+        [](auto const& x) -> SpinVector const& { return x.spin; });
+}
+
+auto ChainResult::extract_values() const -> torch::Tensor
+{
+    auto out      = detail::make_f32_tensor(_samples.size());
+    auto accessor = out.accessor<float, 1>();
+    for (auto i = size_t{0}; i < _samples.size(); ++i) {
+        accessor[static_cast<int64_t>(i)] = _samples[i].value;
+    }
+    return out;
+}
+
+auto ChainResult::extract_count() const -> torch::Tensor
+{
+    auto out      = detail::make_i64_tensor(_samples.size());
+    auto accessor = out.accessor<int64_t, 1>();
+    for (auto i = size_t{0}; i < _samples.size(); ++i) {
+        accessor[static_cast<int64_t>(i)] = _samples[i].count;
+    }
+    return out;
+}
+
+auto merge(ChainResult const& _x, ChainResult const& _y) -> ChainResult
+{
+    auto const&           x = _x.samples();
+    auto const&           y = _y.samples();
+    ChainResult::SamplesT buffer;
+    buffer.reserve(x.size() + y.size());
+
+    std::merge(std::begin(x), std::end(x), std::begin(y), std::end(y),
+               std::back_inserter(buffer));
+    buffer.erase(
+        compress(std::begin(buffer), std::end(buffer), std::equal_to<void>{},
+                 [](auto& acc, auto const& value) { return acc.merge(value); }),
+        std::end(buffer));
+    return ChainResult{std::move(buffer)};
+}
+// }}}
+
+TCM_NAMESPACE_END

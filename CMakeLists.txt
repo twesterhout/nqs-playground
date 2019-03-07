@@ -13,6 +13,8 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14)
 endif()
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
 project(nqs_cbits)
 include(ExternalProject)
 
@@ -55,6 +57,13 @@ else()
     message(STATUS "Disabling GSL contracts")
 endif()
 
+# expected
+execute_process(COMMAND git submodule update --init -- external/expected
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+option(EXPECTED_ENABLE_TESTS OFF)
+option(EXPECTED_ENABLE_DOCS OFF)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/expected)
+
 # flat_hash_map library
 execute_process(COMMAND git submodule update --init -- external/flat_hash_map
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -76,7 +85,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/cpuinfo)
 execute_process(COMMAND git submodule update --init -- external/boost
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 execute_process(COMMAND git submodule update --init --
-    libs/config libs/core libs/detail libs/pool libs/utility
+    libs/config libs/core libs/detail libs/pool libs/utility libs/align
     libs/range libs/serialization libs/static_assert libs/type_traits
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
 add_library(Boost INTERFACE)
@@ -85,6 +94,7 @@ target_include_directories(Boost SYSTEM INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
 
 # Torch
@@ -121,17 +131,20 @@ execute_process(COMMAND git submodule update --init -- external/pybind11
 set(PYBIND11_CPP_STANDARD "-std=c++14")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/pybind11)
 
-# add_library(nqs SHARED cbits/nqs.cpp)
-# if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-#     target_compile_options(nqs PRIVATE -fsized-deallocation)
-# endif()
-# target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
-# target_compile_options(nqs PRIVATE "-march=native")
-# target_include_directories(nqs SYSTEM PRIVATE ${Python3_INCLUDE_DIRS})
-# message(STATUS "Python3 includes: ${Python3_INCLUDE_DIRS}")
-# target_link_libraries(nqs PRIVATE fmt gsl-lite flat_hash_map cpuinfo Boost Torch)
 
-pybind11_add_module(_C_nqs MODULE SYSTEM cbits/nqs.cpp)
+# find_package(TBB REQUIRED)
+# message(STATUS "TBB Release libraries: ${TBB_LIBRARIES_RELEASE}")
+# message(STATUS "TBB Debug libraries: ${TBB_LIBRARIES_DEBUG}")
+# message(STATUS "TBB libraries: ${TBB_LIBRARIES}")
+# add_library(thread_building_blocks INTERFACE)
+# target_include_directories(thread_building_blocks SYSTEM INTERFACE ${TBB_INCLUDE_DIRS})
+# target_link_libraries(thread_building_blocks INTERFACE ${TBB_LIBRARIES_RELEASE})
+# target_compile_definitions(thread_building_blocks INTERFACE TBB_USE_DEBUG=1)
+
+find_package(OpenMP REQUIRED)
+message(STATUS "${OpenMP_CXX_SPEC_DATE}")
+
+pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS cbits/nqs.cpp cbits/init.cpp)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(_C_nqs PRIVATE -fsized-deallocation)
 endif()
@@ -142,8 +155,10 @@ target_compile_definitions(_C_nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C_nqs"
     _GLIBCXX_USE_CXX11_ABI=0
-    _GLIBCXX_PARALLEL=1)
-target_link_libraries(_C_nqs PUBLIC fmt::fmt gsl-lite flat_hash_map cpuinfo Boost Torch)
+    # _GLIBCXX_PARALLEL=0
+)
+target_link_libraries(_C_nqs PUBLIC fmt::fmt gsl-lite flat_hash_map cpuinfo
+    Boost Torch expected OpenMP::OpenMP_CXX)
 
 if (FALSE)
     set(PYBIND11_CPP_STANDARD "-std=c++14")
