@@ -1,5 +1,4 @@
 #include "nqs.hpp"
-#include <ska_sort.hpp>
 
 #include <boost/sort/spreadsort/integer_sort.hpp>
 #include <parallel/algorithm>
@@ -45,10 +44,12 @@ inline auto bind_spin_vector(py::module m) -> void
                  :param x: a one-dimensional contiguous array of ``float``. ``-1.0``
                            means spin down and ``1.0`` means spin up.
              )EOF")
-        .def("__copy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Copies the current spin configuration.)EOF")
-        .def("__deepcopy__", [](SpinVector const& x) { return SpinVector{x}; },
-             R"EOF(Same as ``self.__copy__()``.)EOF")
+        .def(
+            "__copy__", [](SpinVector const& x) { return SpinVector{x}; },
+            R"EOF(Copies the current spin configuration.)EOF")
+        .def(
+            "__deepcopy__", [](SpinVector const& x) { return SpinVector{x}; },
+            R"EOF(Same as ``self.__copy__()``.)EOF")
         .def("__len__", &SpinVector::size,
              R"EOF(
                  Returns the number of spins in the spin configuration.
@@ -65,46 +66,52 @@ inline auto bind_spin_vector(py::module m) -> void
              R"EOF(
                  Implements ``str(self)``, i.e. conversion to ``str``.
              )EOF")
-        .def("__getitem__",
-             [](SpinVector const& x, unsigned const i) {
-                 return x.at(i) == ::TCM_NAMESPACE::Spin::up ? 1.0f : -1.0f;
-             },
-             py::arg("i"),
-             R"EOF(
+        .def(
+            "__getitem__",
+            [](SpinVector const& x, unsigned const i) {
+                return x.at(i) == ::TCM_NAMESPACE::Spin::up ? 1.0f : -1.0f;
+            },
+            py::arg("i"),
+            R"EOF(
                  Returns ``self[i]``.
              )EOF")
-        .def("__setitem__",
-             [](SpinVector& x, unsigned const i, float const spin) {
-                 auto const float2spin = [](auto const s) {
-                     if (s == -1.0f) { return tcm::Spin::down; }
-                     if (s == 1.0f) { return tcm::Spin::up; }
-                     throw std::invalid_argument{fmt::format(
-                         "Invalid spin {}; expected either -1 or +1", s)};
-                 };
-                 x.at(i) = float2spin(spin);
-             },
-             py::arg("i"), py::arg("spin"),
-             R"EOF(
+        .def(
+            "__setitem__",
+            [](SpinVector& x, unsigned const i, float const spin) {
+                auto const float2spin = [](auto const s) {
+                    if (s == -1.0f) { return tcm::Spin::down; }
+                    if (s == 1.0f) { return tcm::Spin::up; }
+                    throw std::invalid_argument{fmt::format(
+                        "Invalid spin {}; expected either -1 or +1", s)};
+                };
+                x.at(i) = float2spin(spin);
+            },
+            py::arg("i"), py::arg("spin"),
+            R"EOF(
                  Performs ``self[i] = spin``.
 
                  ``spin`` must be either ``-1.0`` or ``1.0``.
              )EOF")
-        .def("__eq__",
-             [](SpinVector const& x, SpinVector const& y) { return x == y; },
-             py::is_operator())
-        .def("__ne__",
-             [](SpinVector const& x, SpinVector const& y) { return x != y; },
-             py::is_operator())
+        .def(
+            "__eq__",
+            [](SpinVector const& x, SpinVector const& y) { return x == y; },
+            py::is_operator())
+        .def(
+            "__ne__",
+            [](SpinVector const& x, SpinVector const& y) { return x != y; },
+            py::is_operator())
         .def_property_readonly("size", &SpinVector::size,
                                R"EOF(Same as ``self.__len__()``.)EOF")
         .def_property_readonly("magnetisation", &SpinVector::magnetisation,
                                R"EOF(Returns the magnetisation)EOF")
-        .def("numpy", [](SpinVector const& x) { return x.numpy(); },
-             py::return_value_policy::move,
-             R"EOF(Converts the spin configuration to a numpy.ndarray)EOF")
-        .def("tensor", [](SpinVector const& x) { return x.tensor(); },
-             py::return_value_policy::move,
-             R"EOF(Converts the spin configuration to a torch.Tensor)EOF")
+        .def(
+            "numpy", [](SpinVector const& x) { return x.numpy(); },
+            py::return_value_policy::move,
+            R"EOF(Converts the spin configuration to a numpy.ndarray)EOF")
+        .def(
+            "tensor", [](SpinVector const& x) { return x.tensor(); },
+            py::return_value_policy::move,
+            R"EOF(Converts the spin configuration to a torch.Tensor)EOF")
         .def("__hash__", &SpinVector::hash, R"EOF(
                 Returns the hash of the spin configuration.
             )EOF");
@@ -123,11 +130,11 @@ inline auto bind_heisenberg(py::module m) -> void
              R"EOF(
                  Returns the number of edges in the graph.
              )EOF")
-        .def_property("coupling",
-                      [](Heisenberg const& h) { return h.coupling(); },
-                      [](Heisenberg& h, real_type const coupling) {
-                          h.coupling(coupling);
-                      })
+        .def_property(
+            "coupling", [](Heisenberg const& h) { return h.coupling(); },
+            [](Heisenberg& h, real_type const coupling) {
+                h.coupling(coupling);
+            })
         .def("edges", &Heisenberg::edges,
              R"EOF(
                  Returns graph edges
@@ -143,25 +150,25 @@ inline auto bind_polynomial(py::module m) -> void
                            R"EOF(
             Represents polynomials in H.
         )EOF")
-        .def(py::init(
-                 [](std::shared_ptr<Heisenberg>                        h,
-                    std::vector<std::pair<complex_type,
-                                          optional<real_type>>> const& ts) {
-                     // TODO(twesterhout): This function performs an ugly
-                     // copy... I know it doesn't matter from performance point
-                     // of view, but it still bugs me.
-                     std::vector<Polynomial::Term> terms;
-                     terms.reserve(ts.size());
-                     std::transform(std::begin(ts), std::end(ts),
-                                    std::back_inserter(terms),
-                                    [](auto const& t) -> Polynomial::Term {
-                                        return {t.first, t.second};
-                                    });
-                     return std::make_unique<Polynomial>(std::move(h),
-                                                         std::move(terms));
-                 }),
-             py::arg("hamiltonian"), py::arg("terms"),
-             R"EOF(
+        .def(
+            py::init([](std::shared_ptr<Heisenberg>                        h,
+                        std::vector<std::pair<complex_type,
+                                              optional<real_type>>> const& ts) {
+                // TODO(twesterhout): This function performs an ugly
+                // copy... I know it doesn't matter from performance point
+                // of view, but it still bugs me.
+                std::vector<Polynomial::Term> terms;
+                terms.reserve(ts.size());
+                std::transform(std::begin(ts), std::end(ts),
+                               std::back_inserter(terms),
+                               [](auto const& t) -> Polynomial::Term {
+                                   return {t.first, t.second};
+                               });
+                return std::make_unique<Polynomial>(std::move(h),
+                                                    std::move(terms));
+            }),
+            py::arg("hamiltonian"), py::arg("terms"),
+            R"EOF(
                  Given a Hamiltonian H and terms (cᵢ, εᵢ) (i ∈ {0, 1, ..., n-1})
                  constructs the following polynomial
 
@@ -183,19 +190,37 @@ inline auto bind_polynomial(py::module m) -> void
         .def("__call__", &Polynomial::operator(), py::arg("coeff"),
              py::arg("spin"),
              R"EOF(
-             
+
              )EOF")
-        .def("vectors",
-             [](Polynomial const& p) {
-                 auto const& spins = p.vectors();
-                 return ::tcm::detail::unpack_to_tensor(std::begin(spins),
-                                                        std::end(spins));
-             },
-             py::return_value_policy::move)
+        .def(
+            "vectors",
+            [](Polynomial const& p) {
+                auto const& spins = p.vectors();
+                return ::tcm::detail::unpack_to_tensor(std::begin(spins),
+                                                       std::end(spins));
+            },
+            py::return_value_policy::move)
         .def("coefficients", [](Polynomial const& p) {
             return torch::Tensor{p.coefficients()};
         });
 }
+
+struct Net : torch::nn::Module {
+    Net()
+        : _fc1{register_module("_fc1", torch::nn::Linear(48, 291))}
+        , _fc2{register_module("_fc2", torch::nn::Linear(291, 1))}
+    {}
+
+    auto forward(torch::Tensor x) -> torch::Tensor
+    {
+        x = torch::relu(_fc1->forward(x));
+        x = torch::sigmoid(_fc2->forward(x));
+        return x;
+    }
+
+    torch::nn::Linear _fc1{nullptr};
+    torch::nn::Linear _fc2{nullptr};
+};
 
 PYBIND11_MODULE(_C_nqs, m)
 {
@@ -210,15 +235,16 @@ PYBIND11_MODULE(_C_nqs, m)
     // using ::TCM_NAMESPACE::Machine;
     // using ::TCM_NAMESPACE::TargetStateImpl;
 
-    using ::TCM_NAMESPACE::real_type;
     using ::TCM_NAMESPACE::complex_type;
+    using ::TCM_NAMESPACE::real_type;
 
     bind_spin_vector(m);
     bind_heisenberg(m);
     bind_polynomial(m);
 
     m.def("say_hi", []() {
-        return std::make_tuple(sizeof(tcm::Polynomial), sizeof(tcm::PolynomialState));
+        return std::make_tuple(sizeof(tcm::Polynomial),
+                               sizeof(tcm::PolynomialState));
     });
 
     m.def("do_sort", [](Polynomial const& p) {
@@ -234,8 +260,9 @@ PYBIND11_MODULE(_C_nqs, m)
         auto time_start = std::chrono::steady_clock::now();
         // __gnu_parallel::sort(std::begin(array), std::end(array),
         //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
-        ska_sort(std::begin(array), std::end(array),
-                 [](auto const& x) { return x.first.key(::TCM_NAMESPACE::detail::unsafe_tag); });
+        ska_sort(std::begin(array), std::end(array), [](auto const& x) {
+            return x.first.key(::TCM_NAMESPACE::detail::unsafe_tag);
+        });
         // boost::sort::spreadsort::integer_sort(std::begin(array), std::end(array),
         //     [](auto const& a, unsigned const offset) { return a.first.ska_key() >> offset; },
         //     [](auto const& a, auto const& b) { return a.first.ska_key() < b.first.ska_key(); });
@@ -246,23 +273,22 @@ PYBIND11_MODULE(_C_nqs, m)
 
     // m.def("foo", [](torch::nn::ModuleHolder& x) { auto y = torch::randn({10}, torch::kFloat32); return x.forward(y); });
 
-    m.def("random_spin",
-          [](size_t const size, optional<int> magnetisation) {
-              auto& generator = global_random_generator();
-              if (magnetisation.has_value()) {
-                  return SpinVector::random(size, *magnetisation, generator);
-              }
-              else {
-                  py::print("No magnetisation");
-                  return SpinVector::random(size, generator);
-              }
-          },
-          py::arg("n"), py::arg("magnetisation") = py::none(),
-          R"EOF(
+    m.def(
+        "random_spin",
+        [](size_t const size, optional<int> magnetisation) {
+            auto& generator = global_random_generator();
+            if (magnetisation.has_value()) {
+                return SpinVector::random(size, *magnetisation, generator);
+            }
+            else {
+                py::print("No magnetisation");
+                return SpinVector::random(size, generator);
+            }
+        },
+        py::arg("n"), py::arg("magnetisation") = py::none(),
+        R"EOF(
               Generates a random spin configuration.
           )EOF");
-
-
 
     /*
     using Fn = std::function<torch::Tensor(torch::Tensor const&)>;
@@ -273,30 +299,37 @@ PYBIND11_MODULE(_C_nqs, m)
 
     py::class_<PolynomialState>(m, "TargetState")
         .def(py::init([](std::string const& filename, Polynomial const& poly,
-                         size_t batch_size) {
+                         std::tuple<size_t, size_t> dim) {
+#if 0
             return std::make_unique<PolynomialState>(
                 ::TCM_NAMESPACE::detail::load_forward_fn(filename), poly,
                 batch_size, filename);
+#else
+            return std::make_unique<PolynomialState>(
+                    tcm::detail::load_forward_fn(filename, omp_get_max_threads()),
+                    poly,
+                    dim);
+#endif
         }))
-        .def("__call__", [](PolynomialState& state,
-                            SpinVector const input) {
-                // mkl_set_num_threads(1);
-                torch::NoGradGuard no_grad;
-                return state(input);
-        })
+        .def("__call__",
+             [](PolynomialState& state, SpinVector const input) {
+                 // mkl_set_num_threads(1);
+                 torch::NoGradGuard no_grad;
+                 return state(input);
+             })
         .def("__call__",
              [](PolynomialState& state, torch::Tensor const& input) {
                  auto const dim = input.dim();
                  TCM_CHECK_DIM(dim, 1, 2);
                  if (dim == 1) {
-                     auto out = tcm::detail::make_f32_tensor(1);
-                     out[0] = state(SpinVector{input});
+                     auto out = tcm::detail::make_tensor<float>(1);
+                     out[0]   = state(SpinVector{input});
                      return out;
                  }
-                 auto const size         = input.size(0);
+                 auto const size = input.size(0);
                  auto       out =
-                     tcm::detail::make_f32_tensor(static_cast<size_t>(size));
-                 auto       out_accessor = out.accessor<float, 1>();
+                     tcm::detail::make_tensor<float>(static_cast<size_t>(size));
+                 auto out_accessor = out.accessor<float, 1>();
                  for (auto i = int64_t{0}; i < size; ++i) {
                      out_accessor[i] = state(SpinVector{input[i]});
                  }
@@ -340,25 +373,26 @@ PYBIND11_MODULE(_C_nqs, m)
         py::arg("initial_spin") = py::none(),
         py::call_guard<py::gil_scoped_release>());
 
-    m.def("parallel_sample_some",
-          [](size_t const number_chains, std::string const& filename,
-             Options const& options) {
-              // auto restore_number_threads =
-              //     gsl::finally([n = torch::get_num_threads()] {
-              //         torch::set_num_threads(n);
-              //     });
-              // torch::set_num_threads(1);
-              // torch::NoGradGuard no_grad;
-              auto fn = [forward = tcm::detail::load_forward_fn(filename)](
-                            SpinVector x) {
-                  return forward(x.tensor()).item<float>();
-              };
-              return tcm::parallel_sample_some(number_chains, fn, options)
-                  .to_tensors();
-          },
-          py::arg{"number_chains"}, py::arg{"filename"}, py::arg{"options"}
-          // , py::call_guard<py::gil_scoped_release>()
-          );
+    m.def(
+        "parallel_sample_some",
+        [](size_t const number_chains, std::string const& filename,
+           Options const& options) {
+            // auto restore_number_threads =
+            //     gsl::finally([n = torch::get_num_threads()] {
+            //         torch::set_num_threads(n);
+            //     });
+            // torch::set_num_threads(1);
+            // torch::NoGradGuard no_grad;
+            auto fn = [forward = tcm::detail::load_forward_fn(filename)](
+                          SpinVector x) {
+                return forward(x.tensor()).item<float>();
+            };
+            return tcm::parallel_sample_some(number_chains, fn, options)
+                .to_tensors();
+        },
+        py::arg{"number_chains"}, py::arg{"filename"},
+        py::arg{"options"} // , py::call_guard<py::gil_scoped_release>()
+    );
 
 #if 0
     torch::python::bind_module<TargetStateImpl>(m, "TargetState")
@@ -378,4 +412,3 @@ PYBIND11_MODULE(_C_nqs, m)
         });
 #endif
 }
-

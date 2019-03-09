@@ -1,9 +1,24 @@
 #include "nqs.hpp"
 
+// #include <boost/stacktrace.hpp>
+
 TCM_NAMESPACE_BEGIN
 
 // [Errors] {{{
 namespace detail {
+
+TCM_NORETURN auto assert_fail(char const* expr, char const* file,
+                              size_t const line, char const* function,
+                              std::string const& msg) noexcept -> void
+{
+    std::fprintf(
+        stderr,
+        TCM_BUG_MESSAGE
+        "\nAssertion failed at %s:%zu: %s: \"%s\" evaluated to false: %s\n",
+        file, line, function, expr, msg.c_str());
+    std::terminate();
+}
+
 auto make_what_message(char const* file, size_t const line,
                        char const* function, std::string const& description)
     -> std::string
@@ -63,7 +78,7 @@ auto SpinVector::numpy() const
 
 auto SpinVector::tensor() const -> torch::Tensor
 {
-    auto out = detail::make_f32_tensor(size());
+    auto out = detail::make_tensor<float>(size());
     copy_to({out.data<float>(), size()});
     return out;
 }
@@ -81,7 +96,6 @@ SpinVector::SpinVector(torch::Tensor const& spins)
     TCM_CHECK(spins.is_contiguous(), std::invalid_argument,
               "input tensor must be contiguous");
     TCM_CHECK_TYPE(spins.scalar_type(), torch::kFloat32);
-
     auto buffer = gsl::span<float const>{spins.data<float>(),
                                          static_cast<size_t>(spins.size(0))};
     check_range(buffer);
@@ -129,6 +143,44 @@ SpinVector::SpinVector(pybind11::str str)
 #endif
     TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
 }
+
+auto unpack_to_tensor(gsl::span<SpinVector const> src, torch::Tensor dst)
+    -> void
+{
+    if (src.empty()) { return; }
+
+    auto const size         = src.size();
+    auto const number_spins = src[0].size();
+    TCM_ASSERT(std::all_of(std::begin(src), std::end(src),
+                           [number_spins](auto const& x) {
+                               return x.size() == number_spins;
+                           }),
+               "Input range contains variable size spin chains");
+    TCM_ASSERT(dst.dim() == 2, fmt::format("Invalid dimension {}", dst.dim()));
+    TCM_ASSERT(size == static_cast<size_t>(dst.size(0)),
+               fmt::format("Sizes don't match: size={}, dst.size(0)={}", size,
+                           dst.size(0)));
+    TCM_ASSERT(static_cast<int64_t>(number_spins) == dst.size(1),
+               fmt::format("Sizes don't match: number_spins={}, dst.size(1)={}",
+                           number_spins, dst.size(1)));
+    TCM_ASSERT(dst.is_contiguous(), "Output tensor must be contiguous");
+
+    auto const chunks_16     = number_spins / 16;
+    auto const rest_16       = number_spins % 16;
+    auto const rest_8        = number_spins % 8;
+    auto const copy_cheating = [chunks = chunks_16 + (rest_16 != 0)](
+                                   SpinVector const& spin, float* out) {
+        for (auto i = 0u; i < chunks; ++i, out += 16) {
+            detail::unpack(spin._data.spin[i], out);
+        }
+    };
+
+    auto* data = dst.data<float>();
+    for (auto i = size_t{0}; i < size - 1; ++i, data += number_spins) {
+        copy_cheating(src[i], data);
+    }
+    src[size - 1].copy_to({data, number_spins});
+}
 // }}}
 
 // [Heisenberg] {{{
@@ -157,11 +209,8 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
     , _basis{}
     , _coeffs{}
 {
-    if (_hamiltonian == nullptr) {
-        throw std::invalid_argument{
-            "Polynomial(shared_ptr<Heisenberg>, vector<pair<complex_type, "
-            "optional<real_type>>>): hamiltonian must not be nullptr"};
-    }
+    TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
+              "hamiltonian must not be nullptr (or None)");
     auto const estimated_size =
         std::min(static_cast<size_t>(std::round(
                      std::pow(_hamiltonian->size() / 2, _terms.size()))),
@@ -246,7 +295,7 @@ auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
 {
     static_assert(std::is_nothrow_copy_constructible<Factory>::value,
                   "Factory must be nothrow copy constructible to be usable "
-                  "with OpenMP's firstprivate.");
+                  "with OpenMP's firstprivate clause.");
     TCM_CHECK(begin <= end, std::invalid_argument,
               fmt::format("invalid range [{}, {})", begin, end));
     if (begin == end) { return; }
@@ -263,11 +312,13 @@ auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
 #pragma omp parallel default(none) firstprivate(begin, end, factory)           \
     shared(err_flag, err_ptr)
     {
+        // This is basically a hand-rolled version of OpenMP's schedule(static),
+        // but we need it for exception safety
         auto const num_threads  = omp_get_num_threads();
         auto const thread_id    = omp_get_thread_num();
         auto const size         = end - begin;
-        auto const chunk_size   = size / num_threads;
         auto const rest         = size % num_threads;
+        auto const chunk_size   = size / num_threads + (thread_id < rest);
         auto const thread_begin = begin + thread_id * chunk_size;
         if (thread_begin < end) {
             try {
@@ -275,9 +326,6 @@ auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
                 for (auto i = thread_begin; i < thread_begin + chunk_size;
                      ++i) {
                     f(i);
-                }
-                if (thread_id < rest) {
-                    f(begin + num_threads * chunk_size + thread_id);
                 }
             }
             catch (...) {
@@ -291,80 +339,75 @@ auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
 }
 
 namespace detail {
-struct _PolynomialState::Body {
-  private:
-    ForwardT const&             _forward;
-    gsl::span<SpinVector const> _vectors;
-    torch::Tensor               _coefficients;
-    torch::Tensor               _buffer;
-    size_t                      _batch_size;
-    float&                      _sum;
-
-  public:
-    Body(ForwardT const& forward, Polynomial const& polynomial,
-         size_t const batch_size, size_t const number_spins, float& dest)
-        : _forward{forward}
-        , _vectors{polynomial.vectors()}
-        , _coefficients{polynomial.coefficients()}
-        , _buffer{detail::make_f32_tensor(batch_size, number_spins)}
-        , _batch_size{batch_size}
-        , _sum{dest}
-    {}
-
-    Body(Body const&) = delete;
-    Body(Body&&)      = default;
-    Body& operator=(Body const&) = delete;
-    Body& operator=(Body&&) = delete;
-
-    auto operator()(int64_t const _i) -> void
-    {
-        TCM_ASSERT(_i >= 0, "Invalid index");
-        auto const i    = static_cast<size_t>(_i);
-        auto const size = _vectors.size();
-        TCM_CHECK(i * _batch_size < size, std::logic_error,
-                  fmt::format("invalid batch index {}; expected <{}", i,
-                              size / _batch_size));
-        if ((i + 1) * _batch_size <= size) {
-            _sum += forward_propagate_batch(i);
-        }
-        else {
-            _sum += forward_propagate_rest(i);
-        }
-    }
-
-    TCM_NOINLINE auto forward_propagate_batch(size_t i) -> float;
-    TCM_NOINLINE auto forward_propagate_rest(size_t i) -> float;
-};
-
-auto _PolynomialState::Body::forward_propagate_batch(size_t const i) -> float
+template <size_t N>
+inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
 {
-    TCM_ASSERT((i + 1) * _batch_size <= _vectors.size(), "Index out of bounds");
+    constexpr auto vector_size = size_t{8};
+    static_assert(N % vector_size == 0, "");
+    TCM_ASSERT(boost::alignment::is_aligned(32, xs),
+               "Input not aligned properly");
+    for (auto i = size_t{0}; i < N / vector_size; ++i) {
+        _mm256_stream_ps(xs + i * vector_size, _mm256_set1_ps(0.0f));
+    }
+}
+
+template <size_t N>
+inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
+{
+    constexpr auto vector_size = size_t{8};
+    static_assert(N % vector_size == 0, "");
+    TCM_ASSERT(boost::alignment::is_aligned(32, xs),
+               "Input not aligned properly");
+    auto sum = _mm256_set1_ps(0.0f);
+    for (auto i = size_t{0}; i < N / vector_size; ++i) {
+        sum = _mm256_add_ps(sum, _mm256_load_ps(xs + i * vector_size));
+    }
+    return detail::hadd(sum);
+}
+
+auto PolynomialState::Worker::operator()(int64_t const batch_index) -> float
+{
+    using MicroSecondsT =
+        std::chrono::duration<real_type, std::chrono::microseconds::period>;
+    TCM_ASSERT(batch_index >= 0, "Invalid index");
+    auto       time_point = std::chrono::steady_clock::now();
+    auto const i          = static_cast<size_t>(batch_index);
+    auto const size       = _polynomial->vectors().size();
+    TCM_ASSERT(i * _batch_size < size, "Index out of bounds");
+    auto const result = ((i + 1) * _batch_size <= size)
+                            ? forward_propagate_batch(i)
+                            : forward_propagate_rest(i);
+    _time(MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
+    return result;
+}
+
+auto PolynomialState::Worker::forward_propagate_batch(size_t const i) -> float
+{
+    TCM_ASSERT((i + 1) * _batch_size <= _polynomial->vectors().size(),
+               "Index out of bounds");
     // Stores the `i`th batch of `_poly.vectors()` into `_buffer`.
-    auto* data = _vectors.data() + i * _batch_size;
-    detail::unpack_to_tensor(/*first=*/data, /*last=*/data + _batch_size,
-                             /*destination=*/_buffer);
+    auto const vectors = gsl::span<SpinVector const>{_polynomial->vectors()};
+    unpack_to_tensor(vectors.subspan(i * _batch_size, _batch_size), _buffer);
     // Forward propagates the batch through the network.
     auto output = _forward(_buffer).view({-1});
     // Extracts the `i`th batch of `_poly.coefficients()`.
-    auto coefficients = _coefficients.slice(
+    auto coefficients = _polynomial->coefficients().slice(
         /*dim=*/0, /*start=*/static_cast<int64_t>(i * _batch_size),
         /*end=*/static_cast<int64_t>((i + 1) * _batch_size), /*step=*/1);
     // Computes the final result.
-    // NOTE: This can't be optimised much because `_forward` is a user supplied
-    // function which might return tensors of wrong shape.
     return torch::dot(std::move(output), std::move(coefficients)).item<float>();
 }
 
-auto _PolynomialState::Body::forward_propagate_rest(size_t const i) -> float
+auto PolynomialState::Worker::forward_propagate_rest(size_t const i) -> float
 {
-    auto const size = _vectors.size();
-    auto const rest = size - i * _batch_size;
+    auto const vectors = gsl::span<SpinVector const>{_polynomial->vectors()};
+    auto const size    = vectors.size();
+    auto const rest    = size - i * _batch_size;
     TCM_ASSERT(rest < _batch_size, "Go use forward_propagate_batch instead");
     TCM_ASSERT(i * _batch_size + rest == size, "Precondition violated");
     // Stores part of batch which we're given into `_input`.
-    auto* data = _vectors.data() + i * _batch_size;
-    detail::unpack_to_tensor(
-        /*first=*/data, /*last=*/data + rest,
+    unpack_to_tensor(
+        /*source=*/vectors.subspan(i * _batch_size, rest),
         /*destination=*/
         _buffer.slice(/*dim=*/0, /*start=*/0,
                       /*end=*/static_cast<int64_t>(rest),
@@ -380,188 +423,68 @@ auto _PolynomialState::Body::forward_propagate_rest(size_t const i) -> float
                              /*end=*/static_cast<int64_t>(rest), /*rest=*/1)
                       .view({-1});
     // Extracts part of the `n`th batch of `_poly.coefficients()`.
-    auto coefficients = _coefficients.slice(
+    auto coefficients = _polynomial->coefficients().slice(
         /*dim=*/0, /*start=*/static_cast<int64_t>(i * _batch_size),
         /*end=*/static_cast<int64_t>(i * _batch_size + rest), /*step=*/1);
     // Computes the final result.
     return torch::dot(std::move(output), std::move(coefficients)).item<float>();
 }
 
-auto _PolynomialState::time_poly() const -> std::pair<real_type, real_type>
+auto PolynomialState::operator()(SpinVector const input) -> float
 {
-    return {_poly_time.mean(), std::sqrt(_poly_time.variance())};
-}
+    TCM_CHECK(!_workers.empty(), std::runtime_error,
+              fmt::format("There are no worker"));
+    auto const batch_size = _workers[0].batch_size();
+    auto const num_spins  = _workers[0].number_spins();
+    TCM_CHECK_SHAPE(input.size(), static_cast<int64_t>(num_spins));
 
-auto _PolynomialState::time_psi() const -> std::pair<real_type, real_type>
-{
-    return {_psi_time.mean(), std::sqrt(_psi_time.variance())};
-}
-
-template <size_t N>
-inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
-{
-    constexpr auto vector_size = size_t{8};
-    static_assert(N % vector_size == 0, "");
-    TCM_ASSERT(reinterpret_cast<uintptr_t>(xs) % 32 == 0,
-               "Input not aligned properly");
-    for (auto i = size_t{0}; i < N / vector_size; ++i) {
-        _mm256_stream_ps(xs + i * vector_size, _mm256_set1_ps(0.0f));
-    }
-}
-
-template <size_t N>
-inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
-{
-    constexpr auto vector_size = size_t{8};
-    static_assert(N % vector_size == 0, "");
-    TCM_ASSERT(reinterpret_cast<uintptr_t>(xs) % 32 == 0,
-               "Input not aligned properly");
-    auto sum = _mm256_set1_ps(0.0f);
-    for (auto i = size_t{0}; i < N / vector_size; ++i) {
-        sum = _mm256_add_ps(sum, _mm256_load_ps(xs + i * vector_size));
-    }
-    return detail::hadd(sum);
-}
-
-auto _PolynomialState::operator()(SpinVector const input,
-                                  ForwardT const&  forward,
-                                  std::string const& filename) -> float
-{
     using MicroSecondsT =
         std::chrono::duration<real_type, std::chrono::microseconds::period>;
-    // TODO(twesterhout): It'd be nice to time how much time this function
-    // spends applying `_poly` to `input` and how much on forward propagation
-    // through `_psi`.
-    auto time_start = std::chrono::steady_clock::now();
+    auto time_point = std::chrono::steady_clock::now();
     _poly(real_type{1}, input);
-    auto time_interval =
-        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
-    _poly_time(time_interval.count());
+    _poly_time(
+        MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
 
-    std::vector<ForwardT> forward_functions;
-    for (auto i = 0; i < 64; ++i) {
-        forward_functions.emplace_back(detail::load_forward_fn(filename));
-    }
+    struct Body {
+        Worker& worker;
+        float&  result;
 
-    time_start                = std::chrono::steady_clock::now();
-    auto const size           = _poly.size();
-    auto const number_spins   = input.size();
-    auto const number_batches = (size + batch_size() - 1) / batch_size();
+        auto operator()(int64_t const n) -> void { result += worker(n); }
+    };
 
+    time_point = std::chrono::steady_clock::now();
     alignas(32) float results[64];
     zero_results(results);
-    auto factory = [/*forward = std::cref(forward), &filename,*/ p = forward_functions.data(), poly = std::cref(_poly),
-                    batch_size = batch_size(), number_spins = number_spins,
-                    &results]() -> Body {
-        auto const i = omp_get_thread_num();
+    auto factory = [this, &results]() -> Body {
+        auto const i = static_cast<size_t>(omp_get_thread_num());
         TCM_CHECK(i < 64, std::runtime_error,
-                  fmt::format("too many OpenMP threads: {}; expected <=128.",
+                  fmt::format("too many OpenMP threads: {}; expected <=64.",
                               omp_get_num_threads()));
-        return {p[i], poly, batch_size, number_spins, results[i]};
+        return {_workers[i], results[i]};
     };
     static_assert(std::is_nothrow_copy_constructible<decltype(factory)>::value,
                   "");
+    auto const number_batches = (_poly.size() + batch_size - 1) / batch_size;
+    omp_set_num_threads(_workers.size());
     parallel_for_lazy(0, static_cast<int64_t>(number_batches),
-                      std::move(factory), 10);
+                      std::move(factory), 1);
     auto const sum = sum_results(results);
-
-    time_interval =
-        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
-    _psi_time(time_interval.count());
+    _psi_time(
+        MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
     return sum;
+}
+
+auto PolynomialState::time_poly() const -> std::pair<real_type, real_type>
+{
+    return {_workers[0].time().mean(),
+            std::sqrt(_workers[0].time().variance())};
+}
+
+auto PolynomialState::time_psi() const -> std::pair<real_type, real_type>
+{
+    return {_psi_time.mean(), std::sqrt(_psi_time.variance())};
 }
 } // namespace detail
-
-#if 0
-auto PolynomialState::operator()(SpinVector const input) -> float
-{
-    using MicroSecondsT =
-        std::chrono::duration<real_type, std::chrono::microseconds::period>;
-    // TODO(twesterhout): Add a lookup in the table shared between multiple
-    // parallel Markov chains.
-    // Upon construction of the state, we don't know the number of spins in the
-    // system. We extract it from the input.
-    if (!_input.defined() || _input.size(1) != input.size()) {
-        _input = detail::make_f32_tensor(batch_size(), input.size());
-    }
-    // TODO(twesterhout): It'd be nice to time how much time this function
-    // spends applying `_poly` to `input` and how much on forward propagation
-    // through `_psi`.
-    auto time_start = std::chrono::steady_clock::now();
-    _poly(real_type{1}, input);
-    auto time_interval =
-        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
-    _poly_time(time_interval.count());
-
-    time_start                = std::chrono::steady_clock::now();
-    auto const size           = _poly.size();
-    auto const number_batches = size / batch_size();
-    auto const rest           = size % batch_size();
-    auto       sum            = 0.0f;
-    for (auto i = size_t{0}; i < number_batches; ++i) {
-        sum += forward_propagate_batch(i);
-    }
-    if (rest != 0) { sum += forward_propagate_rest(number_batches, rest); }
-    time_interval =
-        MicroSecondsT(std::chrono::steady_clock::now() - time_start);
-    _psi_time(time_interval.count());
-    return sum;
-}
-
-auto PolynomialState::forward_propagate_batch(size_t const n) -> float
-{
-    TCM_ASSERT(_input.defined(),
-               "You should allocate the storage before calling this function");
-    TCM_ASSERT((n + 1) * _batch_size <= _poly.size(), "Index out of bounds");
-    // Stores the `n`th batch of `_poly.vectors()` into `_input`.
-    auto* data = _poly.vectors().data() + n * batch_size();
-    detail::unpack_to_tensor(/*first=*/data, /*last=*/data + batch_size(),
-                             /*destination=*/_input);
-    // Forward propagates the batch through our network `_psi`.
-    auto output = _psi(_input).view({-1});
-    // Extracts the `n`th batch of `_poly.coefficients()`.
-    auto coefficients = _poly.coefficients().slice(
-        /*dim=*/0, /*start=*/static_cast<int64_t>(n * batch_size()),
-        /*end=*/static_cast<int64_t>((n + 1) * batch_size()), /*step=*/1);
-    // Computes the final result.
-    // NOTE: This can't be optimised much because `_psi` is a user supplied
-    // function which might return tensors of wrong shape.
-    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
-}
-
-auto PolynomialState::forward_propagate_rest(size_t const n, size_t const rest)
-    -> float
-{
-    TCM_ASSERT(_input.defined(),
-               "You should allocate the storage before calling this function");
-    TCM_ASSERT(rest < batch_size(), "Go use forward_propagate_batch instead");
-    TCM_ASSERT(n * batch_size() + rest == _poly.size(),
-               "Precondition violated");
-    // Stores part of batch which we're given into `_input`.
-    auto* data = _poly.vectors().data() + n * batch_size();
-    detail::unpack_to_tensor(
-        /*first=*/data, /*last=*/data + rest,
-        /*destination=*/
-        _input.slice(/*dim=*/0, /*start=*/0, /*end=*/static_cast<int64_t>(rest),
-                     /*step=*/1));
-    // Fills the remaining part of the batch with spin ups.
-    _input.slice(/*dim=*/0, /*start=*/static_cast<int64_t>(rest),
-                 /*end=*/static_cast<int64_t>(batch_size()),
-                 /*step=*/1) = 1.0f;
-    // Forward progates the batch through out network `_psi`. Only the first
-    // `rest` components contain meaningful info.
-    auto output = _psi(_input)
-                      .slice(/*dim=*/0, /*start=*/0,
-                             /*end=*/static_cast<int64_t>(rest), /*rest=*/1)
-                      .view({-1});
-    // Extracts part of the `n`th batch of `_poly.coefficients()`.
-    auto coefficients = _poly.coefficients().slice(
-        /*dim=*/0, /*start=*/static_cast<int64_t>(n * batch_size()),
-        /*end=*/static_cast<int64_t>(n * batch_size() + rest), /*step=*/1);
-    // Computes the final result.
-    return torch::dot(std::move(output), std::move(coefficients)).item<float>();
-}
-#endif
 // }}}
 
 // [Random] {{{
@@ -668,7 +591,7 @@ auto ChainResult::extract_vectors() const -> torch::Tensor
 
 auto ChainResult::extract_values() const -> torch::Tensor
 {
-    auto out      = detail::make_f32_tensor(_samples.size());
+    auto out      = detail::make_tensor<float>(_samples.size());
     auto accessor = out.accessor<float, 1>();
     for (auto i = size_t{0}; i < _samples.size(); ++i) {
         accessor[static_cast<int64_t>(i)] = _samples[i].value;
@@ -678,10 +601,11 @@ auto ChainResult::extract_values() const -> torch::Tensor
 
 auto ChainResult::extract_count() const -> torch::Tensor
 {
-    auto out      = detail::make_i64_tensor(_samples.size());
+    auto out      = detail::make_tensor<int64_t>(_samples.size());
     auto accessor = out.accessor<int64_t, 1>();
     for (auto i = size_t{0}; i < _samples.size(); ++i) {
-        accessor[static_cast<int64_t>(i)] = _samples[i].count;
+        accessor[static_cast<int64_t>(i)] =
+            static_cast<int64_t>(_samples[i].count);
     }
     return out;
 }

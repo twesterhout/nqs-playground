@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/align/aligned_allocator.hpp>
+#include <boost/align/is_aligned.hpp>
 #include <boost/config.hpp>
 #include <boost/pool/pool_alloc.hpp>
 
@@ -9,14 +10,9 @@
 #include <torch/script.h>
 
 #include <flat_hash_map/bytell_hash_map.hpp>
-#include <ska_sort.hpp>
+#include <ska_sort/ska_sort.hpp>
 
 #include <gsl/gsl-lite.hpp>
-
-// #include <tbb/parallel_reduce.h>
-// #include <tbb/blocked_range.h>
-
-#include <expected.hpp>
 
 #if defined(BOOST_GCC)
 #    pragma GCC diagnostic push
@@ -32,79 +28,62 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <chrono>
-#include <stdexcept>
 #include <random>
+#include <stdexcept>
 #include <string>
 
-#include <immintrin.h>
 #include <endian.h>
+
+#include <immintrin.h>
 #include <omp.h>
 
-#if defined(__clang__)
-#    define TCM_CLANG                                                          \
-        (__clang_major__ * 10000 + __clang_minor__ * 100 + __clang_patchlevel__)
-#    define TCM_ASSUME(cond) __builtin_assume(cond)
-#    define TCM_LIKELY(cond) __builtin_expect(!!(cond), 1)
-#    define TCM_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
-#elif defined(__GNUC__)
-#    define TCM_GCC                                                            \
-        (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
-#    define TCM_ASSUME(cond)                                                   \
-        do {                                                                   \
-            if (!(cond)) __builtin_unreachable();                              \
-        } while (false)
-#    define TCM_LIKELY(cond) __builtin_expect(!!(cond), 1)
-#    define TCM_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
-#elif defined(_MSV_VER)
-#    define TCM_MSVC _MSV_VER
-#    define TCM_ASSUME(cond)                                                   \
-        do {                                                                   \
-        } while (false)
-#    define TCM_LIKELY(cond) (cond)
-#    define TCM_UNLIKELY(cond) (cond)
-#else
-#    error "Unsupported compiler."
+#if !defined(TCM_DEBUG) && !defined(NDEBUG)
+#    define TCM_DEBUG 1
 #endif
 
-#if defined(WIN32) || defined(_WIN32)
-#    define TCM_EXPORT __declspec(dllexport)
-#    define TCM_NOINLINE __declspec(noinline)
-#    define TCM_FORCEINLINE __forceinline inline
-#    define TCM_NORETURN
-#    define TCM_HOT
-#else
-#    define TCM_EXPORT __attribute__((visibility("default")))
-#    define TCM_NOINLINE __attribute__((noinline))
-#    define TCM_FORCEINLINE __attribute__((always_inline)) inline
-#    define TCM_NORETURN __attribute__((noreturn))
+#define TCM_FORCEINLINE BOOST_FORCEINLINE
+#define TCM_NOINLINE BOOST_NOINLINE
+#define TCM_LIKELY(x) BOOST_LIKELY(x)
+#define TCM_UNLIKELY(x) BOOST_UNLIKELY(x)
+#define TCM_NORETURN BOOST_NORETURN
+#define TCM_UNUSED BOOST_ATTRIBUTE_UNUSED
+#define TCM_CURRENT_FUNCTION BOOST_CURRENT_FUNCTION
+#define TCM_EXPORT BOOST_SYMBOL_EXPORT
+#define TCM_IMPORT BOOST_SYMBOL_IMPORT
+#define TCM_GCC BOOST_GCC
+#define TCM_CLANG BOOST_CLANG
+
+#if defined(BOOST_GCC) || defined(BOOST_CLANG)
 #    define TCM_HOT __attribute__((hot))
-#endif
-
-#if defined(NDEBUG)
-#    define TCM_CONSTEXPR constexpr
-#    define TCM_NOEXCEPT noexcept
 #else
-#    define TCM_CONSTEXPR
-#    define TCM_NOEXCEPT
+#    define TCM_HOT
 #endif
 
 #define TCM_NAMESPACE tcm
 #define TCM_NAMESPACE_BEGIN namespace tcm {
 #define TCM_NAMESPACE_END } // namespace tcm
+#define TCM_BUG_MESSAGE                                                        \
+    "#####################################################################\n"  \
+    "##    Congratulations, you have found a bug in nqs-playground!     ##\n"  \
+    "##            Please, be so kind to submit it here                 ##\n"  \
+    "##     https://github.com/twesterhout/nqs-playground/issues        ##\n"  \
+    "#####################################################################"
 
-#if !defined(NDEBUG)
-#    if defined(__cplusplus)
-#        include <cassert>
-#    else
-#        include <assert.h>
-#    endif
-#    define TCM_ASSERT(cond, msg) assert((cond) && (msg)) /* NOLINT */
+#define TCM_NOEXCEPT noexcept
+#define TCM_CONSTEXPR constexpr
+
+#if defined(TCM_DEBUG)
+#    define TCM_ASSERT(cond, msg)                                              \
+        (TCM_LIKELY(cond)                                                      \
+             ? static_cast<void>(0)                                            \
+             : ::TCM_NAMESPACE::detail::assert_fail(                           \
+                 #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
 #else
-#    define TCM_ASSERT(cond, msg)
+#    define TCM_ASSERT(cond, msg) static_cast<void>(0)
 #endif
 
 /// Formatting of torch::ScalarType using fmtlib facilities
@@ -131,8 +110,10 @@ using std::uint64_t;
 using real_type    = double;
 using complex_type = std::complex<real_type>;
 
-using torch::optional;
+using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
+
 using torch::nullopt;
+using torch::optional;
 
 struct SplitTag {};
 struct SerialTag {};
@@ -144,13 +125,18 @@ enum class Spin : unsigned char {
 };
 
 namespace detail {
+
+TCM_NORETURN auto assert_fail(char const* expr, char const* file,
+                              size_t const line, char const* function,
+                              std::string const& msg) noexcept -> void;
+
 struct UnsafeTag {};
 constexpr UnsafeTag unsafe_tag;
 
 /// Horizontally adds elements of a float4 vector.
 ///
 /// Solution taken from https://stackoverflow.com/a/35270026
-TCM_FORCEINLINE static auto hadd(__m128 const v) noexcept -> float
+TCM_FORCEINLINE auto hadd(__m128 const v) noexcept -> float
 {
     __m128 shuf = _mm_movehdup_ps(v); // broadcast elements 3,1 to 2,0
     __m128 sums = _mm_add_ps(v, shuf);
@@ -160,7 +146,7 @@ TCM_FORCEINLINE static auto hadd(__m128 const v) noexcept -> float
 }
 
 /// Horizontally adds elements of a float8 vector.
-TCM_FORCEINLINE static auto hadd(__m256 const v) noexcept -> float
+TCM_FORCEINLINE auto hadd(__m256 const v) noexcept -> float
 {
     __m128 vlow  = _mm256_castps256_ps128(v);
     __m128 vhigh = _mm256_extractf128_ps(v, 1); // high 128
@@ -171,45 +157,41 @@ TCM_FORCEINLINE static auto hadd(__m256 const v) noexcept -> float
 
 // Tensor creation routines {{{
 namespace detail {
-inline auto make_f32_tensor(size_t n) -> torch::Tensor
-{
-    TCM_ASSERT(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
-               "Integer overflow");
-    auto out = torch::empty(
-        {static_cast<int64_t>(n)},
-        torch::TensorOptions().dtype(torch::kFloat32).requires_grad(false));
-    TCM_ASSERT(out.is_contiguous(), "Why is it not contiguous?");
-    return out;
-}
+template <class T> struct ToScalarType {
+    static_assert(!std::is_same<T, T>::value, "Type not (yet) supported.");
+};
 
-inline auto make_i64_tensor(size_t n) -> torch::Tensor
-{
-    TCM_ASSERT(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
-               "Integer overflow");
-    auto out = torch::empty(
-        {static_cast<int64_t>(n)},
-        torch::TensorOptions().dtype(torch::kInt64).requires_grad(false));
-    TCM_ASSERT(out.is_contiguous(), "Why is it not contiguous?");
-    return out;
-}
+template <> struct ToScalarType<float> {
+    static constexpr auto scalar_type() noexcept -> torch::ScalarType
+    {
+        return torch::kFloat32;
+    }
+};
 
-inline auto make_f32_tensor(size_t n, size_t m) -> torch::Tensor
+template <> struct ToScalarType<int64_t> {
+    static constexpr auto scalar_type() noexcept -> torch::ScalarType
+    {
+        return torch::kInt64;
+    }
+};
+
+/// Returns an empty one-dimensional tensor of `float` of length `n`.
+template <class T, class... Ints>
+auto make_tensor(Ints... dims) -> torch::Tensor
 {
-    TCM_ASSERT(n <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
-               "Integer overflow");
-    TCM_ASSERT(m <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
-               "Integer overflow");
-    auto out = torch::empty(
-        {static_cast<int64_t>(n), static_cast<int64_t>(m)},
-        torch::TensorOptions().dtype(torch::kFloat32).requires_grad(false));
-    TCM_ASSERT(out.is_contiguous(), "Why is it not contiguous?");
-    TCM_ASSERT(out.stride(0) == static_cast<int64_t>(m),
-               "Oh no! We didn't account for padding...");
+    auto out = torch::empty({static_cast<int64_t>(dims)...},
+                            torch::TensorOptions()
+                                .dtype(ToScalarType<T>::scalar_type())
+                                .requires_grad(false));
+    TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
+                                    "using `torch::empty` are contiguous");
+    TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
+               "it is assumed that tensors allocated using `torch::empty` are "
+               "aligned to 64-byte boundary");
     return out;
 }
 } // namespace detail
 // }}}
-
 
 // Errors {{{
 namespace detail {
@@ -311,7 +293,6 @@ inline auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
               ::fmt::format("wrong type {}; expected {}", type, expected))
 // }}}
 
-
 // [SpinVector] {{{
 class TCM_EXPORT SpinVector {
 
@@ -337,8 +318,13 @@ class TCM_EXPORT SpinVector {
 #endif
 
     class SpinReference;
+
   public:
-    constexpr SpinVector() noexcept : _data{} { _data.as_ints[0] = 0; _data.as_ints[1] = 0; }
+    constexpr SpinVector() noexcept : _data{}
+    {
+        _data.as_ints[0] = 0;
+        _data.as_ints[1] = 0;
+    }
 
     constexpr SpinVector(SpinVector const&) noexcept = default;
     constexpr SpinVector(SpinVector&&) noexcept      = default;
@@ -431,6 +417,9 @@ class TCM_EXPORT SpinVector {
         }
         return true;
     }
+
+    friend auto unpack_to_tensor(gsl::span<SpinVector const> src,
+                                 torch::Tensor               dst) -> void;
 
   private:
     // [SpinVector.private junk] {{{
@@ -633,8 +622,7 @@ constexpr auto SpinVector::operator[](unsigned const i) const
     return unsafe_at(i);
 }
 
-constexpr auto SpinVector::operator[](unsigned const i)
-    && TCM_NOEXCEPT -> Spin
+constexpr auto SpinVector::operator[](unsigned const i) && TCM_NOEXCEPT -> Spin
 {
     TCM_ASSERT(i < size(), "index out of bounds");
     return unsafe_at(i);
@@ -793,9 +781,73 @@ inline SpinVector::operator std::string() const
     return s;
 }
 
+namespace detail {
+inline auto unpack(uint8_t const src) noexcept -> __m256
+{
+    auto const mask_high  = _mm_set_epi32(128, 64, 32, 16);
+    auto const mask_low   = _mm_set_epi32(8, 4, 2, 1);
+    auto const mask_final = _mm_set1_epi32(2);
+    auto const x          = _mm_set1_epi32(src);
+
+    auto low  = _mm_srai_epi32(_mm_mullo_epi32(mask_low, x), 6);
+    low       = _mm_and_si128(low, mask_final);
+    auto high = _mm_srai_epi32(_mm_mullo_epi32(mask_high, x), 6);
+    high      = _mm_and_si128(high, mask_final);
+
+    auto y = _mm256_cvtepi32_ps(_mm256_setr_m128i(low, high));
+    y      = _mm256_sub_ps(y, _mm256_set1_ps(1.0f));
+    return y;
+}
+
+inline auto unpack(uint16_t const src, float* dst) noexcept -> void
+{
+    auto const mask_high  = _mm_set_epi32(128, 64, 32, 16);
+    auto const mask_low   = _mm_set_epi32(8, 4, 2, 1);
+    auto const mask_final = _mm_set1_epi32(2);
+
+    auto const x_1 = _mm_set1_epi32(src >> 8);
+    auto const x_2 = _mm_set1_epi32(src & 0xFF);
+
+    auto low_1  = _mm_srai_epi32(_mm_mullo_epi32(mask_low, x_1), 6);
+    auto high_1 = _mm_srai_epi32(_mm_mullo_epi32(mask_high, x_1), 6);
+    auto low_2  = _mm_srai_epi32(_mm_mullo_epi32(mask_low, x_2), 6);
+    auto high_2 = _mm_srai_epi32(_mm_mullo_epi32(mask_high, x_2), 6);
+    low_1       = _mm_and_si128(low_1, mask_final);
+    high_1      = _mm_and_si128(high_1, mask_final);
+    low_2       = _mm_and_si128(low_2, mask_final);
+    high_2      = _mm_and_si128(high_2, mask_final);
+
+    auto y_1 = _mm256_cvtepi32_ps(_mm256_setr_m128i(low_1, high_1));
+    auto y_2 = _mm256_cvtepi32_ps(_mm256_setr_m128i(low_2, high_2));
+    y_1      = _mm256_sub_ps(y_1, _mm256_set1_ps(1.0f));
+    y_2      = _mm256_sub_ps(y_2, _mm256_set1_ps(1.0f));
+    _mm256_storeu_ps(dst, y_1);
+    _mm256_storeu_ps(dst + 8, y_2);
+}
+
+inline auto get_store_mask_for(unsigned const rest) TCM_NOEXCEPT -> __m256i
+{
+    // clang-format off
+    __m256i const masks[7] = {
+        _mm256_set_epi32(0,  0,  0,  0,  0,  0,  0, -1),
+        _mm256_set_epi32(0,  0,  0,  0,  0,  0, -1, -1),
+        _mm256_set_epi32(0,  0,  0,  0,  0, -1, -1, -1),
+        _mm256_set_epi32(0,  0,  0,  0, -1, -1, -1, -1),
+        _mm256_set_epi32(0,  0,  0, -1, -1, -1, -1, -1),
+        _mm256_set_epi32(0,  0, -1, -1, -1, -1, -1, -1),
+        _mm256_set_epi32(0, -1, -1, -1, -1, -1, -1, -1),
+    };
+    // clang-format on
+    TCM_ASSERT(0 < rest && rest <= 7, "Invalid value for `rest`");
+    return masks[rest - 1];
+}
+} // namespace detail
+
+#if 1
 inline auto
 SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
 {
+#    if 0
     TCM_ASSERT(buffer.size() == size(), "Wrong buffer size");
     auto spin2float = [](Spin const s) noexcept->float
     {
@@ -805,7 +857,49 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
     for (auto i = 0u; i < size(); ++i) {
         buffer[i] = spin2float((*this)[i]);
     }
+#    else
+    TCM_ASSERT(buffer.size() == size(), "Wrong buffer size");
+
+    auto const chunks_16 = size() / 16;
+    auto const rest_16   = size() % 16;
+    auto const rest_8    = size() % 8;
+
+    auto* p = buffer.data();
+    auto  i = 0u;
+    for (; i < chunks_16; ++i, p += 16) {
+        detail::unpack(_data.spin[i], p);
+        // _mm256_storeu_ps(p, detail::unpack(_data.spin[i] >> 8));
+        // _mm256_storeu_ps(p + 8, detail::unpack(_data.spin[i] & 0xFF));
+    }
+
+    if (rest_16 != 0) {
+        auto const store_mask = detail::get_store_mask_for(rest_8);
+        if (rest_16 > 8) {
+            _mm256_storeu_ps(p, detail::unpack(_data.spin[i] >> 8));
+            _mm256_maskstore_ps(p + 8, store_mask,
+                                detail::unpack(_data.spin[i] & 0xFF));
+        }
+        else {
+            _mm256_maskstore_ps(p, store_mask,
+                                detail::unpack(_data.spin[i] >> 8));
+        }
+    }
+
+#        if 0
+    auto spin2float = [](Spin const s) noexcept->float
+    {
+        return s == Spin::up ? 1.0f : -1.0f;
+    };
+
+    for (auto i = 0u; i < size(); ++i) {
+        TCM_CHECK(buffer[i] == spin2float((*this)[i]), std::runtime_error,
+                  fmt::format("bug in copy_to: buffer[{}] == {} != {}", i,
+                              buffer[i], spin2float((*this)[i])));
+    }
+#        endif
+#    endif
 }
+#endif
 
 inline SpinVector::SpinVector(gsl::span<float const> buffer,
                               detail::UnsafeTag /*unused*/) TCM_NOEXCEPT
@@ -905,6 +999,7 @@ TCM_NOINLINE auto SpinVector::random(unsigned const size,
 TCM_NAMESPACE_END
 
 namespace std {
+/// Specialisation of std::hash for SpinVectors to use in QuantumState
 template <> struct hash<::TCM_NAMESPACE::SpinVector> {
     auto operator()(::TCM_NAMESPACE::SpinVector const& spin) const noexcept
         -> size_t
@@ -928,7 +1023,7 @@ template <class RandomAccessIterator, class Projection = IdentityProjection>
 auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
                       Projection proj = IdentityProjection{}) -> torch::Tensor
 {
-    if (begin == end) return detail::make_f32_tensor(0);
+    if (begin == end) return detail::make_tensor<float>(0);
     TCM_ASSERT(end - begin > 0, "Invalid range");
     auto const size         = static_cast<size_t>(end - begin);
     auto const number_spins = proj(*begin).size();
@@ -937,7 +1032,7 @@ auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
                                return proj(x).size() == number_spins;
                            }),
                "Input range contains variable sized spin chains");
-    auto out = detail::make_f32_tensor(static_cast<size_t>(size), number_spins);
+    auto       out  = detail::make_tensor<float>(size, number_spins);
     auto*      data = out.template data<float>();
     auto const ldim = out.stride(0);
     for (auto i = size_t{0}; i < size; ++i, ++begin, data += ldim) {
@@ -954,9 +1049,10 @@ auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
     auto const size = end - begin;
     TCM_ASSERT(size > 0, "Input range must not be empty");
     auto const number_spins = begin->size();
-    TCM_ASSERT(std::all_of(
-                   begin, end,
-                   [number_spins](auto const& x) { return x.size() == number_spins; }),
+    TCM_ASSERT(std::all_of(begin, end,
+                           [number_spins](auto const& x) {
+                               return x.size() == number_spins;
+                           }),
                "Input range contains variable size spin chains");
     TCM_ASSERT(output.dim() == 2, "Invalid dimension");
     TCM_ASSERT(size == output.size(0), "Sizes don't match");
@@ -972,12 +1068,12 @@ auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
 }
 } // namespace detail
 
+/// \brief Explicit representation of a quantum state `|ψ⟩`.
 // [QuantumState] {{{
-class QuantumState
+class TCM_EXPORT QuantumState
     : public ska::bytell_hash_map<SpinVector, complex_type> {
   private:
-    using base =
-        ska::bytell_hash_map<SpinVector, complex_type>;
+    using base = ska::bytell_hash_map<SpinVector, complex_type>;
     using base::value_type;
 
     static_assert(alignof(base::value_type) == 16, "");
@@ -991,19 +1087,19 @@ class QuantumState
     QuantumState& operator=(QuantumState const&) = delete;
     QuantumState& operator=(QuantumState&&) = delete;
 
+    /// Performs `|ψ⟩ := |ψ⟩ + c|σ⟩`.
+    ///
+    /// \param value A pair `(c, |σ⟩)`.
     TCM_FORCEINLINE TCM_HOT auto
                     operator+=(std::pair<complex_type, SpinVector> const& value)
         -> QuantumState&
     {
         TCM_ASSERT(std::isfinite(value.first.real())
                        && std::isfinite(value.first.imag()),
-                   "Invalid coefficient");
+                   fmt::format("Invalid coefficient ({}, {})",
+                               value.first.real(), value.first.imag()));
         auto& c = static_cast<base&>(*this)[value.second];
-        TCM_ASSERT(std::isfinite(c.real()) && std::isfinite(c.imag()),
-                   "Invalid state");
         c += value.first;
-        TCM_ASSERT(std::isfinite(c.real()) && std::isfinite(c.imag()),
-                   "Invalid state");
         return *this;
     }
 
@@ -1077,9 +1173,12 @@ class Heisenberg {
                                             QuantumState& psi) const -> void
     {
         TCM_ASSERT(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
-                   "Coefficient `coeff` must be a finite complex number");
+                   fmt::format("invalid coefficient ({}, {}); expected a "
+                               "finite complex number",
+                               coeff.real(), coeff.imag()));
         TCM_ASSERT(_edges.empty() || max_index() < spin.size(),
-                   "Index out of bounds: `spin` is too short");
+                   fmt::format("`spin` is too short {}; expected >{}",
+                               spin.size(), max_index()));
         auto c = complex_type{0, 0};
         for (auto const& edge : edges()) {
             // Heisenberg hamiltonian works more or less like this:
@@ -1094,7 +1193,7 @@ class Heisenberg {
             //
             auto const aligned = spin[edge.first] == spin[edge.second];
             // sign == 1.0 when aligned == true and sign == -1.0 when aligned == false
-            auto const sign    = static_cast<real_type>(-1 + 2 * aligned);
+            auto const sign = static_cast<real_type>(-1 + 2 * aligned);
             c += sign * coeff * coupling();
             if (!aligned) {
                 psi += {real_type{2} * coeff * coupling(),
@@ -1144,7 +1243,7 @@ class Polynomial {
   public:
     /// `P[ε](H - A)` term.
     struct Term {
-        complex_type        root; ///< A in the formula above
+        complex_type        root;    ///< A in the formula above
         optional<real_type> epsilon; ///< ε in the formula above
     };
 
@@ -1157,7 +1256,8 @@ class Polynomial {
     std::vector<Term> _terms;
     /// The result of applying the polynomial to a state `|ψ⟩`
     /// can be written as ∑cᵢ|σᵢ⟩. `_basis` is the set {|σᵢ⟩}.
-    std::vector<SpinVector> _basis;
+    std::vector<SpinVector, boost::alignment::aligned_allocator<SpinVector, 64>>
+        _basis;
     /// The result of applying the polynomial to a state `|ψ⟩`
     /// can be written as ∑cᵢ|σᵢ⟩. `_coeffs` is the set {cᵢ}.
     torch::Tensor _coeffs;
@@ -1168,9 +1268,9 @@ class Polynomial {
                std::vector<Term>                 terms);
 
     Polynomial(Polynomial const&) = default;
-    Polynomial(Polynomial &&) = default;
+    Polynomial(Polynomial&&)      = default;
     Polynomial& operator=(Polynomial const&) = delete;
-    Polynomial& operator=(Polynomial &&) = delete;
+    Polynomial& operator=(Polynomial&&) = delete;
 
     Polynomial(Polynomial const& other, SplitTag)
         : _current{}
@@ -1185,8 +1285,7 @@ class Polynomial {
         _old.reserve(size);
         _basis.reserve(other._basis.capacity());
         if (other._coeffs.defined()) {
-            _coeffs = detail::make_f32_tensor(
-                static_cast<size_t>(other._coeffs.size(0)));
+            _coeffs = detail::make_tensor<float>(other._coeffs.size(0));
         }
     }
 
@@ -1205,15 +1304,13 @@ class Polynomial {
         return _coeffs;
     }
 
-
   private:
     template <class Map>
     TCM_NOINLINE auto save_results(Map const&                        map,
                                    torch::optional<real_type> const& eps)
         -> void;
 
-    template <class Map>
-    static auto check_all_real(Map const& map) -> void
+    template <class Map> static auto check_all_real(Map const& map) -> void
     {
         constexpr auto eps       = static_cast<real_type>(2e-3);
         auto           norm_full = real_type{0};
@@ -1265,7 +1362,7 @@ auto Polynomial::save_results(Map const& map, optional<real_type> const& eps)
     auto const size = map.size();
     _basis.clear();
     _basis.reserve(size);
-    if (!_coeffs.defined()) { _coeffs = detail::make_f32_tensor(size); }
+    if (!_coeffs.defined()) { _coeffs = detail::make_tensor<float>(size); }
     else if (_coeffs.size(0) != static_cast<int64_t>(size)) {
         _coeffs.resize_({static_cast<int64_t>(size)});
     }
@@ -1292,20 +1389,46 @@ auto Polynomial::save_results(Map const& map, optional<real_type> const& eps)
 // [Polynomial] }}}
 
 namespace detail {
-inline auto load_forward_fn(std::string const& filename)
-    -> std::function<auto(torch::Tensor const&)->torch::Tensor>
+inline auto load_forward_fn(std::string const& filename) -> ForwardT
 {
     auto m = torch::jit::load(filename);
-    if (m == nullptr) {
-        throw std::runtime_error{
-            "Failed to load torch::jit::script::Module from '" + filename
-            + "'"};
-    }
-    auto fn = 
+    TCM_CHECK(
+        m != nullptr, std::runtime_error,
+        fmt::format("could not load torch::jit::script::Module from \"{}\"",
+                    filename));
+    return
         [module = std::move(m)](torch::Tensor const& input) -> torch::Tensor {
             return module->forward({input}).toTensor();
         };
-    return fn;
+}
+
+inline auto load_forward_fn(std::string const& filename, size_t num_copies)
+    -> std::vector<ForwardT>
+{
+    static_assert(std::is_nothrow_move_constructible<ForwardT>::value, "");
+    static_assert(std::is_nothrow_move_assignable<ForwardT>::value, "");
+
+    std::vector<ForwardT> modules;
+    modules.resize(num_copies);
+
+    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
+    std::exception_ptr err_ptr{nullptr};
+
+    auto* modules_ptr = modules.data();
+#pragma omp parallel for ordered default(none)                                 \
+    firstprivate(num_copies, modules_ptr) shared(filename, err_flag, err_ptr)
+    for (auto i = size_t{0}; i < num_copies; ++i) {
+        try {
+            modules_ptr[i] = load_forward_fn(filename);
+        }
+        catch (...) {
+            if (!err_flag.test_and_set()) {
+                err_ptr = std::current_exception();
+            }
+        }
+    }
+    if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
+    return modules;
 }
 } // namespace detail
 
@@ -1359,154 +1482,94 @@ static_assert(std::is_trivially_destructible<VarAccumulator>::value, "");
 
 // [PolynomialState] {{{
 namespace detail {
-class _PolynomialState {
-  public:
+class PolynomialState {
+
     using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
 
+    struct alignas(64) Worker {
+      private:
+        ForwardT                         _forward;
+        gsl::not_null<Polynomial const*> _polynomial;
+        torch::Tensor                    _buffer;
+        size_t                           _batch_size;
+        size_t                           _num_spins;
+        VarAccumulator                   _time;
+
+      public:
+        Worker(ForwardT f, Polynomial const& p, size_t const batch_size,
+               size_t const num_spins)
+            : _forward{std::move(f)}
+            , _polynomial{std::addressof(p)}
+            , _buffer{detail::make_tensor<float>(batch_size, num_spins)}
+            , _batch_size{batch_size}
+            , _num_spins{num_spins}
+            , _time{}
+        {
+            // Access the memory to make sure it belongs to us
+            if (batch_size * num_spins != 0) { *_buffer.data<float>() = 0.0f; }
+        }
+
+        Worker(Worker const&)     = delete;
+        Worker(Worker&&) noexcept = default;
+        Worker& operator=(Worker const&) = delete;
+        Worker& operator=(Worker&&) noexcept = default;
+
+        auto operator()(int64_t batch_index) -> float;
+
+        constexpr auto batch_size() const noexcept -> size_t
+        {
+            return _batch_size;
+        }
+        constexpr auto number_spins() const noexcept -> size_t
+        {
+            return _num_spins;
+        }
+        constexpr auto const& time() const noexcept { return _time; }
+
+      private:
+        auto forward_propagate_batch(size_t i) -> float;
+        auto forward_propagate_rest(size_t i) -> float;
+    };
+
+    static_assert(sizeof(ForwardT) == 32,
+                  "Yeah, this only works for stdlibc++...");
+
   private:
-    Polynomial     _poly;
-    size_t         _batch_size;
-    VarAccumulator _poly_time;
-    VarAccumulator _psi_time;
-
-    struct Body;
-
-  public:
-    _PolynomialState(Polynomial poly, size_t const batch_size) noexcept
-        : _poly{std::move(poly)}
-        , _batch_size{batch_size}
-        , _poly_time{}
-        , _psi_time{}
-    {
-        static_assert(std::is_nothrow_move_constructible<Polynomial>::value,
-                      "");
-    }
-
-    _PolynomialState(_PolynomialState const&) = delete;
-    _PolynomialState(_PolynomialState&&)      = delete;
-    _PolynomialState& operator=(_PolynomialState const&) = delete;
-    _PolynomialState& operator=(_PolynomialState&&) = delete;
-
-    /// Returns the batch size.
-    constexpr auto batch_size() const noexcept -> size_t;
-
-    /// Updates the batch size used internally for forward propagation. Note
-    /// that this function may allocate and is thus not marked `noexcept`.
-    constexpr auto batch_size(size_t) noexcept -> void;
-
-    /// Runs forward propagation.
-    auto operator()(SpinVector, ForwardT const&, std::string const&) -> float;
-
-    auto time_poly() const -> std::pair<real_type, real_type>;
-    auto time_psi() const -> std::pair<real_type, real_type>;
-};
-
-constexpr auto _PolynomialState::batch_size() const noexcept -> size_t
-{
-    return _batch_size;
-}
-
-constexpr auto
-_PolynomialState::batch_size(size_t const new_batch_size) noexcept -> void
-{
-    _batch_size = new_batch_size;
-}
-} // namespace detail
-
-
-class PolynomialState : private detail::_PolynomialState {
-  private:
-    using base = detail::_PolynomialState;
-    using FunctionT = base::ForwardT;
-
-    FunctionT   _psi;
-    std::string _filename;
-
-  public:
-    PolynomialState(FunctionT psi, Polynomial poly, size_t const batch_size,
-                    std::string const& filename)
-        : base{std::move(poly), batch_size}
-        , _psi{std::move(psi)}
-        , _filename{filename}
-    {}
-
-    using base::batch_size;
-    using base::time_poly;
-    using base::time_psi;
-
-    auto operator()(SpinVector x) -> float
-    {
-        return static_cast<base&>(*this)(x, _psi, _filename);
-    }
-};
-
-#if 0
-class PolynomialState {
-    using FunctionT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
-  private:
-    FunctionT      _psi;
-    Polynomial     _poly;
-    size_t         _batch_size;
-    torch::Tensor  _input;
+    Polynomial _poly;
+    std::vector<Worker, boost::alignment::aligned_allocator<Worker, 64>>
+                   _workers;
     VarAccumulator _poly_time;
     VarAccumulator _psi_time;
 
   public:
-    PolynomialState(FunctionT psi, Polynomial poly, size_t const batch_size)
-        : _psi{std::move(psi)}
-        , _poly{std::move(poly)}
-        , _batch_size{batch_size}
-        , _input{}
-        , _poly_time{}
-        , _psi_time{}
-    {}
-
-    PolynomialState(PolynomialState const&) = delete;
-    PolynomialState(PolynomialState&&) = delete;
-    PolynomialState& operator=(PolynomialState const&) = delete;
-    PolynomialState& operator=(PolynomialState&&) = delete;
-
-    /// Returns the batch size used internally for forward propagation
-    constexpr auto batch_size() const noexcept -> size_t { return _batch_size; }
-
-    /// Updates the batch size used internally for forward propagation. Note
-    /// that this function may allocate and is thus not marked `noexcept`.
-    auto batch_size(size_t const new_batch_size) -> void
+    /// Creates a state with one worker
+    PolynomialState(ForwardT psi, Polynomial poly,
+                    std::tuple<size_t, size_t> dim)
+        : _poly{std::move(poly)}, _workers{}, _poly_time{}, _psi_time{}
     {
-        _batch_size = new_batch_size;
-        if (_input.defined()) {
-            _input.resize_({static_cast<int64_t>(_batch_size), _input.size(1)});
+        _workers.emplace_back(std::move(psi), _poly, std::get<0>(dim),
+                              std::get<1>(dim));
+    }
+
+    PolynomialState(std::vector<ForwardT> psis, Polynomial poly,
+                    std::tuple<size_t, size_t> dim)
+        : _poly{std::move(poly)}, _workers{}, _poly_time{}, _psi_time{}
+    {
+        _workers.reserve(psis.size());
+        for (auto i = size_t{0}; i < psis.size(); ++i) {
+            _workers.emplace_back(std::move(psis[i]), _poly, std::get<0>(dim),
+                                  std::get<1>(dim));
         }
     }
 
     auto operator()(SpinVector) -> float;
 
-    // TODO
-    // auto operator()(torch::Tensor const&) -> torch::Tensor;
-
-    auto time_poly() const -> std::pair<real_type, real_type>
-    {
-        return {_poly_time.mean(), std::sqrt(_poly_time.variance())};
-    }
-
-    auto time_psi() const -> std::pair<real_type, real_type>
-    {
-        return {_psi_time.mean(), std::sqrt(_psi_time.variance())};
-    }
-
-  private:
-    /// Let `_poly` be `∑cᵢ|σᵢ⟩` where `i` runs from `0` to `N-1`.
-    /// `forward_propagate_batch` calculates `∑cᵢ⟨σᵢ|ψ⟩` where `i` now runs from
-    /// `n * batch_size` to `(n + 1) * batch_size`.
-    auto forward_propagate_batch(size_t n) -> float;
-
-    /// Let `_poly` be `∑cᵢ|σᵢ⟩` where `i` runs from `0` to `N-1`.
-    /// `forward_propagate_rest` calculates `∑cᵢ⟨σᵢ|ψ⟩` where `i` now runs from
-    /// `n * batch_size` to `n * batch_size + rest` (which should be equal to
-    /// `N-1`).
-    auto forward_propagate_rest(size_t n, size_t rest) -> float;
+    auto time_poly() const -> std::pair<real_type, real_type>;
+    auto time_psi() const -> std::pair<real_type, real_type>;
 };
-#endif
+} // namespace detail
+
+using detail::PolynomialState;
 // }}}
 
 // [Random] {{{
@@ -1545,7 +1608,7 @@ class RandomFlipper {
     inline auto next(bool accepted) -> void;
 
   private:
-    auto shuffle() -> void;
+    auto        shuffle() -> void;
     inline auto swap_accepted() TCM_NOEXCEPT -> void;
 };
 // }}}
@@ -1644,7 +1707,7 @@ struct alignas(32) ChainState {
     /// Merges `other` into this. This amounts to just adding together the
     /// `count`s. In DEBUG mode, however, we also make sure that only states
     /// with the same `spin` and `value` attributes can be merged.
-    TCM_CONSTEXPR auto merge(ChainState const& other) TCM_NOEXCEPT -> void
+    auto merge(ChainState const& other) TCM_NOEXCEPT -> void
     {
         auto const isclose = [](auto const a, auto const b) noexcept->bool
         {
@@ -1716,7 +1779,8 @@ struct ChainResult {
 
     auto samples() && noexcept -> SamplesT { return std::move(_samples); }
 
-    auto to_tensors() const -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+    auto to_tensors() const
+        -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
     {
         return {extract_vectors(), extract_values(), extract_count()};
     }
@@ -1886,7 +1950,6 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::release(bool sorted) && -> SamplesT
 auto random_spin(size_t size, int magnetisation, RandomGenerator& generator)
     -> SpinVector;
 
-
 struct Options {
     unsigned                           number_spins;
     int                                magnetisation;
@@ -1949,18 +2012,18 @@ struct FunctionWrapperHelper<
 } // namespace detail
 
 template <class ForwardFn>
-auto sample_some(ForwardFn&& psi, Options const& options,
-                 optional<SpinVector> spin) -> ChainResult
+auto sample_some(ForwardFn psi, Options const& options,
+                 optional<SpinVector> spin = nullopt,
+                 RandomGenerator*     gen  = nullptr) -> ChainResult
 {
-    using Helper         = detail::FunctionWrapperHelper<ForwardFn&&>;
-    auto&      generator = global_random_generator();
+    auto&      generator = (gen != nullptr) ? *gen : global_random_generator();
     auto const initial_spin =
         spin.has_value() ? *spin
                          : random_spin(options.number_spins,
                                        options.magnetisation, generator);
-    MarkovChain<typename Helper::wrapper_type, DefaultProbFn> chain{
-        Helper{}(std::forward<ForwardFn>(psi)), DefaultProbFn{}, initial_spin,
-        generator};
+    MarkovChain<ForwardFn, DefaultProbFn> chain{std::move(psi), DefaultProbFn{},
+                                                initial_spin, generator};
+
     auto i = size_t{0};
     for (; i < std::get<0>(options.steps); i += std::get<2>(options.steps)) {
         chain.next();
@@ -2017,7 +2080,7 @@ auto reduce_impl(ParallelTag, Iterator begin, Iterator end, Body& this_body,
     other_err =
         reduce_impl(ParallelTag{}, begin, middle, other_body, grain_size);
 
-// #pragma omp task shared(this_body, this_err)
+    // #pragma omp task shared(this_body, this_err)
     this_err = reduce_impl(ParallelTag{}, middle, end, this_body, grain_size);
 
 #pragma omp taskwait
