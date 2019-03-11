@@ -81,6 +81,13 @@ option(CPUINFO_BUILD_MOCK_TESTS OFF)
 option(CPUINFO_BUILD_BENCHMARKS OFF)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/cpuinfo)
 
+# cpuinfo library
+execute_process(COMMAND git submodule update --init -- external/SG14
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(inplace_function INTERFACE)
+target_include_directories(inplace_function
+    SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14/SG14)
+
 # Boost (some header-only parts)
 execute_process(COMMAND git submodule update --init -- external/boost
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -158,7 +165,7 @@ target_compile_definitions(_C_nqs PUBLIC
     # _GLIBCXX_PARALLEL=0
 )
 target_link_libraries(_C_nqs PUBLIC fmt::fmt gsl-lite flat_hash_map cpuinfo
-    Boost Torch expected OpenMP::OpenMP_CXX)
+    Boost Torch expected inplace_function OpenMP::OpenMP_CXX)
 
 if (FALSE)
     set(PYBIND11_CPP_STANDARD "-std=c++14")

@@ -14,6 +14,8 @@
 
 #include <gsl/gsl-lite.hpp>
 
+#include <inplace_function.h>
+
 #if defined(BOOST_GCC)
 #    pragma GCC diagnostic push
 #    pragma GCC diagnostic ignored "-Wsign-conversion"
@@ -110,7 +112,9 @@ using std::uint64_t;
 using real_type    = double;
 using complex_type = std::complex<real_type>;
 
-using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
+using ForwardT =
+    stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
+                             /*capacity=*/24, /*alignment=*/8>;
 
 using torch::nullopt;
 using torch::optional;
@@ -185,9 +189,11 @@ auto make_tensor(Ints... dims) -> torch::Tensor
                                 .requires_grad(false));
     TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
                                     "using `torch::empty` are contiguous");
-    TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
-               "it is assumed that tensors allocated using `torch::empty` are "
-               "aligned to 64-byte boundary");
+    // TODO(twesterhout): I really want that, but in PyTorch v1.0.1 only tensors
+    // larger than 5120 bytes have 64 byte alignment.
+    // TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
+    //            "it is assumed that tensors allocated using `torch::empty` are "
+    //            "aligned to 64-byte boundary");
     return out;
 }
 } // namespace detail
@@ -1484,7 +1490,7 @@ static_assert(std::is_trivially_destructible<VarAccumulator>::value, "");
 namespace detail {
 class PolynomialState {
 
-    using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
+    // using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
 
     struct alignas(64) Worker {
       private:
@@ -1506,6 +1512,7 @@ class PolynomialState {
             , _time{}
         {
             // Access the memory to make sure it belongs to us
+            TCM_ASSERT(_buffer.is_variable(), "");
             if (batch_size * num_spins != 0) { *_buffer.data<float>() = 0.0f; }
         }
 
@@ -1792,6 +1799,7 @@ struct ChainResult {
 };
 
 auto merge(ChainResult const& x, ChainResult const& y) -> ChainResult;
+auto merge(std::vector<ChainResult>&& results) -> ChainResult;
 // }}}
 
 // [MarkovChain] {{{
@@ -1804,30 +1812,26 @@ template <class ForwardFn, class ProbabilityFn> class MarkovChain {
     ForwardFn                       _forward;
     ProbabilityFn                   _prob;
     gsl::not_null<RandomGenerator*> _generator;
-    bool                            _is_sorted;
-    bool                            _is_recording;
     size_t                          _accepted;
     size_t                          _count;
 
   public:
     MarkovChain(ForwardFn forward, ProbabilityFn prob, SpinVector const spin,
-                RandomGenerator& generator)
+                RandomGenerator& generator, bool record_first = false)
         : _samples{}
         , _flipper{spin, generator}
         , _forward{std::move(forward)}
         , _prob{std::move(prob)}
         , _generator{std::addressof(generator)}
-        , _is_sorted{true}
-        , _is_recording{false}
-        , _accepted{1}
-        , _count{1}
+        , _accepted{0}
+        , _count{0}
     {
         TCM_CHECK(
             spin.size() <= 64, std::runtime_error,
             fmt::format("Sorry, but such long spin chains ({}) are not (yet) "
                         "supported. The greatest supported length is {}",
                         spin.size(), 64));
-        _samples.emplace_back(spin, _forward(spin), 1u);
+        _samples.emplace_back(spin, _forward(spin), record_first);
     }
 
     MarkovChain(MarkovChain const&) = default;
@@ -1835,61 +1839,52 @@ template <class ForwardFn, class ProbabilityFn> class MarkovChain {
     MarkovChain& operator=(MarkovChain const&) = default;
     MarkovChain& operator=(MarkovChain&&) = default;
 
-    auto read() const noexcept -> ChainState const&
+    inline auto next() -> void { next_impl(true); }
+    inline auto skip() -> void { next_impl(false); }
+    inline auto release(bool sorted = true) && -> SamplesT;
+
+    inline auto steps() -> size_t { return _count; }
+
+  private:
+    auto current() const noexcept -> ChainState const&
     {
-        TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
+        TCM_ASSERT(!_samples.empty(), "Use after `release`");
         return _samples.back();
     }
 
-    auto start_recording() noexcept -> void
+    auto current() noexcept -> ChainState&
     {
-        if (_is_recording) return;
-        TCM_ASSERT(_samples.size() == 1, "Bug!");
-        _is_recording         = true;
-        _samples.back().count = 1;
+        TCM_ASSERT(!_samples.empty(), "Use after `release`");
+        return _samples.back();
     }
 
-    auto next() -> void;
-
-    auto release(bool sorted = true) && -> SamplesT;
-
-  private:
-    TCM_FORCEINLINE auto current_spin() const TCM_NOEXCEPT -> SpinVector
-    {
-        return _samples.back().spin;
-    }
-
-    TCM_FORCEINLINE auto current_value() const TCM_NOEXCEPT -> real_type
-    {
-        return _samples.back().value;
-    }
-
+    auto next_impl(bool record) -> void;
     auto sort() -> void;
     auto compress() -> void;
 };
 
 template <class ForwardFn, class ProbabilityFn>
-TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::next() -> void
+TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::next_impl(bool record)
+    -> void
 {
-    TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
+    TCM_CHECK(!_samples.empty(), std::logic_error, "Use after `release()`");
     auto const u = std::generate_canonical<
         real_type, std::numeric_limits<real_type>::digits>(*_generator);
-    auto       spin        = current_spin().flipped(_flipper.read());
+    auto       spin        = current().spin.flipped(_flipper.read());
     auto const value       = _forward(spin);
-    auto const probability = _prob(current_value(), value);
+    auto const probability = _prob(current().value, value);
+
+    _count += record;
     if (u <= probability) {
-        if (_is_recording) {
-            _samples.emplace_back(spin, value, 1u);
-            _is_sorted = false;
-        }
+        if (current().count > 0) { _samples.emplace_back(spin, value, record); }
         else {
-            TCM_ASSERT(_samples.size() == 1, "Bug!");
-            _samples.back() = ChainState{spin, value, 1u};
+            current() = ChainState{spin, value, record};
         }
+        _accepted += record;
         _flipper.next(true);
     }
     else {
-        ++(_samples.back().count);
+        current().count += record;
         _flipper.next(false);
     }
 }
@@ -1897,13 +1892,9 @@ TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::next() -> void
 template <class ForwardFn, class ProbabilityFn>
 TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::sort() -> void
 {
-    TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
-    TCM_ASSERT(!_is_sorted, "Bug! Why are you trying to sort twice?");
-    auto const number_spins = current_spin().size();
-    TCM_CHECK(number_spins <= 64, std::runtime_error,
-              fmt::format("Sorry, but such long spin chains ({}) are not (yet) "
-                          "supported. The greatest supported length is {}",
-                          number_spins, 64));
+    TCM_ASSERT(!_samples.empty(), "Use after `release()`");
+    auto const number_spins = current().spin.size();
+    TCM_ASSERT(number_spins <= 64, "Spin chain too long");
     ska_sort(std::begin(_samples), std::end(_samples), [](auto const& x) {
         return x.spin.key(
             detail::unsafe_tag /*Yes, we have checked that size() <= 64*/);
@@ -1913,7 +1904,7 @@ TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::sort() -> void
 template <class ForwardFn, class ProbabilityFn>
 auto MarkovChain<ForwardFn, ProbabilityFn>::compress() -> void
 {
-    TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
+    TCM_ASSERT(!_samples.empty(), "Use after `release()`");
     auto const pred  = [](auto const& x, auto const& y) { return x == y; };
     auto const merge = [](auto& acc, auto const& x) { acc.merge(x); };
 
@@ -1924,8 +1915,9 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::compress() -> void
     first            = std::adjacent_find(first, last, pred);
     if (first != last) {
         auto i = first;
-        for (++i; ++i != last;) {
-            if (!pred(*first, *i)) { *++first = std::move(*i); }
+        merge(*first, *(++i));
+        for (; ++i != last;) {
+            if (!pred(*first, *i)) { *(++first) = std::move(*i); }
             else {
                 merge(*first, *i);
             }
@@ -1939,21 +1931,26 @@ template <class ForwardFn, class ProbabilityFn>
 auto MarkovChain<ForwardFn, ProbabilityFn>::release(bool sorted) && -> SamplesT
 {
     TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
-    if (!sorted || _is_sorted) return std::move(_samples);
+    if (current().count == 0) {
+        _samples.pop_back();
+        if (_samples.empty()) { return {}; }
+    }
+    TCM_ASSERT(std::all_of(std::begin(_samples), std::end(_samples),
+                           [](auto const& x) { return x.count > 0; }),
+               "");
     sort();
     compress();
-    _is_sorted = true;
     return std::move(_samples);
 }
+
 // }}}
 
-auto random_spin(size_t size, int magnetisation, RandomGenerator& generator)
-    -> SpinVector;
-
 struct Options {
-    unsigned                           number_spins;
-    int                                magnetisation;
-    std::tuple<size_t, size_t, size_t> steps;
+    unsigned number_spins;
+    int      magnetisation;
+    unsigned batch_size;
+    /// [number_chains, begin, end, step]
+    std::array<unsigned, 4> steps;
 };
 
 TCM_NAMESPACE_END
@@ -1988,12 +1985,12 @@ template <class Function>
 struct FunctionWrapperHelper<
     Function,
     std::enable_if_t<std::is_lvalue_reference<Function>::value> /**/> {
-    using type         = std::remove_const_t<std::remove_reference_t<Function>>;
-    using wrapper_type = std::reference_wrapper<type const>;
+    using type         = std::remove_reference_t<Function>;
+    using wrapper_type = std::reference_wrapper<type>;
 
-    TCM_FORCEINLINE constexpr auto operator()(type const& x) -> wrapper_type
+    TCM_FORCEINLINE constexpr auto operator()(type& x) noexcept -> wrapper_type
     {
-        return std::cref(x);
+        return std::ref(x);
     }
 };
 
@@ -2004,13 +2001,61 @@ struct FunctionWrapperHelper<
     using type         = std::remove_const_t<std::remove_reference_t<Function>>;
     using wrapper_type = type;
 
-    TCM_FORCEINLINE constexpr auto operator()(type&& x) -> wrapper_type
+    TCM_FORCEINLINE constexpr auto operator()(type&& x) noexcept -> wrapper_type
     {
+        static_assert(std::is_nothrow_move_constructible<wrapper_type>::value,
+                      "");
         return static_cast<type&&>(x);
     }
 };
 } // namespace detail
 
+template <class ForwardFn>
+auto sample_some(ForwardFn&& psi, Options const& options,
+                 optional<SpinVector> initial_spin = nullopt,
+                 RandomGenerator*     gen          = nullptr) -> ChainResult
+{
+    auto const begin     = options.steps[1];
+    auto const end       = options.steps[2];
+    auto const step      = options.steps[3];
+    auto&      generator = (gen != nullptr) ? *gen : global_random_generator();
+    auto const spin =
+        initial_spin.has_value()
+            ? *initial_spin
+            : SpinVector::random(options.number_spins, options.magnetisation,
+                                 generator);
+    if (begin == end) { return {}; }
+
+#pragma omp critical
+    pybind11::print("Bye from ", omp_get_thread_num());
+
+    using Wrapper = detail::FunctionWrapperHelper<ForwardFn&&>;
+    MarkovChain<typename Wrapper::wrapper_type, DefaultProbFn> chain{
+        /*forward=*/Wrapper{}(std::forward<ForwardFn>(psi)),
+        /*probability=*/DefaultProbFn{},
+        /*spin=*/spin, /*generator=*/generator, /*record_first=*/begin == 0};
+    // If begin == 0, we start recording immediately, so the initial state of
+    // chain is the first sample. Hence in that case we initialise i to 1.
+#pragma omp critical
+    pybind11::print("Hello from ", omp_get_thread_num());
+
+    auto i = static_cast<unsigned>(begin == 0u);
+    if (begin != 0u && begin + step < end) {
+        for (; i < begin; ++i) {
+            chain.skip();
+        }
+        chain.next();
+    }
+    for (; i + step < end; i += step) {
+        for (auto j_skip = 0u; j_skip < step - 1; ++j_skip) {
+            chain.skip();
+        }
+        chain.next();
+    }
+    return ChainResult{std::move(chain).release()};
+}
+
+#if 0
 template <class ForwardFn>
 auto sample_some(ForwardFn psi, Options const& options,
                  optional<SpinVector> spin = nullopt,
@@ -2034,10 +2079,148 @@ auto sample_some(ForwardFn psi, Options const& options,
     }
     return ChainResult{std::move(chain).release()};
 }
+#endif
 // }}}
 
 // [parallel_sample_some] {{{
 namespace detail {
+
+template <class Function, class Int>
+TCM_FORCEINLINE auto simple_for_loop(std::true_type, Int begin, Int end,
+                                     Function f) -> void
+{
+    for (auto i = begin; i < end; ++i) {
+        f(i);
+    }
+}
+
+template <class Factory, class Int>
+TCM_FORCEINLINE auto simple_for_loop(std::false_type, Int begin, Int end,
+                                     Factory factory) -> void
+{
+    auto f = factory();
+    for (auto i = begin; i < end; ++i) {
+        f(i);
+    }
+}
+
+template <bool is_eager, class F>
+TCM_FORCEINLINE auto parallel_for_impl(int64_t const begin, int64_t const end,
+                                       F func, size_t const cutoff,
+                                       int const number_threads) -> void
+{
+    static_assert(std::is_nothrow_copy_constructible<F>::value,
+                  "`F` must be nothrow copy constructible to be safely usable "
+                  "with OpenMP's firstprivate clause.");
+    TCM_ASSERT(number_threads > 0, "Invalid number of threads");
+    using IsEager = std::integral_constant<bool, is_eager>;
+    TCM_CHECK(begin <= end, std::invalid_argument,
+              fmt::format("invalid range [{}, {})", begin, end));
+    if (begin == end) { return; }
+    if (static_cast<size_t>(end - begin) <= cutoff) { // Fallback to serial
+        simple_for_loop(IsEager{}, begin, end, std::move(func));
+        return;
+    }
+
+    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
+    std::exception_ptr err_ptr{nullptr};
+#pragma omp parallel num_threads(number_threads) default(none)                 \
+    firstprivate(begin, end, func) shared(err_flag, err_ptr)
+    {
+        // This is basically a hand-rolled version of OpenMP's schedule(static),
+        // but we need it for exception safety
+        auto const num_threads  = omp_get_num_threads();
+        auto const thread_id    = omp_get_thread_num();
+        auto const size         = end - begin;
+        auto const rest         = size % num_threads;
+        auto const chunk_size   = size / num_threads + (thread_id < rest);
+        auto const thread_begin = begin + thread_id * chunk_size;
+        if (thread_begin < end) {
+            try {
+                simple_for_loop(IsEager{}, thread_begin,
+                                thread_begin + chunk_size, std::move(func));
+            }
+            catch (...) {
+                if (!err_flag.test_and_set()) {
+                    err_ptr = std::current_exception();
+                }
+            }
+        }
+    }
+    if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
+}
+
+template <class Factory>
+auto parallel_for_lazy(int64_t const begin, int64_t const end, Factory factory,
+                       size_t const cutoff = 1, int const num_threads = -1)
+    -> void
+{
+    parallel_for_impl</*is_eager=*/false>(
+        begin, end, std::move(factory), cutoff,
+        num_threads > 0 ? num_threads : omp_get_max_threads());
+}
+
+template <class Function>
+auto parallel_for(int64_t const begin, int64_t const end, Function f,
+                  size_t const cutoff = 1, int const num_threads = -1) -> void
+{
+    parallel_for_impl</*is_eager=*/true>(
+        begin, end, std::move(f), cutoff,
+        num_threads > 0 ? num_threads : omp_get_max_threads());
+}
+
+#if 0
+template <class Factory>
+auto parallel_for_lazy(int64_t const begin, int64_t const end, Factory factory,
+                       size_t const cutoff = 1) -> void
+{
+    static_assert(std::is_nothrow_copy_constructible<Factory>::value,
+                  "`Factory` must be nothrow copy constructible to be usable "
+                  "with OpenMP's firstprivate clause.");
+    TCM_CHECK(begin <= end, std::invalid_argument,
+              fmt::format("invalid range [{}, {})", begin, end));
+    if (begin == end) { return; }
+    if (static_cast<size_t>(end - begin) <= cutoff) { // Fallback to serial
+        auto f = factory();
+        for (auto i = begin; i < end; ++i) {
+            f(i);
+        }
+        return;
+    }
+
+    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
+    std::exception_ptr err_ptr{nullptr};
+#    pragma omp parallel default(none) firstprivate(begin, end, factory)       \
+        shared(err_flag, err_ptr)
+    {
+        // This is basically a hand-rolled version of OpenMP's schedule(static),
+        // but we need it for exception safety
+        auto const num_threads  = omp_get_num_threads();
+        auto const thread_id    = omp_get_thread_num();
+        auto const size         = end - begin;
+        auto const rest         = size % num_threads;
+        auto const chunk_size   = size / num_threads + (thread_id < rest);
+        auto const thread_begin = begin + thread_id * chunk_size;
+        if (thread_begin < end) {
+            try {
+                auto f = factory();
+                for (auto i = thread_begin; i < thread_begin + chunk_size;
+                     ++i) {
+                    f(i);
+                }
+            }
+            catch (...) {
+                if (!err_flag.test_and_set()) {
+                    err_ptr = std::current_exception();
+                }
+            }
+        }
+    }
+    if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
+}
+#endif
+
+#if 0
 template <class Iterator, class Body>
 auto reduce_impl(SerialTag, Iterator begin, Iterator end, Body& body) noexcept
     -> std::exception_ptr
@@ -2075,15 +2258,15 @@ auto reduce_impl(ParallelTag, Iterator begin, Iterator end, Body& this_body,
     std::exception_ptr this_err;
     std::exception_ptr other_err;
 
-#pragma omp task default(none) firstprivate(begin, middle)                     \
-    shared(other_body, other_err)
+#    pragma omp task default(none) firstprivate(begin, middle)                 \
+        shared(other_body, other_err)
     other_err =
         reduce_impl(ParallelTag{}, begin, middle, other_body, grain_size);
 
     // #pragma omp task shared(this_body, this_err)
     this_err = reduce_impl(ParallelTag{}, middle, end, this_body, grain_size);
 
-#pragma omp taskwait
+#    pragma omp taskwait
     if (TCM_UNLIKELY(this_err != nullptr)) { return this_err; }
     if (TCM_UNLIKELY(other_err != nullptr)) { return other_err; }
     try {
@@ -2094,8 +2277,10 @@ auto reduce_impl(ParallelTag, Iterator begin, Iterator end, Body& this_body,
         return std::current_exception();
     }
 }
+#endif
 } // namespace detail
 
+#if 0
 template <class Iterator, class Body>
 auto parallel_reduce(Iterator begin, Iterator end, Body& body,
                      size_t grain_size = 1, int const num_threads = -1) -> void
@@ -2107,13 +2292,32 @@ auto parallel_reduce(Iterator begin, Iterator end, Body& body,
         err = detail::reduce_impl(SerialTag{}, begin, end, body);
     }
     else {
-#pragma omp parallel
-#pragma omp single nowait
+#    pragma omp parallel
+#    pragma omp single nowait
         err = detail::reduce_impl(ParallelTag{}, begin, end, body, grain_size);
     }
     if (TCM_UNLIKELY(err != nullptr)) { std::rethrow_exception(err); }
 }
+#endif
 
+inline auto sample_some(std::string const& filename,
+                        Polynomial const& polynomial, Options const& options,
+                        int num_threads = -1) -> ChainResult
+{
+    if (num_threads <= 0) { num_threads = omp_get_max_threads(); }
+    PolynomialState state{
+        detail::load_forward_fn(filename, static_cast<size_t>(num_threads)),
+        polynomial,
+        {options.batch_size, options.number_spins}};
+    return sample_some(state, options);
+}
+
+auto parallel_sample_some(std::string const& filename,
+                          Polynomial const& polynomial, Options const& options,
+                          std::tuple<unsigned, unsigned> num_threads)
+    -> ChainResult;
+
+#if 0
 template <class ForwardFn>
 auto parallel_sample_some(size_t const number_chains, ForwardFn const& psi,
                           Options const& options) -> ChainResult
@@ -2162,6 +2366,7 @@ auto parallel_sample_some(size_t const number_chains, ForwardFn const& psi,
     parallel_reduce(size_t{0}, number_chains, total, 1);
     return static_cast<ChainResult>(std::move(total));
 }
+#endif
 // }}}
 
 TCM_NAMESPACE_END

@@ -289,55 +289,6 @@ auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
 // }}}
 
 // [PolynomialState] {{{
-template <class Factory>
-auto parallel_for_lazy(int64_t begin, int64_t end, Factory factory,
-                       int64_t cutoff) -> void
-{
-    static_assert(std::is_nothrow_copy_constructible<Factory>::value,
-                  "Factory must be nothrow copy constructible to be usable "
-                  "with OpenMP's firstprivate clause.");
-    TCM_CHECK(begin <= end, std::invalid_argument,
-              fmt::format("invalid range [{}, {})", begin, end));
-    if (begin == end) { return; }
-    if (end - begin <= cutoff) {
-        auto f = factory();
-        for (auto i = begin; i < end; ++i) {
-            f(i);
-        }
-        return;
-    }
-
-    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
-    std::exception_ptr err_ptr{nullptr};
-#pragma omp parallel default(none) firstprivate(begin, end, factory)           \
-    shared(err_flag, err_ptr)
-    {
-        // This is basically a hand-rolled version of OpenMP's schedule(static),
-        // but we need it for exception safety
-        auto const num_threads  = omp_get_num_threads();
-        auto const thread_id    = omp_get_thread_num();
-        auto const size         = end - begin;
-        auto const rest         = size % num_threads;
-        auto const chunk_size   = size / num_threads + (thread_id < rest);
-        auto const thread_begin = begin + thread_id * chunk_size;
-        if (thread_begin < end) {
-            try {
-                auto f = factory();
-                for (auto i = thread_begin; i < thread_begin + chunk_size;
-                     ++i) {
-                    f(i);
-                }
-            }
-            catch (...) {
-                if (!err_flag.test_and_set()) {
-                    err_ptr = std::current_exception();
-                }
-            }
-        }
-    }
-    if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
-}
-
 namespace detail {
 template <size_t N>
 inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
@@ -405,6 +356,7 @@ auto PolynomialState::Worker::forward_propagate_rest(size_t const i) -> float
     auto const rest    = size - i * _batch_size;
     TCM_ASSERT(rest < _batch_size, "Go use forward_propagate_batch instead");
     TCM_ASSERT(i * _batch_size + rest == size, "Precondition violated");
+    TCM_ASSERT(_buffer.is_variable(), "");
     // Stores part of batch which we're given into `_input`.
     unpack_to_tensor(
         /*source=*/vectors.subspan(i * _batch_size, rest),
@@ -465,9 +417,9 @@ auto PolynomialState::operator()(SpinVector const input) -> float
     static_assert(std::is_nothrow_copy_constructible<decltype(factory)>::value,
                   "");
     auto const number_batches = (_poly.size() + batch_size - 1) / batch_size;
-    omp_set_num_threads(_workers.size());
     parallel_for_lazy(0, static_cast<int64_t>(number_batches),
-                      std::move(factory), 1);
+                      std::move(factory), /*cutoff=*/1,
+                      /*num_threads=*/_workers.size());
     auto const sum = sum_results(results);
     _psi_time(
         MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
@@ -549,38 +501,6 @@ auto RandomFlipper::shuffle() -> void
 }
 // }}}
 
-auto random_spin(size_t const size, int const magnetisation,
-                 RandomGenerator& generator) -> SpinVector
-{
-    return SpinVector::random(size, magnetisation, generator);
-#if 0
-    TCM_CHECK(size <= SpinVector::max_size(), std::invalid_argument,
-              fmt::format("invalid size {}; expected <={}", size,
-                          SpinVector::max_size()));
-    TCM_CHECK(
-        static_cast<size_t>(std::abs(magnetisation)) <= size,
-        std::invalid_argument,
-        fmt::format("magnetisation exceeds the number of spins: |{}| > {}",
-                    magnetisation, size));
-    TCM_CHECK((static_cast<int>(size) + magnetisation) % 2 == 0,
-              std::runtime_error,
-              fmt::format("{} spins cannot have a magnetisation of {}. `size + "
-                          "magnetisation` must be even",
-                          size, magnetisation));
-    float      buffer[SpinVector::max_size()];
-    auto const spin = gsl::span<float>{buffer, size};
-    auto const number_ups =
-        static_cast<size_t>((static_cast<int>(size) + magnetisation) / 2);
-    auto const middle = std::begin(spin) + number_ups;
-    std::fill(std::begin(spin), middle, 1.0f);
-    std::fill(middle, std::end(spin), -1.0f);
-    std::shuffle(std::begin(spin), std::end(spin), generator);
-    auto compact_spin = SpinVector{spin};
-    TCM_ASSERT(compact_spin.magnetisation() == magnetisation, "");
-    return compact_spin;
-#endif
-}
-
 // [ChainResult] {{{
 auto ChainResult::extract_vectors() const -> torch::Tensor
 {
@@ -625,6 +545,33 @@ auto merge(ChainResult const& _x, ChainResult const& _y) -> ChainResult
         std::end(buffer));
     return ChainResult{std::move(buffer)};
 }
+
+auto merge(std::vector<ChainResult>&& results) -> ChainResult
+{
+    if (results.empty()) { return {}; }
+    for (auto i = size_t{1}; i < results.size(); ++i) {
+        results[0] = merge(results[0], results[i]);
+    }
+    return std::move(results[0]);
+}
 // }}}
+
+auto parallel_sample_some(std::string const& filename,
+                          Polynomial const& polynomial, Options const& options,
+                          std::tuple<unsigned, unsigned> num_threads)
+    -> ChainResult
+{
+
+    std::vector<ChainResult> results(options.steps[0]);
+
+    auto func = [&filename, &polynomial, &options,
+                 num_threads = std::get<1>(num_threads),
+                 &results](int64_t const i) {
+        results.at(i) = sample_some(filename, polynomial, options, num_threads);
+    };
+    detail::parallel_for(0, results.size(), std::move(func), /*cutoff=*/1,
+                         /*num_threads=*/std::get<0>(num_threads));
+    return merge(std::move(results));
+}
 
 TCM_NAMESPACE_END

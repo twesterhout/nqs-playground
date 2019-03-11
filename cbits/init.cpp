@@ -343,9 +343,9 @@ PYBIND11_MODULE(_C_nqs, m)
         });
 
     py::class_<Options>(m, "ChainOptions")
-        .def(py::init<unsigned, int, std::tuple<size_t, size_t, size_t>>(),
+        .def(py::init<unsigned, int, unsigned, std::array<unsigned, 4>>(),
              py::arg("number_spins"), py::arg("magnetisation"),
-             py::arg("steps"))
+             py::arg("batch_size"), py::arg("steps"))
         .def_property_readonly(
             "number_spins",
             [](Options const& self) { return self.number_spins; })
@@ -361,38 +361,30 @@ PYBIND11_MODULE(_C_nqs, m)
 
     m.def(
         "sample_some",
-        [](std::string const& filename, Options const& options,
-           optional<SpinVector> spin) {
-            auto fn = [forward = tcm::detail::load_forward_fn(filename)](
-                          SpinVector x) {
-                return forward(x.tensor()).item<float>();
-            };
-            return tcm::sample_some(std::move(fn), options, spin).to_tensors();
-        },
-        py::arg("filename"), py::arg("options"),
-        py::arg("initial_spin") = py::none(),
-        py::call_guard<py::gil_scoped_release>());
-
-    m.def(
-        "parallel_sample_some",
-        [](size_t const number_chains, std::string const& filename,
-           Options const& options) {
-            // auto restore_number_threads =
-            //     gsl::finally([n = torch::get_num_threads()] {
-            //         torch::set_num_threads(n);
-            //     });
-            // torch::set_num_threads(1);
-            // torch::NoGradGuard no_grad;
-            auto fn = [forward = tcm::detail::load_forward_fn(filename)](
-                          SpinVector x) {
-                return forward(x.tensor()).item<float>();
-            };
-            return tcm::parallel_sample_some(number_chains, fn, options)
+        [](std::string const& filename, Polynomial const& polynomial,
+           Options const& options, int num_threads) {
+            return tcm::sample_some(filename, polynomial, options,
+                                    num_threads > 0 ? num_threads
+                                                    : omp_get_max_threads())
                 .to_tensors();
         },
-        py::arg{"number_chains"}, py::arg{"filename"},
-        py::arg{"options"} // , py::call_guard<py::gil_scoped_release>()
+        py::arg("filename"), py::arg("polynomial"), py::arg("options"),
+        py::arg("num_threads") =
+            -1 /*, py::call_guard<py::gil_scoped_release>()*/);
+
+#if 1
+    m.def(
+        "parallel_sample_some",
+        [](std::string const& filename, Polynomial const& polynomial,
+           Options const& options, std::tuple<unsigned, unsigned> num_threads) {
+            return tcm::parallel_sample_some(filename, polynomial, options,
+                                             num_threads)
+                .to_tensors();
+        },
+        py::arg{"filename"}, py::arg{"polynomial"}, py::arg{"options"},
+        py::arg{"num_threads"} // , py::call_guard<py::gil_scoped_release>()
     );
+#endif
 
 #if 0
     torch::python::bind_module<TargetStateImpl>(m, "TargetState")
