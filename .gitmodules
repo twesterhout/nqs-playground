@@ -19,3 +19,6 @@
 [submodule "external/expected"]
 	path = external/expected
 	url = https://github.com/TartanLlama/expected
+[submodule "external/SG14"]
+	path = external/SG14
+	url = https://github.com/WG21-SG14/SG14.git
