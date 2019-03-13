@@ -5,6 +5,8 @@
 #include <boost/config.hpp>
 #include <boost/pool/pool_alloc.hpp>
 
+#include <boost/smart_ptr/detail/spinlock_std_atomic.hpp>
+
 #include <pybind11/numpy.h>
 #include <torch/extension.h>
 #include <torch/script.h>
@@ -84,6 +86,10 @@
              ? static_cast<void>(0)                                            \
              : ::TCM_NAMESPACE::detail::assert_fail(                           \
                  #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
+#    define TCM_ASSERT_NO_FUN(cond, msg)                                       \
+        (TCM_LIKELY(cond) ? static_cast<void>(0)                               \
+                          : ::TCM_NAMESPACE::detail::assert_fail(              \
+                                #cond, __FILE__, __LINE__, "", msg))
 #else
 #    define TCM_ASSERT(cond, msg) static_cast<void>(0)
 #endif
@@ -149,7 +155,7 @@ TCM_FORCEINLINE auto hadd(__m128 const v) noexcept -> float
     return _mm_cvtss_f32(sums);
 }
 
-/// Horizontally adds elements of a float8 vector.
+/// Horizontally adds elements of a float8 vector relying only on AVX.
 TCM_FORCEINLINE auto hadd(__m256 const v) noexcept -> float
 {
     __m128 vlow  = _mm256_castps256_ps128(v);
@@ -183,6 +189,8 @@ template <> struct ToScalarType<int64_t> {
 template <class T, class... Ints>
 auto make_tensor(Ints... dims) -> torch::Tensor
 {
+    // TODO(twesterhout): This could overflow if one of `dims` is of type
+    // `uint64_t` and is huge.
     auto out = torch::empty({static_cast<int64_t>(dims)...},
                             torch::TensorOptions()
                                 .dtype(ToScalarType<T>::scalar_type())
@@ -326,6 +334,7 @@ class TCM_EXPORT SpinVector {
     class SpinReference;
 
   public:
+    /// Constructs an empty spin configuration.
     constexpr SpinVector() noexcept : _data{}
     {
         _data.as_ints[0] = 0;
@@ -350,34 +359,48 @@ class TCM_EXPORT SpinVector {
     explicit SpinVector(torch::Tensor const& spins);
     explicit SpinVector(torch::TensorAccessor<float, 1> accessor);
 
-    inline constexpr auto        size() const noexcept -> unsigned;
-    inline static constexpr auto max_size() noexcept -> unsigned;
+    template <class Generator>
+    static auto random(unsigned size, int magnetisation, Generator& generator)
+        -> SpinVector;
 
+    template <class Generator>
+    static auto random(unsigned size, Generator& generator) -> SpinVector;
+
+    constexpr auto        size() const noexcept -> unsigned;
+    static constexpr auto max_size() noexcept -> unsigned;
+
+    /// Returns the magnetisation of the spin configuration.
+    ///
+    /// \note Not constexpr, because of the use of intrinsics
     inline /*constexpr*/ auto magnetisation() const noexcept -> int;
 
-    inline constexpr auto operator[](unsigned const i) const
-        & TCM_NOEXCEPT -> Spin;
-    inline constexpr auto operator[](unsigned const i) && TCM_NOEXCEPT -> Spin;
-    inline constexpr auto operator[](unsigned const i)
-        & TCM_NOEXCEPT -> SpinReference;
+    constexpr auto operator[](unsigned const i) const & TCM_NOEXCEPT -> Spin;
+    constexpr auto operator[](unsigned const i) && TCM_NOEXCEPT -> Spin;
+    constexpr auto operator[](unsigned const i) & TCM_NOEXCEPT -> SpinReference;
 
-    inline constexpr auto at(unsigned const i) const& -> Spin;
-    inline constexpr auto at(unsigned const i) && -> Spin;
-    inline constexpr auto at(unsigned const i) & -> SpinReference;
+    constexpr auto at(unsigned const i) const& -> Spin;
+    constexpr auto at(unsigned const i) && -> Spin;
+    constexpr auto at(unsigned const i) & -> SpinReference;
 
-    inline constexpr auto flip(unsigned i) TCM_NOEXCEPT -> void;
+    /// Flips the `i`'th spin.
+    constexpr auto flip(unsigned i) TCM_NOEXCEPT -> void;
 
+    /// Returns a new spin configuration with spins at `indices` flipped.
     template <size_t N>
-    inline constexpr auto flipped(std::array<unsigned, N> is) const TCM_NOEXCEPT
+    constexpr auto flipped(std::array<unsigned, N> indices) const TCM_NOEXCEPT
         -> SpinVector;
 
-    inline constexpr auto
-    flipped(std::initializer_list<unsigned> is) const TCM_NOEXCEPT
+    constexpr auto
+    flipped(std::initializer_list<unsigned> indices) const TCM_NOEXCEPT
         -> SpinVector;
 
+    /// Compares spin configurations for equality.
+    ///
+    /// Only SpinVectors of the same length can be compared.
     inline auto operator==(SpinVector const& other) const TCM_NOEXCEPT -> bool;
     inline auto operator!=(SpinVector const& other) const TCM_NOEXCEPT -> bool;
 
+    // TODO(twesterhout): Remove this!
     inline auto operator<(SpinVector const& other) const TCM_NOEXCEPT -> bool;
 
     inline auto     hash() const noexcept -> size_t;
@@ -389,19 +412,13 @@ class TCM_EXPORT SpinVector {
     auto numpy() const -> pybind11::array_t<float, pybind11::array::c_style>;
     auto tensor() const -> torch::Tensor;
 
-    template <class Generator>
-    static auto random(unsigned size, int magnetisation, Generator& generator)
-        -> SpinVector;
-
-    template <class Generator>
-    static auto random(unsigned size, Generator& generator) -> SpinVector;
-
-    auto key(detail::UnsafeTag) const TCM_NOEXCEPT -> uint64_t
+    auto key(detail::UnsafeTag) const TCM_NOEXCEPT -> int64_t
     {
         TCM_ASSERT(size() <= 64, "Chain too long");
-        return *reinterpret_cast<uint64_t const*>(_data.spin);
+        return _data.spin[0];
     }
 
+#if 0
     auto dump() const -> std::string
     {
         std::ostringstream msg;
@@ -415,6 +432,7 @@ class TCM_EXPORT SpinVector {
         }
         return msg.str();
     }
+#endif
 
     constexpr auto is_valid() const TCM_NOEXCEPT -> bool
     {
@@ -788,6 +806,13 @@ inline SpinVector::operator std::string() const
 }
 
 namespace detail {
+
+#if BOOST_WORKAROUND(BOOST_GCC, <= 80000)
+#    define _mm256_set_m128i(hi, lo)                                           \
+        _mm256_insertf128_si256(_mm256_castsi128_si256(hi), (lo), 1)
+#    define _mm256_setr_m128i(hi, lo) _mm256_set_m128i((lo), (hi))
+#endif
+
 inline auto unpack(uint8_t const src) noexcept -> __m256
 {
     auto const mask_high  = _mm_set_epi32(128, 64, 32, 16);
@@ -1119,7 +1144,7 @@ class TCM_EXPORT QuantumState
 
 // [Heisenberg] {{{
 /// \brief Represents the Heisenberg Hamiltonian.
-class Heisenberg {
+class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
   public:
     using edge_type = std::pair<unsigned, unsigned>;
 
@@ -1163,7 +1188,10 @@ class Heisenberg {
     }
 
     /// Returns a *reference* to graph edges.
-    constexpr auto const& edges() const noexcept { return _edges; }
+    /*constexpr*/ auto edges() const noexcept -> gsl::span<edge_type const>
+    {
+        return _edges;
+    }
 
     /// Performs `|ψ⟩ += c * H|σ⟩`.
     ///
@@ -1216,7 +1244,7 @@ class Heisenberg {
     template <class Iter, class = std::enable_if_t<std::is_same<
                               typename std::iterator_traits<Iter>::value_type,
                               edge_type>::value> /**/>
-    auto find_max_index(Iter begin, Iter end) -> unsigned
+    static auto find_max_index(Iter begin, Iter end) -> unsigned
     {
         TCM_ASSERT(begin != end, "Range is empty");
         // This implementation is quite inefficient, but it's not on the hot
@@ -1268,13 +1296,26 @@ class Polynomial {
     /// can be written as ∑cᵢ|σᵢ⟩. `_coeffs` is the set {cᵢ}.
     torch::Tensor _coeffs;
 
+    boost::detail::spinlock _lock;
+
   public:
     /// Constructs the polynomial given the hamiltonian and a list or terms.
     Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
                std::vector<Term>                 terms);
 
-    Polynomial(Polynomial const&) = default;
-    Polynomial(Polynomial&&)      = default;
+    Polynomial(Polynomial const&) = delete;
+
+    Polynomial(Polynomial&& other)
+        : _current{std::move(other._current)}
+        , _old{std::move(other._old)}
+        , _hamiltonian{std::move(other._hamiltonian)}
+        , _terms{std::move(other._terms)}
+        , _basis{std::move(other._basis)}
+        , _coeffs{std::move(other._coeffs)}
+        , _lock{}
+    {
+    }
+
     Polynomial& operator=(Polynomial const&) = delete;
     Polynomial& operator=(Polynomial&&) = delete;
 
@@ -1285,6 +1326,7 @@ class Polynomial {
         , _terms{other._terms}
         , _basis{}
         , _coeffs{}
+        , _lock{}
     {
         auto size = std::max(other._current.size(), other._old.size());
         _current.reserve(size);
@@ -1303,12 +1345,12 @@ class Polynomial {
     TCM_NOINLINE TCM_HOT auto operator()(complex_type const coeff,
                                          SpinVector const spin) -> Polynomial&;
 
-    constexpr auto const& vectors() const noexcept { return _basis; }
-
-    constexpr auto coefficients() const noexcept -> torch::Tensor const&
+    auto vectors() const noexcept -> gsl::span<SpinVector const>
     {
-        return _coeffs;
+        return {_basis};
     }
+
+    auto coefficients() const -> torch::Tensor { return _coeffs; }
 
   private:
     template <class Map>
@@ -1316,6 +1358,7 @@ class Polynomial {
                                    torch::optional<real_type> const& eps)
         -> void;
 
+#if 0
     template <class Map> static auto check_all_real(Map const& map) -> void
     {
         constexpr auto eps       = static_cast<real_type>(2e-3);
@@ -1333,6 +1376,7 @@ class Polynomial {
                 + ") * |" + std::to_string(norm_real) + "|"};
         }
     }
+#endif
 };
 
 inline auto Polynomial::degree() const noexcept -> size_t
@@ -1382,6 +1426,7 @@ auto Polynomial::save_results(Map const& map, optional<real_type> const& eps)
                 accessor[i++] = static_cast<float>(item.second.real());
             }
         }
+        TCM_ASSERT(_basis.size() == static_cast<size_t>(i), "");
         _coeffs.resize_(i);
     }
     else {
@@ -1421,7 +1466,7 @@ inline auto load_forward_fn(std::string const& filename, size_t num_copies)
     std::exception_ptr err_ptr{nullptr};
 
     auto* modules_ptr = modules.data();
-#pragma omp parallel for ordered default(none)                                 \
+#pragma omp parallel for num_threads(num_copies) default(none)                 \
     firstprivate(num_copies, modules_ptr) shared(filename, err_flag, err_ptr)
     for (auto i = size_t{0}; i < num_copies; ++i) {
         try {
@@ -1448,7 +1493,7 @@ struct VarAccumulator {
     value_type _M2;
 
   public:
-    constexpr VarAccumulator() noexcept : _count{0}, _mean{}, _M2{} {}
+    constexpr VarAccumulator() noexcept : _count{0}, _mean{0}, _M2{0} {}
 
     constexpr VarAccumulator(VarAccumulator const&) noexcept = default;
     constexpr VarAccumulator(VarAccumulator&&) noexcept      = default;
@@ -1480,6 +1525,18 @@ struct VarAccumulator {
                               _count));
         return _M2 / (_count - 1);
     }
+
+    constexpr auto merge(VarAccumulator const& other) noexcept
+        -> VarAccumulator&
+    {
+        if (_count != 0 || other._count != 0) {
+            auto const sum = _mean * _count + other._mean * other._count;
+            _count += other._count;
+            _mean = sum / _count;
+            _M2 += other._M2;
+        }
+        return *this;
+    }
 };
 
 static_assert(std::is_trivially_copyable<VarAccumulator>::value, "");
@@ -1492,14 +1549,13 @@ class PolynomialState {
 
     // using ForwardT = std::function<auto(torch::Tensor const&)->torch::Tensor>;
 
-    struct alignas(64) Worker {
+    struct Worker {
       private:
         ForwardT                         _forward;
         gsl::not_null<Polynomial const*> _polynomial;
         torch::Tensor                    _buffer;
         size_t                           _batch_size;
         size_t                           _num_spins;
-        VarAccumulator                   _time;
 
       public:
         Worker(ForwardT f, Polynomial const& p, size_t const batch_size,
@@ -1509,7 +1565,6 @@ class PolynomialState {
             , _buffer{detail::make_tensor<float>(batch_size, num_spins)}
             , _batch_size{batch_size}
             , _num_spins{num_spins}
-            , _time{}
         {
             // Access the memory to make sure it belongs to us
             TCM_ASSERT(_buffer.is_variable(), "");
@@ -1531,15 +1586,11 @@ class PolynomialState {
         {
             return _num_spins;
         }
-        constexpr auto const& time() const noexcept { return _time; }
 
       private:
         auto forward_propagate_batch(size_t i) -> float;
         auto forward_propagate_rest(size_t i) -> float;
     };
-
-    static_assert(sizeof(ForwardT) == 32,
-                  "Yeah, this only works for stdlibc++...");
 
   private:
     Polynomial _poly;
@@ -1562,12 +1613,17 @@ class PolynomialState {
                     std::tuple<size_t, size_t> dim)
         : _poly{std::move(poly)}, _workers{}, _poly_time{}, _psi_time{}
     {
+        TCM_CHECK(psis.size() <= max_number_workers(), std::runtime_error,
+                  fmt::format("too many workers specified: {}; expected <={}",
+                              psis.size(), max_number_workers()));
         _workers.reserve(psis.size());
         for (auto i = size_t{0}; i < psis.size(); ++i) {
             _workers.emplace_back(std::move(psis[i]), _poly, std::get<0>(dim),
                                   std::get<1>(dim));
         }
     }
+
+    static constexpr auto max_number_workers() noexcept -> size_t { return 32; }
 
     auto operator()(SpinVector) -> float;
 
@@ -1683,8 +1739,11 @@ auto compress(ForwardIterator first, ForwardIterator last, EqualFn equal,
             first, last, equal);
     if (first != last) {
         auto i = first;
-        for (++i; ++i != last;) {
-            if (!equal(*first, *i)) { *++first = std::move(*i); }
+        merge(*first, *(++i));
+        for (; ++i != last;) {
+            TCM_ASSERT(i != last, "");
+            TCM_ASSERT(first != last, "");
+            if (!equal(*first, *i)) { *(++first) = std::move(*i); }
             else {
                 merge(*first, *i);
             }
@@ -1908,6 +1967,7 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::compress() -> void
     auto const pred  = [](auto const& x, auto const& y) { return x == y; };
     auto const merge = [](auto& acc, auto const& x) { acc.merge(x); };
 
+#if 0
     // This is very similar to std::unique from libc++ except for the else
     // branch which accumulates the count.
     auto       first = std::begin(_samples);
@@ -1924,7 +1984,10 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::compress() -> void
         }
         ++first;
     }
-    _samples.erase(first, last);
+#endif
+    auto first =
+        tcm::compress(std::begin(_samples), std::end(_samples), pred, merge);
+    _samples.erase(first, std::end(_samples));
 }
 
 template <class ForwardFn, class ProbabilityFn>
@@ -2025,10 +2088,6 @@ auto sample_some(ForwardFn&& psi, Options const& options,
             : SpinVector::random(options.number_spins, options.magnetisation,
                                  generator);
     if (begin == end) { return {}; }
-
-#pragma omp critical
-    pybind11::print("Bye from ", omp_get_thread_num());
-
     using Wrapper = detail::FunctionWrapperHelper<ForwardFn&&>;
     MarkovChain<typename Wrapper::wrapper_type, DefaultProbFn> chain{
         /*forward=*/Wrapper{}(std::forward<ForwardFn>(psi)),
@@ -2036,9 +2095,6 @@ auto sample_some(ForwardFn&& psi, Options const& options,
         /*spin=*/spin, /*generator=*/generator, /*record_first=*/begin == 0};
     // If begin == 0, we start recording immediately, so the initial state of
     // chain is the first sample. Hence in that case we initialise i to 1.
-#pragma omp critical
-    pybind11::print("Hello from ", omp_get_thread_num());
-
     auto i = static_cast<unsigned>(begin == 0u);
     if (begin != 0u && begin + step < end) {
         for (; i < begin; ++i) {
@@ -2086,21 +2142,28 @@ auto sample_some(ForwardFn psi, Options const& options,
 namespace detail {
 
 template <class Function, class Int>
-TCM_FORCEINLINE auto simple_for_loop(std::true_type, Int begin, Int end,
-                                     Function f) -> void
+TCM_FORCEINLINE auto simple_for_loop(std::true_type, unsigned /*unused*/,
+                                     Int begin, Int end, Function f) -> void
 {
-    for (auto i = begin; i < end; ++i) {
-        f(i);
+#pragma omp critical
+    std::cout << fmt::format("simple_for_loop(true_type, ?, {}, {}, ...)\n",
+                             begin, end);
+    for (; begin != end; ++begin) {
+        f(begin);
     }
 }
 
 template <class Factory, class Int>
-TCM_FORCEINLINE auto simple_for_loop(std::false_type, Int begin, Int end,
-                                     Factory factory) -> void
+TCM_FORCEINLINE auto simple_for_loop(std::false_type, unsigned worker,
+                                     Int begin, Int end, Factory factory)
+    -> void
 {
-    auto f = factory();
-    for (auto i = begin; i < end; ++i) {
-        f(i);
+    if (begin != end) {
+        auto f = factory(worker);
+        f(begin);
+        for (++begin; begin != end; ++begin) {
+            f(begin);
+        }
     }
 }
 
@@ -2116,9 +2179,8 @@ TCM_FORCEINLINE auto parallel_for_impl(int64_t const begin, int64_t const end,
     using IsEager = std::integral_constant<bool, is_eager>;
     TCM_CHECK(begin <= end, std::invalid_argument,
               fmt::format("invalid range [{}, {})", begin, end));
-    if (begin == end) { return; }
     if (static_cast<size_t>(end - begin) <= cutoff) { // Fallback to serial
-        simple_for_loop(IsEager{}, begin, end, std::move(func));
+        simple_for_loop(IsEager{}, 0, begin, end, std::move(func));
         return;
     }
 
@@ -2134,11 +2196,13 @@ TCM_FORCEINLINE auto parallel_for_impl(int64_t const begin, int64_t const end,
         auto const size         = end - begin;
         auto const rest         = size % num_threads;
         auto const chunk_size   = size / num_threads + (thread_id < rest);
-        auto const thread_begin = begin + thread_id * chunk_size;
+        auto const thread_begin =
+            begin + thread_id * chunk_size + (thread_id >= rest) * rest;
         if (thread_begin < end) {
             try {
-                simple_for_loop(IsEager{}, thread_begin,
-                                thread_begin + chunk_size, std::move(func));
+                simple_for_loop(IsEager{}, static_cast<unsigned>(thread_id),
+                                thread_begin, thread_begin + chunk_size,
+                                std::move(func));
             }
             catch (...) {
                 if (!err_flag.test_and_set()) {
@@ -2301,14 +2365,16 @@ auto parallel_reduce(Iterator begin, Iterator end, Body& body,
 #endif
 
 inline auto sample_some(std::string const& filename,
-                        Polynomial const& polynomial, Options const& options,
+                        Polynomial polynomial, Options const& options,
                         int num_threads = -1) -> ChainResult
 {
     if (num_threads <= 0) { num_threads = omp_get_max_threads(); }
-    PolynomialState state{
-        detail::load_forward_fn(filename, static_cast<size_t>(num_threads)),
-        polynomial,
-        {options.batch_size, options.number_spins}};
+    std::vector<ForwardT> forward;
+    forward =
+        detail::load_forward_fn(filename, static_cast<size_t>(num_threads));
+    PolynomialState state{std::move(forward),
+                          std::move(polynomial),
+                          {options.batch_size, options.number_spins}};
     return sample_some(state, options);
 }
 

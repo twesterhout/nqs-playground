@@ -94,6 +94,7 @@ execute_process(COMMAND git submodule update --init -- external/boost
 execute_process(COMMAND git submodule update --init --
     libs/config libs/core libs/detail libs/pool libs/utility libs/align
     libs/range libs/serialization libs/static_assert libs/type_traits
+    libs/smart_ptr
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
 add_library(Boost INTERFACE)
 target_include_directories(Boost SYSTEM INTERFACE
@@ -102,7 +103,8 @@ target_include_directories(Boost SYSTEM INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/smart_ptr/include)
 
 # Torch
 add_library(Torch INTERFACE)

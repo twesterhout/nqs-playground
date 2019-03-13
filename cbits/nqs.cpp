@@ -208,6 +208,7 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
     , _terms{std::move(terms)}
     , _basis{}
     , _coeffs{}
+    , _lock{}
 {
     TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
               "hamiltonian must not be nullptr (or None)");
@@ -222,6 +223,10 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
 auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
     -> Polynomial&
 {
+    TCM_CHECK(_lock.try_lock(), std::runtime_error,
+              fmt::format("This function is not thread-safe, why are you "
+                          "calling it from multiple threads?"));
+
     using std::swap;
     TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
               std::runtime_error,
@@ -284,12 +289,16 @@ auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
     }
     // Final filtering, i.e. `P[epsilon] |_old⟩`
     save_results(_old, _terms.back().epsilon);
+
+    // TODO(twesterhout): This one is important!
+    _lock.unlock();
     return *this;
 }
 // }}}
 
 // [PolynomialState] {{{
 namespace detail {
+/// Sets all `xs` to `0`.
 template <size_t N>
 inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
 {
@@ -302,6 +311,7 @@ inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
     }
 }
 
+/// Returns the sum of all `xs`.
 template <size_t N>
 inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
 {
@@ -318,18 +328,12 @@ inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
 
 auto PolynomialState::Worker::operator()(int64_t const batch_index) -> float
 {
-    using MicroSecondsT =
-        std::chrono::duration<real_type, std::chrono::microseconds::period>;
     TCM_ASSERT(batch_index >= 0, "Invalid index");
-    auto       time_point = std::chrono::steady_clock::now();
-    auto const i          = static_cast<size_t>(batch_index);
-    auto const size       = _polynomial->vectors().size();
+    auto const i    = static_cast<size_t>(batch_index);
+    auto const size = _polynomial->vectors().size();
     TCM_ASSERT(i * _batch_size < size, "Index out of bounds");
-    auto const result = ((i + 1) * _batch_size <= size)
-                            ? forward_propagate_batch(i)
-                            : forward_propagate_rest(i);
-    _time(MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
-    return result;
+    return ((i + 1) * _batch_size <= size) ? forward_propagate_batch(i)
+                                           : forward_propagate_rest(i);
 }
 
 auto PolynomialState::Worker::forward_propagate_batch(size_t const i) -> float
@@ -384,38 +388,39 @@ auto PolynomialState::Worker::forward_propagate_rest(size_t const i) -> float
 
 auto PolynomialState::operator()(SpinVector const input) -> float
 {
-    TCM_CHECK(!_workers.empty(), std::runtime_error,
-              fmt::format("There are no worker"));
+    using MicroSecondsT =
+        std::chrono::duration<real_type, std::chrono::microseconds::period>;
+    TCM_ASSERT(!_workers.empty(), "There are no workers");
     auto const batch_size = _workers[0].batch_size();
     auto const num_spins  = _workers[0].number_spins();
     TCM_CHECK_SHAPE(input.size(), static_cast<int64_t>(num_spins));
 
-    using MicroSecondsT =
-        std::chrono::duration<real_type, std::chrono::microseconds::period>;
     auto time_point = std::chrono::steady_clock::now();
     _poly(real_type{1}, input);
     _poly_time(
         MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
 
-    struct Body {
-        Worker& worker;
-        float&  result;
-
-        auto operator()(int64_t const n) -> void { result += worker(n); }
-    };
-
     time_point = std::chrono::steady_clock::now();
-    alignas(32) float results[64];
+    alignas(32) float results[32];
     zero_results(results);
-    auto factory = [this, &results]() -> Body {
-        auto const i = static_cast<size_t>(omp_get_thread_num());
-        TCM_CHECK(i < 64, std::runtime_error,
-                  fmt::format("too many OpenMP threads: {}; expected <=64.",
-                              omp_get_num_threads()));
-        return {_workers[i], results[i]};
+    auto factory = [this, &results](unsigned const i) {
+        TCM_ASSERT(i < 32, "");
+        TCM_ASSERT(i < _workers.size(), "");
+        struct Body {
+            Worker& worker;
+            float&  result;
+
+            Body(Body const&) = delete;
+            constexpr Body(Body&&) noexcept = default;
+            Body& operator=(Body const&) = delete;
+            Body& operator=(Body&&) = delete;
+
+            auto operator()(int64_t const n) -> void { result += worker(n); }
+        };
+        return Body{_workers[i], results[i]};
     };
     static_assert(std::is_nothrow_copy_constructible<decltype(factory)>::value,
-                  "");
+                  TCM_BUG_MESSAGE);
     auto const number_batches = (_poly.size() + batch_size - 1) / batch_size;
     parallel_for_lazy(0, static_cast<int64_t>(number_batches),
                       std::move(factory), /*cutoff=*/1,
@@ -428,8 +433,7 @@ auto PolynomialState::operator()(SpinVector const input) -> float
 
 auto PolynomialState::time_poly() const -> std::pair<real_type, real_type>
 {
-    return {_workers[0].time().mean(),
-            std::sqrt(_workers[0].time().variance())};
+    return {_poly_time.mean(), std::sqrt(_poly_time.variance())};
 }
 
 auto PolynomialState::time_psi() const -> std::pair<real_type, real_type>
@@ -445,7 +449,8 @@ inline auto really_need_that_random_seed_now() -> uint64_t
 {
     std::random_device                      random_device;
     std::uniform_int_distribution<uint64_t> dist;
-    return dist(random_device);
+    auto const seed = dist(random_device);
+    return seed;
 }
 } // namespace detail
 
@@ -561,16 +566,22 @@ auto parallel_sample_some(std::string const& filename,
                           std::tuple<unsigned, unsigned> num_threads)
     -> ChainResult
 {
-
     std::vector<ChainResult> results(options.steps[0]);
 
     auto func = [&filename, &polynomial, &options,
-                 num_threads = std::get<1>(num_threads),
-                 &results](int64_t const i) {
-        results.at(i) = sample_some(filename, polynomial, options, num_threads);
+                 num_threads = static_cast<int>(std::get<1>(num_threads)),
+                 results     = results.data()](int64_t const i) {
+#pragma omp critical
+        std::cout << fmt::format("Thread {} calculating {}...\n", omp_get_thread_num(), i);
+
+        results[i] = sample_some(filename, Polynomial{polynomial, SplitTag{}},
+                                 options, num_threads);
     };
-    detail::parallel_for(0, results.size(), std::move(func), /*cutoff=*/1,
-                         /*num_threads=*/std::get<0>(num_threads));
+    static_assert(std::is_nothrow_copy_constructible<decltype(func)>::value,
+                  TCM_BUG_MESSAGE);
+    detail::parallel_for(
+        0, options.steps[0], std::move(func), /*cutoff=*/1,
+        /*num_threads=*/static_cast<int>(std::get<0>(num_threads)));
     return merge(std::move(results));
 }
 

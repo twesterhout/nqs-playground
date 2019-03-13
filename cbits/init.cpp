@@ -1,11 +1,11 @@
 #include "nqs.hpp"
 
-#include <boost/sort/spreadsort/integer_sort.hpp>
-#include <parallel/algorithm>
+// #include <boost/sort/spreadsort/integer_sort.hpp>
+// #include <parallel/algorithm>
 // #include <pybind11/numpy.h>
 // #include <pybind11/pybind11.h>
 // #include <pybind11/stl.h>
-// #include <pybind11/functional.h>
+#include <pybind11/iostream.h>
 
 // #if defined(TCM_PYTORCH_EXTENSION)
 // #include <torch/extension.h>
@@ -306,9 +306,8 @@ PYBIND11_MODULE(_C_nqs, m)
                 batch_size, filename);
 #else
             return std::make_unique<PolynomialState>(
-                    tcm::detail::load_forward_fn(filename, omp_get_max_threads()),
-                    poly,
-                    dim);
+                tcm::detail::load_forward_fn(filename, omp_get_max_threads()),
+                Polynomial{poly, SplitTag{}}, dim);
 #endif
         }))
         .def("__call__",
@@ -359,24 +358,27 @@ PYBIND11_MODULE(_C_nqs, m)
         .def("__repr__",
              [](Options const& self) { return fmt::format("{}", self); });
 
-    m.def(
-        "sample_some",
-        [](std::string const& filename, Polynomial const& polynomial,
-           Options const& options, int num_threads) {
-            return tcm::sample_some(filename, polynomial, options,
-                                    num_threads > 0 ? num_threads
-                                                    : omp_get_max_threads())
-                .to_tensors();
-        },
-        py::arg("filename"), py::arg("polynomial"), py::arg("options"),
-        py::arg("num_threads") =
-            -1 /*, py::call_guard<py::gil_scoped_release>()*/);
+    m.def("sample_some",
+          [](std::string const& filename, Polynomial const& polynomial,
+             Options const& options, int num_threads) {
+              return tcm::sample_some(
+                         filename, Polynomial{polynomial, SplitTag{}}, options,
+                         num_threads > 0 ? num_threads : omp_get_max_threads())
+                  .to_tensors();
+          },
+          py::arg("filename"), py::arg("polynomial"), py::arg("options"),
+          py::arg("num_threads") =
+              -1 /*, py::call_guard<py::gil_scoped_release>()*/);
 
 #if 1
     m.def(
         "parallel_sample_some",
         [](std::string const& filename, Polynomial const& polynomial,
            Options const& options, std::tuple<unsigned, unsigned> num_threads) {
+            py::scoped_ostream_redirect stream(
+                    std::cout,                               // std::ostream&
+                    py::module::import("sys").attr("stdout") // Python output
+                );
             return tcm::parallel_sample_some(filename, polynomial, options,
                                              num_threads)
                 .to_tensors();
