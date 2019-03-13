@@ -115,6 +115,21 @@ inline auto bind_spin_vector(py::module m) -> void
         .def("__hash__", &SpinVector::hash, R"EOF(
                 Returns the hash of the spin configuration.
             )EOF");
+
+    m.def("random_spin",
+          [](size_t const size, optional<int> magnetisation) {
+              auto& generator = global_random_generator();
+              if (magnetisation.has_value()) {
+                  return SpinVector::random(size, *magnetisation, generator);
+              }
+              else {
+                  return SpinVector::random(size, generator);
+              }
+          },
+          py::arg("n"), py::arg("magnetisation") = py::none(),
+          R"EOF(
+              Generates a random spin configuration.
+          )EOF");
 }
 
 inline auto bind_heisenberg(py::module m) -> void
@@ -192,17 +207,70 @@ inline auto bind_polynomial(py::module m) -> void
              R"EOF(
 
              )EOF")
-        .def(
-            "vectors",
-            [](Polynomial const& p) {
-                auto const& spins = p.vectors();
-                return ::tcm::detail::unpack_to_tensor(std::begin(spins),
-                                                       std::end(spins));
-            },
-            py::return_value_policy::move)
+        .def("vectors",
+             [](Polynomial const& p) {
+                 auto const spins = p.vectors();
+                 return unpack_to_tensor(std::begin(spins), std::end(spins));
+             },
+             py::return_value_policy::move)
         .def("coefficients", [](Polynomial const& p) {
             return torch::Tensor{p.coefficients()};
         });
+}
+
+inline auto bind_options(py::module m) -> void
+{
+    using namespace tcm;
+    py::class_<Options>(m, "ChainOptions")
+        .def(py::init<unsigned, int, unsigned, std::array<unsigned, 4>>(),
+             py::arg("number_spins"), py::arg("magnetisation"),
+             py::arg("batch_size"), py::arg("steps"))
+        .def_property_readonly(
+            "number_spins",
+            [](Options const& self) { return self.number_spins; })
+        .def_property_readonly(
+            "magnetisation",
+            [](Options const& self) { return self.magnetisation; })
+        .def_property_readonly("steps",
+                               [](Options const& self) { return self.steps; })
+        .def("__str__",
+             [](Options const& self) { return fmt::format("{}", self); })
+        .def("__repr__",
+             [](Options const& self) { return fmt::format("{}", self); });
+}
+
+inline auto bind_sample(py::module m) -> void
+{
+    using namespace tcm;
+#if 0
+    m.def("sample_some",
+          [](std::string const& filename, Polynomial const& polynomial,
+             Options const& options, int num_threads) {
+              return tcm::sample_some(
+                         filename, Polynomial{polynomial, SplitTag{}}, options,
+                         num_threads > 0 ? num_threads : omp_get_max_threads())
+                  .to_tensors();
+          },
+          py::arg("filename"), py::arg("polynomial"), py::arg("options"),
+          py::arg("num_threads") =
+              -1 /*, py::call_guard<py::gil_scoped_release>()*/);
+#endif
+
+    m.def(
+        "sample_some",
+        [](std::string const& filename, Polynomial const& polynomial,
+           Options const& options, std::tuple<unsigned, unsigned> num_threads) {
+            py::scoped_ostream_redirect stream(
+                std::cout,                               // std::ostream&
+                py::module::import("sys").attr("stdout") // Python output
+            );
+            return tcm::parallel_sample_some(filename, polynomial, options,
+                                             num_threads)
+                .to_tensors();
+        },
+        py::arg{"filename"}, py::arg{"polynomial"}, py::arg{"options"},
+        py::arg{"num_threads"} // , py::call_guard<py::gil_scoped_release>()
+    );
 }
 
 struct Net : torch::nn::Module {
@@ -241,12 +309,15 @@ PYBIND11_MODULE(_C_nqs, m)
     bind_spin_vector(m);
     bind_heisenberg(m);
     bind_polynomial(m);
+    bind_options(m);
+    bind_sample(m);
 
     m.def("say_hi", []() {
         return std::make_tuple(sizeof(tcm::Polynomial),
                                sizeof(tcm::PolynomialState));
     });
 
+#if 0
     m.def("do_sort", [](Polynomial const& p) {
         using MicroSecondsT =
             std::chrono::duration<double, std::chrono::microseconds::period>;
@@ -270,25 +341,10 @@ PYBIND11_MODULE(_C_nqs, m)
             MicroSecondsT(std::chrono::steady_clock::now() - time_start);
         return time_interval.count();
     });
+#endif
 
     // m.def("foo", [](torch::nn::ModuleHolder& x) { auto y = torch::randn({10}, torch::kFloat32); return x.forward(y); });
 
-    m.def(
-        "random_spin",
-        [](size_t const size, optional<int> magnetisation) {
-            auto& generator = global_random_generator();
-            if (magnetisation.has_value()) {
-                return SpinVector::random(size, *magnetisation, generator);
-            }
-            else {
-                py::print("No magnetisation");
-                return SpinVector::random(size, generator);
-            }
-        },
-        py::arg("n"), py::arg("magnetisation") = py::none(),
-        R"EOF(
-              Generates a random spin configuration.
-          )EOF");
 
     /*
     using Fn = std::function<torch::Tensor(torch::Tensor const&)>;
@@ -306,7 +362,8 @@ PYBIND11_MODULE(_C_nqs, m)
                 batch_size, filename);
 #else
             return std::make_unique<PolynomialState>(
-                tcm::detail::load_forward_fn(filename, omp_get_max_threads()),
+                tcm::detail::load_forward_fn(
+                    filename, static_cast<unsigned>(omp_get_max_threads())),
                 Polynomial{poly, SplitTag{}}, dim);
 #endif
         }))
@@ -341,52 +398,7 @@ PYBIND11_MODULE(_C_nqs, m)
             return self.time_psi();
         });
 
-    py::class_<Options>(m, "ChainOptions")
-        .def(py::init<unsigned, int, unsigned, std::array<unsigned, 4>>(),
-             py::arg("number_spins"), py::arg("magnetisation"),
-             py::arg("batch_size"), py::arg("steps"))
-        .def_property_readonly(
-            "number_spins",
-            [](Options const& self) { return self.number_spins; })
-        .def_property_readonly(
-            "magnetisation",
-            [](Options const& self) { return self.magnetisation; })
-        .def_property_readonly("steps",
-                               [](Options const& self) { return self.steps; })
-        .def("__str__",
-             [](Options const& self) { return fmt::format("{}", self); })
-        .def("__repr__",
-             [](Options const& self) { return fmt::format("{}", self); });
 
-    m.def("sample_some",
-          [](std::string const& filename, Polynomial const& polynomial,
-             Options const& options, int num_threads) {
-              return tcm::sample_some(
-                         filename, Polynomial{polynomial, SplitTag{}}, options,
-                         num_threads > 0 ? num_threads : omp_get_max_threads())
-                  .to_tensors();
-          },
-          py::arg("filename"), py::arg("polynomial"), py::arg("options"),
-          py::arg("num_threads") =
-              -1 /*, py::call_guard<py::gil_scoped_release>()*/);
-
-#if 1
-    m.def(
-        "parallel_sample_some",
-        [](std::string const& filename, Polynomial const& polynomial,
-           Options const& options, std::tuple<unsigned, unsigned> num_threads) {
-            py::scoped_ostream_redirect stream(
-                    std::cout,                               // std::ostream&
-                    py::module::import("sys").attr("stdout") // Python output
-                );
-            return tcm::parallel_sample_some(filename, polynomial, options,
-                                             num_threads)
-                .to_tensors();
-        },
-        py::arg{"filename"}, py::arg{"polynomial"}, py::arg{"options"},
-        py::arg{"num_threads"} // , py::call_guard<py::gil_scoped_release>()
-    );
-#endif
 
 #if 0
     torch::python::bind_module<TargetStateImpl>(m, "TargetState")

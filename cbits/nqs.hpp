@@ -5,8 +5,6 @@
 #include <boost/config.hpp>
 #include <boost/pool/pool_alloc.hpp>
 
-#include <boost/smart_ptr/detail/spinlock_std_atomic.hpp>
-
 #include <pybind11/numpy.h>
 #include <torch/extension.h>
 #include <torch/script.h>
@@ -61,7 +59,7 @@
 #define TCM_GCC BOOST_GCC
 #define TCM_CLANG BOOST_CLANG
 
-#if defined(BOOST_GCC) || defined(BOOST_CLANG)
+#if defined(TCM_GCC) || defined(TCM_CLANG)
 #    define TCM_HOT __attribute__((hot))
 #else
 #    define TCM_HOT
@@ -86,14 +84,11 @@
              ? static_cast<void>(0)                                            \
              : ::TCM_NAMESPACE::detail::assert_fail(                           \
                  #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
-#    define TCM_ASSERT_NO_FUN(cond, msg)                                       \
-        (TCM_LIKELY(cond) ? static_cast<void>(0)                               \
-                          : ::TCM_NAMESPACE::detail::assert_fail(              \
-                                #cond, __FILE__, __LINE__, "", msg))
 #else
 #    define TCM_ASSERT(cond, msg) static_cast<void>(0)
 #endif
 
+// [torch::ScalarType] Formatting {{{
 /// Formatting of torch::ScalarType using fmtlib facilities
 ///
 /// Used only for error reporting.
@@ -108,9 +103,11 @@ template <> struct fmt::formatter<torch::ScalarType> : formatter<string_view> {
         return formatter<string_view>::format(::c10::toString(type), ctx);
     }
 };
+// [torch::ScalarType] Formatting }}}
 
 TCM_NAMESPACE_BEGIN
 
+using std::int64_t;
 using std::size_t;
 using std::uint16_t;
 using std::uint64_t;
@@ -128,6 +125,9 @@ using torch::optional;
 struct SplitTag {};
 struct SerialTag {};
 struct ParallelTag {};
+struct UnsafeTag {};
+
+constexpr UnsafeTag unsafe_tag;
 
 enum class Spin : unsigned char {
     down = 0x00,
@@ -135,13 +135,9 @@ enum class Spin : unsigned char {
 };
 
 namespace detail {
-
 TCM_NORETURN auto assert_fail(char const* expr, char const* file,
                               size_t const line, char const* function,
                               std::string const& msg) noexcept -> void;
-
-struct UnsafeTag {};
-constexpr UnsafeTag unsafe_tag;
 
 /// Horizontally adds elements of a float4 vector.
 ///
@@ -164,6 +160,13 @@ TCM_FORCEINLINE auto hadd(__m256 const v) noexcept -> float
     return hadd(vlow);
 }
 } // namespace detail
+
+struct IdentityProjection {
+    template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
+    {
+        return std::forward<T>(x);
+    }
+};
 
 // Tensor creation routines {{{
 namespace detail {
@@ -307,6 +310,11 @@ inline auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
               ::fmt::format("wrong type {}; expected {}", type, expected))
 // }}}
 
+template <class RandomAccessIterator, class Projection = IdentityProjection>
+TCM_NOINLINE auto unpack_to_tensor(RandomAccessIterator first,
+                                   RandomAccessIterator last, torch::Tensor dst,
+                                   Projection proj = Projection{}) -> void;
+
 // [SpinVector] {{{
 class TCM_EXPORT SpinVector {
 
@@ -347,7 +355,7 @@ class TCM_EXPORT SpinVector {
     constexpr SpinVector& operator=(SpinVector&&) noexcept = default;
 
     explicit SpinVector(gsl::span<float const>);
-    explicit SpinVector(gsl::span<float const>, detail::UnsafeTag) TCM_NOEXCEPT;
+    explicit SpinVector(gsl::span<float const>, UnsafeTag) TCM_NOEXCEPT;
 
     template <
         int ExtraFlags,
@@ -412,7 +420,7 @@ class TCM_EXPORT SpinVector {
     auto numpy() const -> pybind11::array_t<float, pybind11::array::c_style>;
     auto tensor() const -> torch::Tensor;
 
-    auto key(detail::UnsafeTag) const TCM_NOEXCEPT -> int64_t
+    auto key(UnsafeTag) const TCM_NOEXCEPT -> int64_t
     {
         TCM_ASSERT(size() <= 64, "Chain too long");
         return _data.spin[0];
@@ -442,8 +450,20 @@ class TCM_EXPORT SpinVector {
         return true;
     }
 
+    template <class RandomAccessIterator, class Projection>
+    TCM_NOINLINE friend auto
+    unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
+                     torch::Tensor dst, Projection proj) -> void;
+
+#if 0
+    template <class RandomAccessIterator, class Projection>
+    friend auto unpack_to_tensor(RandomAccessIterator first,
+                                 RandomAccessIterator last, torch::Tensor dst,
+                                 Projection proj) -> void;
+
     friend auto unpack_to_tensor(gsl::span<SpinVector const> src,
                                  torch::Tensor               dst) -> void;
+#endif
 
   private:
     // [SpinVector.private junk] {{{
@@ -520,7 +540,7 @@ class TCM_EXPORT SpinVector {
 
     /// An overload of check_range that does the checking only in Debug builds.
     static auto check_range(gsl::span<float const> const range,
-                            detail::UnsafeTag) TCM_NOEXCEPT -> void
+                            UnsafeTag) TCM_NOEXCEPT -> void
     {
         TCM_ASSERT(range.size() <= max_size(), "Spin chain too long");
         TCM_ASSERT(is_valid_spin(range), "Invalid spin configuration");
@@ -808,9 +828,19 @@ inline SpinVector::operator std::string() const
 namespace detail {
 
 #if BOOST_WORKAROUND(BOOST_GCC, <= 80000)
-#    define _mm256_set_m128i(hi, lo)                                           \
-        _mm256_insertf128_si256(_mm256_castsi128_si256(hi), (lo), 1)
-#    define _mm256_setr_m128i(hi, lo) _mm256_set_m128i((lo), (hi))
+// Taken from Intel's immintrin.h
+#    define _mm256_set_m128(/* __m128 */ hi, /* __m128 */ lo)                  \
+        _mm256_insertf128_ps(_mm256_castps128_ps256(lo), (hi), 0x1)
+
+#    define _mm256_set_m128d(/* __m128d */ hi, /* __m128d */ lo)               \
+        _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), (hi), 0x1)
+
+#    define _mm256_set_m128i(/* __m128i */ hi, /* __m128i */ lo)               \
+        _mm256_insertf128_si256(_mm256_castsi128_si256(lo), (hi), 0x1)
+
+#    define _mm256_setr_m128(lo, hi) _mm256_set_m128((hi), (lo))
+#    define _mm256_setr_m128d(lo, hi) _mm256_set_m128d((hi), (lo))
+#    define _mm256_setr_m128i(lo, hi) _mm256_set_m128i((hi), (lo))
 #endif
 
 inline auto unpack(uint8_t const src) noexcept -> __m256
@@ -827,6 +857,22 @@ inline auto unpack(uint8_t const src) noexcept -> __m256
 
     auto y = _mm256_cvtepi32_ps(_mm256_setr_m128i(low, high));
     y      = _mm256_sub_ps(y, _mm256_set1_ps(1.0f));
+
+    // Tests the correctness
+    TCM_ASSERT(([y, src]() {
+                   alignas(32) float dst[8];
+                   _mm256_store_ps(dst, y);
+                   // This is how unpack is supposed to work
+                   auto const get = [](uint8_t v, auto i) -> float {
+                       return 2.0f * static_cast<float>((v >> (7 - i)) & 0x01)
+                              - 1.0f;
+                   };
+                   for (auto i = 0; i < 8; ++i) {
+                       if (get(src, i) != dst[i]) { return false; }
+                   }
+                   return true;
+               }()),
+               "");
     return y;
 }
 
@@ -854,6 +900,20 @@ inline auto unpack(uint16_t const src, float* dst) noexcept -> void
     y_2      = _mm256_sub_ps(y_2, _mm256_set1_ps(1.0f));
     _mm256_storeu_ps(dst, y_1);
     _mm256_storeu_ps(dst + 8, y_2);
+
+    // Tests the correctness
+    TCM_ASSERT(([src, dst]() {
+                   // This is how unpack is supposed to work
+                   auto const get = [](uint16_t v, auto i) -> float {
+                       return 2.0f * static_cast<float>((v >> (15 - i)) & 0x01)
+                              - 1.0f;
+                   };
+                   for (auto i = 0; i < 16; ++i) {
+                       if (get(src, i) != dst[i]) { return false; }
+                   }
+                   return true;
+               }()),
+               "");
 }
 
 inline auto get_store_mask_for(unsigned const rest) TCM_NOEXCEPT -> __m256i
@@ -933,9 +993,9 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
 #endif
 
 inline SpinVector::SpinVector(gsl::span<float const> buffer,
-                              detail::UnsafeTag /*unused*/) TCM_NOEXCEPT
+                              UnsafeTag /*unused*/) TCM_NOEXCEPT
 {
-    check_range(buffer, detail::unsafe_tag);
+    check_range(buffer, unsafe_tag);
     copy_from(buffer);
     TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
 }
@@ -1029,6 +1089,7 @@ TCM_NOINLINE auto SpinVector::random(unsigned const size,
 
 TCM_NAMESPACE_END
 
+// [SpinVector.hash] {{{
 namespace std {
 /// Specialisation of std::hash for SpinVectors to use in QuantumState
 template <> struct hash<::TCM_NAMESPACE::SpinVector> {
@@ -1039,17 +1100,82 @@ template <> struct hash<::TCM_NAMESPACE::SpinVector> {
     }
 };
 } // namespace std
+// [SpinVector.hash] }}}
 
 TCM_NAMESPACE_BEGIN
 
-namespace detail {
-struct IdentityProjection {
-    template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
-    {
-        return std::forward<T>(x);
-    }
-};
+template <class RandomAccessIterator, class Projection>
+auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
+                      torch::Tensor dst, Projection proj) -> void
+{
+    if (first == last) { return; }
+    TCM_ASSERT(last - first > 0, "Invalid range");
+    auto const size         = static_cast<size_t>(last - first);
+    auto const number_spins = proj(*first).size();
+    TCM_ASSERT(std::all_of(first, last,
+                           [number_spins, &proj](auto& x) {
+                               return proj(x).size() == number_spins;
+                           }),
+               "Input range contains variable size spin chains");
+    TCM_ASSERT(dst.dim() == 2, fmt::format("Invalid dimension {}", dst.dim()));
+    TCM_ASSERT(size == static_cast<size_t>(dst.size(0)),
+               fmt::format("Sizes don't match: size={}, dst.size(0)={}", size,
+                           dst.size(0)));
+    TCM_ASSERT(static_cast<int64_t>(number_spins) == dst.size(1),
+               fmt::format("Sizes don't match: number_spins={}, dst.size(1)={}",
+                           number_spins, dst.size(1)));
+    TCM_ASSERT(dst.is_contiguous(), "Output tensor must be contiguous");
 
+    auto const chunks_16     = number_spins / 16;
+    auto const rest_16       = number_spins % 16;
+    auto const rest_8        = number_spins % 8;
+    auto const copy_cheating = [chunks = chunks_16 + (rest_16 != 0)](
+                                   SpinVector const& spin, float* out) {
+        for (auto i = 0u; i < chunks; ++i, out += 16) {
+            detail::unpack(spin._data.spin[i], out);
+        }
+    };
+
+    auto const tail =
+        std::min(((16UL - rest_16) + number_spins - 1) / number_spins, size);
+    auto* data = dst.data<float>();
+    auto  iter = first;
+    for (auto i = size_t{0}; i < size - tail;
+         ++i, ++iter, data += number_spins) {
+        copy_cheating(proj(*iter), data);
+    }
+    for (auto i = size - tail; i < size; ++i, ++iter, data += number_spins) {
+        proj(*iter).copy_to({data, number_spins});
+    }
+
+    TCM_ASSERT(([first, &dst, &proj]() {
+                   auto accessor = dst.accessor<float, 2>();
+                   auto _iter     = first;
+                   for (auto i = int64_t{0}; i < accessor.size(0);
+                        ++i, ++_iter) {
+                       auto const s1 = proj(*_iter);
+                       auto const s2 = SpinVector{accessor[i]};
+                       if (s1 != s2) { return false; }
+                   }
+                   return true;
+               }()),
+               "");
+}
+
+template <class RandomAccessIterator, class Projection = IdentityProjection>
+auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
+                      Projection proj = Projection{}) -> torch::Tensor
+{
+    if (first == last) { return detail::make_tensor<float>(0); }
+    TCM_ASSERT(last - first > 0, "Invalid range");
+    auto const size         = static_cast<size_t>(last - first);
+    auto const number_spins = proj(*first).size();
+    auto       out          = detail::make_tensor<float>(size, number_spins);
+    unpack_to_tensor(first, last, out, std::move(proj));
+    return out;
+}
+
+#if 0
 template <class RandomAccessIterator, class Projection = IdentityProjection>
 auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
                       Projection proj = IdentityProjection{}) -> torch::Tensor
@@ -1097,7 +1223,7 @@ auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
     }
 #endif
 }
-} // namespace detail
+#endif
 
 /// \brief Explicit representation of a quantum state `|ψ⟩`.
 // [QuantumState] {{{
@@ -1296,26 +1422,13 @@ class Polynomial {
     /// can be written as ∑cᵢ|σᵢ⟩. `_coeffs` is the set {cᵢ}.
     torch::Tensor _coeffs;
 
-    boost::detail::spinlock _lock;
-
   public:
     /// Constructs the polynomial given the hamiltonian and a list or terms.
     Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
                std::vector<Term>                 terms);
 
-    Polynomial(Polynomial const&) = delete;
-
-    Polynomial(Polynomial&& other)
-        : _current{std::move(other._current)}
-        , _old{std::move(other._old)}
-        , _hamiltonian{std::move(other._hamiltonian)}
-        , _terms{std::move(other._terms)}
-        , _basis{std::move(other._basis)}
-        , _coeffs{std::move(other._coeffs)}
-        , _lock{}
-    {
-    }
-
+    Polynomial(Polynomial const&)           = delete;
+    Polynomial(Polynomial&& other) noexcept = default;
     Polynomial& operator=(Polynomial const&) = delete;
     Polynomial& operator=(Polynomial&&) = delete;
 
@@ -1326,7 +1439,6 @@ class Polynomial {
         , _terms{other._terms}
         , _basis{}
         , _coeffs{}
-        , _lock{}
     {
         auto size = std::max(other._current.size(), other._old.size());
         _current.reserve(size);
@@ -1582,6 +1694,7 @@ class PolynomialState {
         {
             return _batch_size;
         }
+
         constexpr auto number_spins() const noexcept -> size_t
         {
             return _num_spins;
@@ -1805,8 +1918,7 @@ static_assert(std::is_trivially_destructible<ChainState>::value, "");
                    "compared");                                                \
         TCM_ASSERT(x.spin.size() <= 64,                                        \
                    "Longer spin chains are not (yet) supported");              \
-        return x.spin.key(detail::unsafe_tag)                                  \
-            op y.spin.key(detail::unsafe_tag);                                 \
+        return x.spin.key(unsafe_tag) op y.spin.key(unsafe_tag);               \
     }
 
 TCM_MAKE_OPERATOR_USING_KEY(==)
@@ -1956,7 +2068,7 @@ TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::sort() -> void
     TCM_ASSERT(number_spins <= 64, "Spin chain too long");
     ska_sort(std::begin(_samples), std::end(_samples), [](auto const& x) {
         return x.spin.key(
-            detail::unsafe_tag /*Yes, we have checked that size() <= 64*/);
+            unsafe_tag /*Yes, we have checked that size() <= 64*/);
     });
 }
 
@@ -2029,7 +2141,7 @@ template <> struct formatter<::TCM_NAMESPACE::Options> {
     auto format(::TCM_NAMESPACE::Options const& options, FormatContext& ctx)
     {
         return format_to(
-            ctx.begin(),
+            ctx.out(),
             "Options(number_spins={}, magnetisation={}, steps=({}, {}, {}))",
             options.number_spins, options.magnetisation,
             std::get<0>(options.steps), std::get<1>(options.steps),

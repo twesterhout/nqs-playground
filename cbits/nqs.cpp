@@ -144,9 +144,12 @@ SpinVector::SpinVector(pybind11::str str)
     TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
 }
 
+#if 0
 auto unpack_to_tensor(gsl::span<SpinVector const> src, torch::Tensor dst)
     -> void
 {
+    // unpack_to_tensor(std::begin(src), std::end(src), dst,
+    //                  [](auto const& x) -> SpinVector const& { return x; });
     if (src.empty()) { return; }
 
     auto const size         = src.size();
@@ -181,6 +184,7 @@ auto unpack_to_tensor(gsl::span<SpinVector const> src, torch::Tensor dst)
     }
     src[size - 1].copy_to({data, number_spins});
 }
+#endif
 // }}}
 
 // [Heisenberg] {{{
@@ -208,7 +212,6 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
     , _terms{std::move(terms)}
     , _basis{}
     , _coeffs{}
-    , _lock{}
 {
     TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
               "hamiltonian must not be nullptr (or None)");
@@ -223,10 +226,6 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
 auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
     -> Polynomial&
 {
-    TCM_CHECK(_lock.try_lock(), std::runtime_error,
-              fmt::format("This function is not thread-safe, why are you "
-                          "calling it from multiple threads?"));
-
     using std::swap;
     TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
               std::runtime_error,
@@ -289,9 +288,6 @@ auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
     }
     // Final filtering, i.e. `P[epsilon] |_old⟩`
     save_results(_old, _terms.back().epsilon);
-
-    // TODO(twesterhout): This one is important!
-    _lock.unlock();
     return *this;
 }
 // }}}
@@ -341,8 +337,9 @@ auto PolynomialState::Worker::forward_propagate_batch(size_t const i) -> float
     TCM_ASSERT((i + 1) * _batch_size <= _polynomial->vectors().size(),
                "Index out of bounds");
     // Stores the `i`th batch of `_poly.vectors()` into `_buffer`.
-    auto const vectors = gsl::span<SpinVector const>{_polynomial->vectors()};
-    unpack_to_tensor(vectors.subspan(i * _batch_size, _batch_size), _buffer);
+    auto const vectors =
+        _polynomial->vectors().subspan(i * _batch_size, _batch_size);
+    unpack_to_tensor(std::begin(vectors), std::end(vectors), _buffer);
     // Forward propagates the batch through the network.
     auto output = _forward(_buffer).view({-1});
     // Extracts the `i`th batch of `_poly.coefficients()`.
@@ -355,19 +352,17 @@ auto PolynomialState::Worker::forward_propagate_batch(size_t const i) -> float
 
 auto PolynomialState::Worker::forward_propagate_rest(size_t const i) -> float
 {
-    auto const vectors = gsl::span<SpinVector const>{_polynomial->vectors()};
-    auto const size    = vectors.size();
+    auto const size    = _polynomial->vectors().size();
     auto const rest    = size - i * _batch_size;
     TCM_ASSERT(rest < _batch_size, "Go use forward_propagate_batch instead");
     TCM_ASSERT(i * _batch_size + rest == size, "Precondition violated");
     TCM_ASSERT(_buffer.is_variable(), "");
     // Stores part of batch which we're given into `_input`.
-    unpack_to_tensor(
-        /*source=*/vectors.subspan(i * _batch_size, rest),
-        /*destination=*/
-        _buffer.slice(/*dim=*/0, /*start=*/0,
-                      /*end=*/static_cast<int64_t>(rest),
-                      /*step=*/1));
+    auto const vectors = _polynomial->vectors().subspan(i * _batch_size, rest);
+    unpack_to_tensor(std::begin(vectors), std::end(vectors),
+                     _buffer.slice(/*dim=*/0, /*start=*/0,
+                                   /*end=*/static_cast<int64_t>(rest),
+                                   /*step=*/1));
     // Fills the remaining part of the batch with spin ups.
     _buffer.slice(/*dim=*/0, /*start=*/static_cast<int64_t>(rest),
                   /*end=*/static_cast<int64_t>(_batch_size),
@@ -509,7 +504,7 @@ auto RandomFlipper::shuffle() -> void
 // [ChainResult] {{{
 auto ChainResult::extract_vectors() const -> torch::Tensor
 {
-    return detail::unpack_to_tensor(
+    return unpack_to_tensor(
         std::begin(_samples), std::end(_samples),
         [](auto const& x) -> SpinVector const& { return x.spin; });
 }
