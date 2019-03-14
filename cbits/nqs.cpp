@@ -419,7 +419,7 @@ auto PolynomialState::operator()(SpinVector const input) -> float
     auto const number_batches = (_poly.size() + batch_size - 1) / batch_size;
     parallel_for_lazy(0, static_cast<int64_t>(number_batches),
                       std::move(factory), /*cutoff=*/1,
-                      /*num_threads=*/_workers.size());
+                      /*num_threads=*/static_cast<int>(_workers.size()));
     auto const sum = sum_results(results);
     _psi_time(
         MicroSecondsT(std::chrono::steady_clock::now() - time_point).count());
@@ -514,7 +514,8 @@ auto ChainResult::extract_values() const -> torch::Tensor
     auto out      = detail::make_tensor<float>(_samples.size());
     auto accessor = out.accessor<float, 1>();
     for (auto i = size_t{0}; i < _samples.size(); ++i) {
-        accessor[static_cast<int64_t>(i)] = _samples[i].value;
+        accessor[static_cast<int64_t>(i)] =
+            static_cast<float>(_samples[i].value);
     }
     return out;
 }

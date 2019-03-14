@@ -117,7 +117,7 @@ inline auto bind_spin_vector(py::module m) -> void
             )EOF");
 
     m.def("random_spin",
-          [](size_t const size, optional<int> magnetisation) {
+          [](unsigned const size, optional<int> magnetisation) {
               auto& generator = global_random_generator();
               if (magnetisation.has_value()) {
                   return SpinVector::random(size, *magnetisation, generator);
@@ -290,8 +290,15 @@ struct Net : torch::nn::Module {
     torch::nn::Linear _fc2{nullptr};
 };
 
+#if defined(TCM_CLANG)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wmissing-prototypes"
+#endif
 PYBIND11_MODULE(_C_nqs, m)
 {
+#if defined(TCM_CLANG)
+#    pragma clang diagnostic pop
+#endif
     m.doc() = R"EOF()EOF";
 
     using namespace tcm;

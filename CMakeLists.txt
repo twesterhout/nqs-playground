@@ -6,6 +6,8 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 string(TOUPPER "${CMAKE_BUILD_TYPE}" TCM_BUILD_TYPE)
 
+project(nqs_cbits)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -15,12 +17,11 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-project(nqs_cbits)
 include(ExternalProject)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     set(TCM_WARNING_FLAGS -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic
-        -Wno-c++98-c++11-c++14-compat -Wno-weak-vtables -Wno-unused
+        -Wno-c++98-c++11-compat -Wno-weak-vtables -Wno-unused
         -Wno-exit-time-destructors -Wno-documentation-unknown-command
         -Wno-float-equal -Wno-global-constructors -Wno-padded
         )
@@ -38,8 +39,9 @@ execute_process(COMMAND git submodule update --init -- external/fmt
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 option(FMT_PEDANTIC ON)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/fmt)
-target_compile_definitions(fmt PUBLIC
-    _GLIBCXX_USE_CXX11_ABI=0)
+target_compile_definitions(fmt PUBLIC _GLIBCXX_USE_CXX11_ABI=0)
+# We're creating a Python module, which is loaded dynamically, so we need -fPIC.
+target_compile_options(fmt PUBLIC "-fPIC")
 
 # gsl-lite library
 execute_process(COMMAND git submodule update --init -- external/gsl-lite
@@ -71,6 +73,13 @@ add_library(flat_hash_map INTERFACE)
 target_include_directories(flat_hash_map
     SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 
+# ska_sort library
+execute_process(COMMAND git submodule update --init -- external/ska_sort
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(ska_sort INTERFACE)
+target_include_directories(ska_sort
+    SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+
 # cpuinfo library
 execute_process(COMMAND git submodule update --init -- external/cpuinfo
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -79,16 +88,18 @@ option(CPUINFO_BUILD_TOOLS OFF)
 option(CPUINFO_BUILD_UNIT_TESTS OFF)
 option(CPUINFO_BUILD_MOCK_TESTS OFF)
 option(CPUINFO_BUILD_BENCHMARKS OFF)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/cpuinfo)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/cpuinfo EXCLUDE_FROM_ALL)
+target_compile_definitions(cpuinfo PUBLIC _GLIBCXX_USE_CXX11_ABI=0)
+target_compile_options(cpuinfo PUBLIC "-fPIC")
 
-# cpuinfo library
+# SG14 library
 execute_process(COMMAND git submodule update --init -- external/SG14
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-add_library(inplace_function INTERFACE)
-target_include_directories(inplace_function
-    SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14/SG14)
+add_library(SG14 INTERFACE)
+target_include_directories(SG14
+    SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14)
 
-# Boost (some header-only parts)
+# Boost libraries (some header-only parts)
 execute_process(COMMAND git submodule update --init -- external/boost
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 execute_process(COMMAND git submodule update --init --
@@ -140,38 +151,29 @@ execute_process(COMMAND git submodule update --init -- external/pybind11
 set(PYBIND11_CPP_STANDARD "-std=c++14")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/pybind11)
 
-
-# find_package(TBB REQUIRED)
-# message(STATUS "TBB Release libraries: ${TBB_LIBRARIES_RELEASE}")
-# message(STATUS "TBB Debug libraries: ${TBB_LIBRARIES_DEBUG}")
-# message(STATUS "TBB libraries: ${TBB_LIBRARIES}")
-# add_library(thread_building_blocks INTERFACE)
-# target_include_directories(thread_building_blocks SYSTEM INTERFACE ${TBB_INCLUDE_DIRS})
-# target_link_libraries(thread_building_blocks INTERFACE ${TBB_LIBRARIES_RELEASE})
-# target_compile_definitions(thread_building_blocks INTERFACE TBB_USE_DEBUG=1)
-
+# OpenMP
 find_package(OpenMP REQUIRED)
 message(STATUS "${OpenMP_CXX_SPEC_DATE}")
 
+
+
 pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS cbits/nqs.cpp cbits/init.cpp)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-    target_compile_options(_C_nqs PRIVATE -fsized-deallocation)
+    target_compile_options(_C_nqs PRIVATE "-fsized-deallocation")
 endif()
 target_compile_options(_C_nqs PRIVATE ${TCM_WARNING_FLAGS})
+target_compile_options(_C_nqs PRIVATE "-fvisibility=hidden")
 target_compile_options(_C_nqs PRIVATE "-march=native")
-target_compile_options(_C_nqs PRIVATE "-fopenmp")
 target_compile_definitions(_C_nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C_nqs"
     _GLIBCXX_USE_CXX11_ABI=0
-    # _GLIBCXX_PARALLEL=0
 )
-target_link_libraries(_C_nqs PUBLIC fmt::fmt gsl-lite flat_hash_map cpuinfo
-    Boost Torch expected inplace_function OpenMP::OpenMP_CXX)
+target_link_libraries(_C_nqs PUBLIC fmt::fmt gsl-lite flat_hash_map ska_sort
+    Boost SG14 Torch OpenMP::OpenMP_CXX)
 
-if (FALSE)
-    set(PYBIND11_CPP_STANDARD "-std=c++14")
-    add_subdirectory(external/pybind11)
 
-    pybind11_add_module(_C_nqs MODULE SYSTEM cbits/nqs.cpp)
-endif()
+install(TARGETS _C_nqs
+        LIBRARY
+        DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground)
+

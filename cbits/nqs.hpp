@@ -1,20 +1,17 @@
 #pragma once
 
-#include <boost/align/aligned_allocator.hpp>
-#include <boost/align/is_aligned.hpp>
-#include <boost/config.hpp>
-#include <boost/pool/pool_alloc.hpp>
-
 #include <pybind11/numpy.h>
 #include <torch/extension.h>
 #include <torch/script.h>
 
+#include <boost/align/aligned_allocator.hpp>
+#include <boost/align/is_aligned.hpp>
+#include <boost/config.hpp>
+#include <boost/pool/pool_alloc.hpp>
+#include <gsl/gsl-lite.hpp>
+#include <SG14/inplace_function.h>
 #include <flat_hash_map/bytell_hash_map.hpp>
 #include <ska_sort/ska_sort.hpp>
-
-#include <gsl/gsl-lite.hpp>
-
-#include <inplace_function.h>
 
 #if defined(BOOST_GCC)
 #    pragma GCC diagnostic push
@@ -23,10 +20,18 @@
 #    pragma GCC diagnostic ignored "-Wswitch-default"
 #    pragma GCC diagnostic ignored "-Wctor-dtor-privacy"
 #    pragma GCC diagnostic ignored "-Wstrict-overflow"
+#elif defined(BOOST_CLANG)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wmissing-noreturn"
+#    pragma clang diagnostic ignored "-Wsign-conversion"
+#    pragma clang diagnostic ignored "-Wswitch-enum"
+#    pragma clang diagnostic ignored "-Wundefined-func-template"
 #endif
 #include <fmt/format.h>
 #if defined(BOOST_GCC)
 #    pragma GCC diagnostic pop
+#elif defined(BOOST_CLANG)
+#    pragma clang diagnostic pop
 #endif
 
 #include <algorithm>
@@ -56,8 +61,13 @@
 #define TCM_CURRENT_FUNCTION BOOST_CURRENT_FUNCTION
 #define TCM_EXPORT BOOST_SYMBOL_EXPORT
 #define TCM_IMPORT BOOST_SYMBOL_IMPORT
-#define TCM_GCC BOOST_GCC
-#define TCM_CLANG BOOST_CLANG
+
+#if defined(BOOST_GCC)
+#    define TCM_GCC BOOST_GCC
+#endif
+#if defined(BOOST_CLANG)
+#    define TCM_CLANG BOOST_CLANG
+#endif
 
 #if defined(TCM_GCC) || defined(TCM_CLANG)
 #    define TCM_HOT __attribute__((hot))
@@ -74,6 +84,18 @@
     "##            Please, be so kind to submit it here                 ##\n"  \
     "##     https://github.com/twesterhout/nqs-playground/issues        ##\n"  \
     "#####################################################################"
+
+#if defined(TCM_CLANG)
+// Clang refuses to display newlines
+#    define TCM_STATIC_ASSERT_BUG_MESSAGE                                      \
+        "Congratulations, you have found a bug in nqs-playground! Please, be " \
+        "so kind to submit it to "                                             \
+        "https://github.com/twesterhout/nqs-playground/issues."
+#else
+#define TCM_STATIC_ASSERT_BUG_MESSAGE TCM_BUG_MESSAGE
+#endif
+
+
 
 #define TCM_NOEXCEPT noexcept
 #define TCM_CONSTEXPR constexpr
@@ -92,17 +114,19 @@
 /// Formatting of torch::ScalarType using fmtlib facilities
 ///
 /// Used only for error reporting.
-template <> struct fmt::formatter<torch::ScalarType> : formatter<string_view> {
+namespace fmt {
+template <> struct formatter<::torch::ScalarType> : formatter<string_view> {
     // parse is inherited from formatter<string_view>.
 
     template <typename FormatContext>
-    auto format(torch::ScalarType const type, FormatContext& ctx)
+    auto format(::torch::ScalarType const type, FormatContext& ctx)
     {
         // TODO(twesterhout): Us using c10 is probably not what PyTorch folks had
         // in mind... Suggestions are welcome
         return formatter<string_view>::format(::c10::toString(type), ctx);
     }
 };
+} // namespace fmt
 // [torch::ScalarType] Formatting }}}
 
 TCM_NAMESPACE_BEGIN
@@ -134,6 +158,7 @@ enum class Spin : unsigned char {
     up   = 0x01,
 };
 
+// [detail::hadd] {{{
 namespace detail {
 /// Horizontally adds elements of a float4 vector.
 ///
@@ -156,55 +181,14 @@ TCM_FORCEINLINE auto hadd(__m256 const v) noexcept -> float
     return hadd(vlow);
 }
 } // namespace detail
+// [detail::hadd] }}}
 
-struct IdentityProjection {
+struct IdentityProjection { // {{{
     template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
     {
         return std::forward<T>(x);
     }
-};
-
-// Tensor creation routines {{{
-namespace detail {
-template <class T> struct ToScalarType {
-    static_assert(!std::is_same<T, T>::value, "Type not (yet) supported.");
-};
-
-template <> struct ToScalarType<float> {
-    static constexpr auto scalar_type() noexcept -> torch::ScalarType
-    {
-        return torch::kFloat32;
-    }
-};
-
-template <> struct ToScalarType<int64_t> {
-    static constexpr auto scalar_type() noexcept -> torch::ScalarType
-    {
-        return torch::kInt64;
-    }
-};
-
-/// Returns an empty one-dimensional tensor of `float` of length `n`.
-template <class T, class... Ints>
-auto make_tensor(Ints... dims) -> torch::Tensor
-{
-    // TODO(twesterhout): This could overflow if one of `dims` is of type
-    // `uint64_t` and is huge.
-    auto out = torch::empty({static_cast<int64_t>(dims)...},
-                            torch::TensorOptions()
-                                .dtype(ToScalarType<T>::scalar_type())
-                                .requires_grad(false));
-    TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
-                                    "using `torch::empty` are contiguous");
-    // TODO(twesterhout): I really want that, but in PyTorch v1.0.1 only tensors
-    // larger than 5120 bytes have 64 byte alignment.
-    // TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
-    //            "it is assumed that tensors allocated using `torch::empty` are "
-    //            "aligned to 64-byte boundary");
-    return out;
-}
-} // namespace detail
-// }}}
+}; // }}}
 
 // Errors {{{
 namespace detail {
@@ -311,6 +295,48 @@ inline auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
               ::fmt::format("wrong type {}; expected {}", type, expected))
 // }}}
 
+// Tensor creation routines {{{
+namespace detail {
+template <class T> struct ToScalarType {
+    static_assert(!std::is_same<T, T>::value, "Type not (yet) supported.");
+};
+
+template <> struct ToScalarType<float> {
+    static constexpr auto scalar_type() noexcept -> torch::ScalarType
+    {
+        return torch::kFloat32;
+    }
+};
+
+template <> struct ToScalarType<int64_t> {
+    static constexpr auto scalar_type() noexcept -> torch::ScalarType
+    {
+        return torch::kInt64;
+    }
+};
+
+/// Returns an empty one-dimensional tensor of `float` of length `n`.
+template <class T, class... Ints>
+auto make_tensor(Ints... dims) -> torch::Tensor
+{
+    // TODO(twesterhout): This could overflow if one of `dims` is of type
+    // `uint64_t` and is huge.
+    auto out = torch::empty({static_cast<int64_t>(dims)...},
+                            torch::TensorOptions()
+                                .dtype(ToScalarType<T>::scalar_type())
+                                .requires_grad(false));
+    TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
+                                    "using `torch::empty` are contiguous");
+    // TODO(twesterhout): I really want that, but in PyTorch v1.0.1 only tensors
+    // larger than 5120 bytes have 64 byte alignment.
+    // TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
+    //            "it is assumed that tensors allocated using `torch::empty` are "
+    //            "aligned to 64-byte boundary");
+    return out;
+}
+} // namespace detail
+// }}}
+
 template <class RandomAccessIterator, class Projection = IdentityProjection>
 TCM_NOINLINE auto unpack_to_tensor(RandomAccessIterator first,
                                    RandomAccessIterator last, torch::Tensor dst,
@@ -346,8 +372,9 @@ class TCM_EXPORT SpinVector {
     /// Constructs an empty spin configuration.
     constexpr SpinVector() noexcept : _data{}
     {
-        _data.as_ints[0] = 0;
-        _data.as_ints[1] = 0;
+        TCM_ASSERT(is_valid(), "");
+        // _data.as_ints[0] = 0;
+        // _data.as_ints[1] = 0;
     }
 
     constexpr SpinVector(SpinVector const&) noexcept = default;
@@ -421,7 +448,7 @@ class TCM_EXPORT SpinVector {
     auto numpy() const -> pybind11::array_t<float, pybind11::array::c_style>;
     auto tensor() const -> torch::Tensor;
 
-    auto key(UnsafeTag) const TCM_NOEXCEPT -> int64_t
+    constexpr auto key(UnsafeTag) const TCM_NOEXCEPT -> int64_t
     {
         TCM_ASSERT(size() <= 64, "Chain too long");
         return _data.spin[0];
@@ -528,7 +555,7 @@ class TCM_EXPORT SpinVector {
         TCM_ASSERT(buffer.size() < 16, "Range too long");
         TCM_ASSERT(is_valid_spin(buffer), "Invalid spin value");
         auto result = uint16_t{0};
-        for (auto i = size_t{0}; i < buffer.size(); ++i) {
+        for (auto i = 0u; i < buffer.size(); ++i) {
             set_bit(result, i, buffer[i] == 1.0f ? Spin::up : Spin::down);
         }
         return result;
@@ -713,7 +740,7 @@ SpinVector::flipped(std::initializer_list<unsigned> is) const TCM_NOEXCEPT
 inline auto SpinVector::magnetisation() const noexcept -> int
 {
     static_assert(sizeof(unsigned long) == sizeof(uint64_t),
-                  "Oops! Please, submit a bug report.");
+                  "\n" TCM_BUG_MESSAGE);
     static auto const size_mask = htobe64(0xFFFFFFFFFFFF0000);
     auto const        number_ones =
         __builtin_popcountll(static_cast<uint64_t>(_data.as_ints[0]))
@@ -761,9 +788,6 @@ inline auto SpinVector::hash() const noexcept -> size_t
         return x;
     };
 
-#if 0
-    return hash_uint64(static_cast<uint64_t>(_data.as_ints[0]));
-#else
     auto const hash_combine = [hash_uint64](uint64_t seed,
                                             uint64_t x) noexcept->uint64_t
     {
@@ -774,7 +798,6 @@ inline auto SpinVector::hash() const noexcept -> size_t
 
     return hash_combine(hash_uint64(static_cast<uint64_t>(_data.as_ints[0])),
                         hash_uint64(static_cast<uint64_t>(_data.as_ints[1])));
-#endif
 }
 
 inline SpinVector::operator uint64_t() const
@@ -909,7 +932,6 @@ inline auto get_store_mask_for(unsigned const rest) TCM_NOEXCEPT -> __m256i
 }
 } // namespace detail
 
-#if 1
 inline auto
 SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
 {
@@ -923,7 +945,6 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
     for (; i < chunks_16; ++i, p += 16) {
         detail::unpack(_data.spin[i], p);
     }
-
     if (rest_16 != 0) {
         auto const store_mask = detail::get_store_mask_for(rest_8);
         if (rest_16 > 8) {
@@ -937,20 +958,21 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
         }
     }
 
-#    if 0
-    auto spin2float = [](Spin const s) noexcept->float
-    {
-        return s == Spin::up ? 1.0f : -1.0f;
-    };
-
-    for (auto i = 0u; i < size(); ++i) {
-        TCM_CHECK(buffer[i] == spin2float((*this)[i]), std::runtime_error,
-                  fmt::format("bug in copy_to: buffer[{}] == {} != {}", i,
-                              buffer[i], spin2float((*this)[i])));
-    }
-#    endif
+    // Testing correctness
+    TCM_ASSERT(([this, buffer]() {
+                   auto spin2float = [](Spin const s) noexcept->float
+                   {
+                       return s == Spin::up ? 1.0f : -1.0f;
+                   };
+                   for (auto k = 0u; k < size(); ++k) {
+                       if (buffer[k] != spin2float((*this)[k])) {
+                           return false;
+                       }
+                   }
+                   return true;
+               }()),
+               "");
 }
-#endif
 
 inline SpinVector::SpinVector(gsl::span<float const> buffer,
                               UnsafeTag /*unused*/) TCM_NOEXCEPT
@@ -960,9 +982,7 @@ inline SpinVector::SpinVector(gsl::span<float const> buffer,
     TCM_ASSERT(is_valid(), "Bug! Post-condition violated");
 }
 
-template <int ExtraFlags, class = std::enable_if_t<
-                              ExtraFlags & pybind11::array::c_style
-                              || ExtraFlags & pybind11::array::f_style> /**/>
+template <int ExtraFlags, class>
 TCM_NOINLINE
 SpinVector::SpinVector(pybind11::array_t<float, ExtraFlags> const& spins)
 {
@@ -1005,12 +1025,12 @@ TCM_NOINLINE auto SpinVector::random(unsigned const size, Generator& generator)
     if (rest != 0) {
         TCM_ASSERT(rest < 16, "");
         using Param = Dist::param_type;
-        spin._data.spin[chunks] =
+        spin._data.spin[chunks] = static_cast<uint16_t>(
             dist(generator, Param{0, static_cast<uint16_t>((1 << rest) - 1)})
-            << (16 - rest);
+            << (16 - rest));
     }
 
-    spin._data.size = size;
+    spin._data.size = static_cast<uint16_t>(size);
     TCM_ASSERT(spin.is_valid(), "Bug! Post-condition violated");
     return spin;
 }
@@ -1064,6 +1084,7 @@ template <> struct hash<::TCM_NAMESPACE::SpinVector> {
 
 TCM_NAMESPACE_BEGIN
 
+// [unpack_to_tensor] {{{
 template <class RandomAccessIterator, class Projection>
 auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
                       torch::Tensor dst, Projection proj) -> void
@@ -1134,60 +1155,11 @@ auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
     unpack_to_tensor(first, last, out, std::move(proj));
     return out;
 }
-
-#if 0
-template <class RandomAccessIterator, class Projection = IdentityProjection>
-auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
-                      Projection proj = IdentityProjection{}) -> torch::Tensor
-{
-    if (begin == end) return detail::make_tensor<float>(0);
-    TCM_ASSERT(end - begin > 0, "Invalid range");
-    auto const size         = static_cast<size_t>(end - begin);
-    auto const number_spins = proj(*begin).size();
-    TCM_ASSERT(std::all_of(begin, end,
-                           [number_spins, &proj](auto const& x) {
-                               return proj(x).size() == number_spins;
-                           }),
-               "Input range contains variable sized spin chains");
-    auto       out  = detail::make_tensor<float>(size, number_spins);
-    auto*      data = out.template data<float>();
-    auto const ldim = out.stride(0);
-    for (auto i = size_t{0}; i < size; ++i, ++begin, data += ldim) {
-        proj(*begin).copy_to({data, number_spins});
-    }
-    return out;
-}
-
-template <class RandomAccessIterator>
-auto unpack_to_tensor(RandomAccessIterator begin, RandomAccessIterator end,
-                      torch::Tensor output)
-{
-#if 1
-    auto const size = end - begin;
-    TCM_ASSERT(size > 0, "Input range must not be empty");
-    auto const number_spins = begin->size();
-    TCM_ASSERT(std::all_of(begin, end,
-                           [number_spins](auto const& x) {
-                               return x.size() == number_spins;
-                           }),
-               "Input range contains variable size spin chains");
-    TCM_ASSERT(output.dim() == 2, "Invalid dimension");
-    TCM_ASSERT(size == output.size(0), "Sizes don't match");
-    TCM_ASSERT(static_cast<int64_t>(number_spins) == output.size(1),
-               "Sizes don't match");
-
-    auto*      data = output.data<float>();
-    auto const ldim = output.stride(0);
-    for (auto i = int64_t{0}; i < size; ++i, ++begin, data += ldim) {
-        begin->copy_to({data, number_spins});
-    }
-#endif
-}
-#endif
+// [unpack_to_tensor] }}}
 
 /// \brief Explicit representation of a quantum state `|ψ⟩`.
 // [QuantumState] {{{
-class TCM_EXPORT QuantumState
+class QuantumState
     : public ska::bytell_hash_map<SpinVector, complex_type> {
   private:
     using base = ska::bytell_hash_map<SpinVector, complex_type>;
@@ -1195,6 +1167,10 @@ class TCM_EXPORT QuantumState
 
     static_assert(alignof(base::value_type) == 16, "");
     static_assert(sizeof(base::value_type) == 32, "");
+    // static_assert(std::is_trivially_copyable<base::value_type>::value,
+    //               "\n" TCM_BUG_MESSAGE);
+    static_assert(std::is_trivially_destructible<base::value_type>::value,
+                  "\n" TCM_BUG_MESSAGE);
 
   public:
     using base::base;
@@ -1534,8 +1510,8 @@ inline auto load_forward_fn(std::string const& filename, size_t num_copies)
     std::vector<ForwardT> modules;
     modules.resize(num_copies);
 
-    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
-    std::exception_ptr err_ptr{nullptr};
+    std::atomic_flag   err_flag = ATOMIC_FLAG_INIT;
+    std::exception_ptr err_ptr  = nullptr;
 
     auto* modules_ptr = modules.data();
 #pragma omp parallel for num_threads(num_copies) default(none)                 \
@@ -1629,6 +1605,16 @@ class PolynomialState {
         size_t                           _batch_size;
         size_t                           _num_spins;
 
+        static_assert(
+            std::is_nothrow_move_constructible<decltype(_forward)>::value
+                && std::is_nothrow_move_assignable<decltype(_forward)>::value,
+            TCM_STATIC_ASSERT_BUG_MESSAGE);
+        static_assert(
+            std::is_nothrow_move_constructible<decltype(_polynomial)>::value
+                && std::is_nothrow_move_assignable<
+                       decltype(_polynomial)>::value,
+            TCM_STATIC_ASSERT_BUG_MESSAGE);
+
       public:
         Worker(ForwardT f, Polynomial const& p, size_t const batch_size,
                size_t const num_spins)
@@ -1646,7 +1632,9 @@ class PolynomialState {
         Worker(Worker const&)     = delete;
         Worker(Worker&&) noexcept = default;
         Worker& operator=(Worker const&) = delete;
-        Worker& operator=(Worker&&) noexcept = default;
+        // torch::Tensor is not noexcept assignable, so we delete the assignment
+        // altogether. Otherwise, we'll have trouble with OpenMP.
+        Worker& operator=(Worker&&) = delete;
 
         auto operator()(int64_t batch_index) -> float;
 
@@ -1832,6 +1820,13 @@ struct alignas(32) ChainState {
     real_type  value; ///< Wave function ψ(σ)
     size_t     count; ///< Number of times this state has been visited
 
+    static_assert(std::is_trivially_copyable<SpinVector>::value,
+                  TCM_STATIC_ASSERT_BUG_MESSAGE);
+    static_assert(std::is_trivially_copyable<real_type>::value,
+                  TCM_STATIC_ASSERT_BUG_MESSAGE);
+    static_assert(std::is_trivially_copyable<size_t>::value,
+                  TCM_STATIC_ASSERT_BUG_MESSAGE);
+
     // Simple constructor to make `emplace` happy.
     constexpr ChainState(SpinVector s, real_type v, size_t n) noexcept
         : spin{s}, value{v}, count{n}
@@ -1865,13 +1860,26 @@ struct alignas(32) ChainState {
     }
 };
 
-static_assert(sizeof(ChainState) == 32, "");
-static_assert(std::is_trivially_copyable<ChainState>::value, "");
-static_assert(std::is_trivially_destructible<ChainState>::value, "");
+static_assert(sizeof(ChainState) == 32, TCM_STATIC_ASSERT_BUG_MESSAGE);
+static_assert(std::is_trivially_copy_constructible<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+static_assert(std::is_trivially_copy_assignable<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+static_assert(std::is_trivially_move_constructible<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+static_assert(std::is_trivially_move_assignable<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+static_assert(std::is_trivially_destructible<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+// TODO(twesterhout): This fails on Clang... why??
+#if !defined(TCM_CLANG)
+static_assert(std::is_trivially_copyable<ChainState>::value,
+              TCM_STATIC_ASSERT_BUG_MESSAGE);
+#endif
 
 #define TCM_MAKE_OPERATOR_USING_KEY(op)                                        \
-    inline auto operator op(ChainState const& x, ChainState const& y)          \
-        TCM_NOEXCEPT->bool                                                     \
+    inline constexpr auto operator op(ChainState const& x,                     \
+                                      ChainState const& y) TCM_NOEXCEPT->bool  \
     {                                                                          \
         TCM_ASSERT(x.spin.size() == y.spin.size(),                             \
                    "States corresponding to different system sizes can't be "  \
@@ -1920,7 +1928,8 @@ struct ChainResult {
     auto to_tensors() const
         -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
     {
-        return {extract_vectors(), extract_values(), extract_count()};
+        return std::make_tuple(extract_vectors(), extract_values(),
+                               extract_count());
     }
 
   private:
@@ -2001,8 +2010,9 @@ TCM_NOINLINE auto MarkovChain<ForwardFn, ProbabilityFn>::next_impl(bool record)
     TCM_CHECK(!_samples.empty(), std::logic_error, "Use after `release()`");
     auto const u = std::generate_canonical<
         real_type, std::numeric_limits<real_type>::digits>(*_generator);
-    auto       spin        = current().spin.flipped(_flipper.read());
-    auto const value       = _forward(spin);
+    auto spin = current().spin.flipped(_flipper.read());
+    // _forward returns a float and we increase the precision which is safe
+    auto const value       = static_cast<real_type>(_forward(spin));
     auto const probability = _prob(current().value, value);
 
     _count += record;
@@ -2065,7 +2075,7 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::compress() -> void
 template <class ForwardFn, class ProbabilityFn>
 auto MarkovChain<ForwardFn, ProbabilityFn>::release(bool sorted) && -> SamplesT
 {
-    TCM_ASSERT(!_samples.empty(), "Bug! Use after `release`");
+    TCM_ASSERT(!_samples.empty(), "use after `release`");
     if (current().count == 0) {
         _samples.pop_back();
         if (_samples.empty()) { return {}; }
@@ -2073,8 +2083,10 @@ auto MarkovChain<ForwardFn, ProbabilityFn>::release(bool sorted) && -> SamplesT
     TCM_ASSERT(std::all_of(std::begin(_samples), std::end(_samples),
                            [](auto const& x) { return x.count > 0; }),
                "");
-    sort();
-    compress();
+    if (sorted) {
+        sort();
+        compress();
+    }
     return std::move(_samples);
 }
 
@@ -2256,8 +2268,8 @@ TCM_FORCEINLINE auto parallel_for_impl(int64_t const begin, int64_t const end,
         return;
     }
 
-    std::atomic_flag   err_flag{ATOMIC_FLAG_INIT};
-    std::exception_ptr err_ptr{nullptr};
+    std::atomic_flag   err_flag = ATOMIC_FLAG_INIT;
+    std::exception_ptr err_ptr  = nullptr;
 #pragma omp parallel num_threads(number_threads) default(none)                 \
     firstprivate(begin, end, func) shared(err_flag, err_ptr)
     {
@@ -2444,9 +2456,9 @@ inline auto sample_some(std::string const& filename,
     std::vector<ForwardT> forward;
     forward =
         detail::load_forward_fn(filename, static_cast<size_t>(num_threads));
-    PolynomialState state{std::move(forward),
-                          std::move(polynomial),
-                          {options.batch_size, options.number_spins}};
+    PolynomialState state{
+        std::move(forward), std::move(polynomial),
+        std::make_tuple(options.batch_size, options.number_spins)};
     return sample_some(state, options);
 }
 
