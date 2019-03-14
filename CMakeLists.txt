@@ -163,7 +163,7 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
 endif()
 target_compile_options(_C_nqs PRIVATE ${TCM_WARNING_FLAGS})
 target_compile_options(_C_nqs PRIVATE "-fvisibility=hidden")
-target_compile_options(_C_nqs PRIVATE "-march=native")
+target_compile_options(_C_nqs PRIVATE "-msse" "-msse2" "-msse3" "-msse4.1" "-msse4.2" "-mavx" "-mtune=native")
 target_compile_definitions(_C_nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C_nqs"
