@@ -32,43 +32,24 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import cmath
-# import collections
-# from copy import deepcopy
-# import cProfile
-# import importlib
-# from itertools import islice
-# from functools import reduce
-# import logging
-import math
-# import os
-# import sys
-# import time
-from typing import Dict, List, Tuple
-
-# import click
-# import mpmath  # Just to be safe: for accurate computation of L2 norms
-# from numba import jit, jitclass, uint8, int64, uint64, float32
-# from numba.types import Bytes
-# import numba.extending
+from typing import List, Tuple
 import numpy as np
-# import scipy
-# from scipy.sparse.linalg import lgmres, LinearOperator
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
 
-from .core import MonteCarloState, WorthlessConfiguration
+from . import _C_nqs
+from .core import _with_file_like, WorthlessConfiguration
+
 
 class Heisenberg(object):
     """
     Isotropic Heisenberg Hamiltonian on a lattice.
     """
 
-    def __init__(self, edges: List[Tuple[int, int]]):
+    def __init__(self, edges: List[Tuple[int, int]], coupling: complex = 1.0):
         """
         Initialises the Hamiltonian given a list of edges.
         """
         self._graph = edges
+        self._coupling = coupling
         smallest = min(map(min, edges))
         largest = max(map(max, edges))
         if smallest != 0:
@@ -78,7 +59,7 @@ class Heisenberg(object):
             )
         self._number_spins = largest + 1
 
-    def __call__(self, state: MonteCarloState, cutoff=5.5) -> np.complex64:
+    def __call__(self, state, cutoff=5.5) -> np.complex64:
         """
         Calculates local energy in the given state.
         """
@@ -105,13 +86,8 @@ class Heisenberg(object):
         energy = np.complex64(energy)
         return energy if not cmath.isinf(energy) else np.complex64(1e38)
 
-    # def reachable_from(self, spin):
-    #     reachable = []
-    #     for (i, j) in filter(lambda x: spin[x[0]] != spin[x[1]], self._graph):
-    #         assert spin[i] == -spin[j]
-    #         reachable.append(spin.copy())
-    #         reachable[-1][[i, j]] *= -1
-    #     return reachable
+    def to_cxx(self) -> _C_nqs.Heisenberg:
+        return _C_nqs.Heisenberg(edges=self._graph, coupling=self._coupling)
 
     @property
     def number_spins(self) -> int:
@@ -120,15 +96,20 @@ class Heisenberg(object):
         """
         return self._number_spins
 
+    @property
+    def edges(self) -> List[Tuple[int, int]]:
+        return self._graph
 
-def read_hamiltonian(in_file):
-    """
-    Reads the Hamiltonian from ``in_file``.
-    """
+    @property
+    def coupling(self) -> complex:
+        return self._coupling
+
+
+def _read_hamiltonian(stream):
     specs = []
     for (coupling, edges) in map(
         lambda x: x.strip().split(maxsplit=1),
-        filter(lambda x: not x.startswith("#"), in_file),
+        filter(lambda x: not x.startswith(b"#"), stream),
     ):
         coupling = float(coupling)
         # TODO: Parse the edges properly, it's not that difficult...
@@ -138,6 +119,13 @@ def read_hamiltonian(in_file):
     # couplings
     if len(specs) != 1:
         raise NotImplementedError("Multiple couplings are not yet supported.")
-    (_, edges) = specs[0]
-    return Heisenberg(edges)
+    coupling, edges = specs[0]
+    return Heisenberg(edges, coupling)
 
+
+def read_hamiltonian(stream) -> Heisenberg:
+    """
+    Reads the Hamiltonian from ``stream``. ``stream`` could be either a
+    file-like object or a ``str`` file name.
+    """
+    return _with_file_like(stream, "rb", _read_hamiltonian)

@@ -135,10 +135,6 @@ enum class Spin : unsigned char {
 };
 
 namespace detail {
-TCM_NORETURN auto assert_fail(char const* expr, char const* file,
-                              size_t const line, char const* function,
-                              std::string const& msg) noexcept -> void;
-
 /// Horizontally adds elements of a float4 vector.
 ///
 /// Solution taken from https://stackoverflow.com/a/35270026
@@ -215,6 +211,11 @@ namespace detail {
 auto make_what_message(char const* file, size_t line, char const* func,
                        std::string const& description) -> std::string;
 
+TCM_NORETURN auto assert_fail(char const* expr, char const* file,
+                              size_t const line, char const* function,
+                              std::string const& msg) noexcept -> void;
+
+// TODO(twesterhout): Remove me!
 auto spin_configuration_to_string(gsl::span<float const> spin) -> std::string;
 } // namespace detail
 
@@ -426,22 +427,6 @@ class TCM_EXPORT SpinVector {
         return _data.spin[0];
     }
 
-#if 0
-    auto dump() const -> std::string
-    {
-        std::ostringstream msg;
-        msg << size() << ": ";
-        for (auto i = 0u; i < size(); ++i) {
-            msg << static_cast<unsigned>(unsafe_at(i));
-        }
-        msg << " ";
-        for (auto i = size(); i < max_size(); ++i) {
-            msg << static_cast<unsigned>(unsafe_at(i));
-        }
-        return msg.str();
-    }
-#endif
-
     constexpr auto is_valid() const TCM_NOEXCEPT -> bool
     {
         for (auto i = size(); i < max_size(); ++i) {
@@ -454,16 +439,6 @@ class TCM_EXPORT SpinVector {
     TCM_NOINLINE friend auto
     unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
                      torch::Tensor dst, Projection proj) -> void;
-
-#if 0
-    template <class RandomAccessIterator, class Projection>
-    friend auto unpack_to_tensor(RandomAccessIterator first,
-                                 RandomAccessIterator last, torch::Tensor dst,
-                                 Projection proj) -> void;
-
-    friend auto unpack_to_tensor(gsl::span<SpinVector const> src,
-                                 torch::Tensor               dst) -> void;
-#endif
 
   private:
     // [SpinVector.private junk] {{{
@@ -938,19 +913,7 @@ inline auto get_store_mask_for(unsigned const rest) TCM_NOEXCEPT -> __m256i
 inline auto
 SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
 {
-#    if 0
     TCM_ASSERT(buffer.size() == size(), "Wrong buffer size");
-    auto spin2float = [](Spin const s) noexcept->float
-    {
-        return s == Spin::up ? 1.0f : -1.0f;
-    };
-
-    for (auto i = 0u; i < size(); ++i) {
-        buffer[i] = spin2float((*this)[i]);
-    }
-#    else
-    TCM_ASSERT(buffer.size() == size(), "Wrong buffer size");
-
     auto const chunks_16 = size() / 16;
     auto const rest_16   = size() % 16;
     auto const rest_8    = size() % 8;
@@ -959,8 +922,6 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
     auto  i = 0u;
     for (; i < chunks_16; ++i, p += 16) {
         detail::unpack(_data.spin[i], p);
-        // _mm256_storeu_ps(p, detail::unpack(_data.spin[i] >> 8));
-        // _mm256_storeu_ps(p + 8, detail::unpack(_data.spin[i] & 0xFF));
     }
 
     if (rest_16 != 0) {
@@ -976,7 +937,7 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
         }
     }
 
-#        if 0
+#    if 0
     auto spin2float = [](Spin const s) noexcept->float
     {
         return s == Spin::up ? 1.0f : -1.0f;
@@ -987,7 +948,6 @@ SpinVector::copy_to(gsl::span<float> const buffer) const TCM_NOEXCEPT -> void
                   fmt::format("bug in copy_to: buffer[{}] == {} != {}", i,
                               buffer[i], spin2float((*this)[i])));
     }
-#        endif
 #    endif
 }
 #endif
