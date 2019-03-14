@@ -2229,9 +2229,6 @@ template <class Function, class Int>
 TCM_FORCEINLINE auto simple_for_loop(std::true_type, unsigned /*unused*/,
                                      Int begin, Int end, Function f) -> void
 {
-#pragma omp critical
-    std::cout << fmt::format("simple_for_loop(true_type, ?, {}, {}, ...)\n",
-                             begin, end);
     for (; begin != end; ++begin) {
         f(begin);
     }

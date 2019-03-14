@@ -193,7 +193,7 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
 
 
 def generate_train_data(filename, config):
-    explicit = True
+    explicit = False # True
     number_spins = config["number_spins"]
     magnetisation = config["magnetisation"]
     poly = _C.Polynomial(config["hamiltonian"], config["roots"])
@@ -213,9 +213,13 @@ def generate_train_data(filename, config):
         φ = _C.TargetState(filename, poly, (8192, number_spins))(samples)
         target_amplitudes = torch.abs(φ)
         target_signs = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
-        return samples, target_amplitudes, target_signs
     else:
-        raise NotImplementedError()
+        chain_options = _C.ChainOptions(number_spins=number_spins, magnetisation=magnetisation,
+                batch_size=64, steps=config["steps"])
+        samples, φ, _ = _C.sample_some(filename, poly, chain_options, (8, 2))
+        target_amplitudes = torch.abs(φ)
+        target_signs = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
+    return samples, target_amplitudes, target_signs
 
 
 def swo_step(ψ, config):
@@ -249,6 +253,7 @@ _OPTIONS = {
     "roots": [(-1 - 1j, None), (1 + 1j, None)],
     "epochs": 20,
     "output": "result/swo",
+    "steps": (8, 50, 80, 1),
     "amplitude": {
         "optimiser": lambda p: torch.optim.Adam(p, lr=0.00025),
         "epochs": 200,

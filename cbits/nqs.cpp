@@ -567,9 +567,6 @@ auto parallel_sample_some(std::string const& filename,
     auto func = [&filename, &polynomial, &options,
                  num_threads = static_cast<int>(std::get<1>(num_threads)),
                  results     = results.data()](int64_t const i) {
-#pragma omp critical
-        std::cout << fmt::format("Thread {} calculating {}...\n", omp_get_thread_num(), i);
-
         results[i] = sample_some(filename, Polynomial{polynomial, SplitTag{}},
                                  options, num_threads);
     };
