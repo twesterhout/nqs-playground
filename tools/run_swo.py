@@ -54,6 +54,7 @@ from typing import Dict, List, Tuple, Optional
 # from numba.types import Bytes
 # import numba.extending
 import numpy as np
+from numpy.polynomial import polynomial
 
 # import scipy
 # from scipy.sparse.linalg import lgmres, LinearOperator
@@ -64,10 +65,10 @@ from torch.utils.data import TensorDataset, DataLoader
 # import torch.nn as nn
 # import torch.nn.functional as F
 
-from .core import CompactSpin, negative_log_overlap_real, import_network
-from .monte_carlo import all_spins
-from .hamiltonian import read_hamiltonian
-from . import _C_nqs as _C
+from nqs_playground.core import CompactSpin, negative_log_overlap_real, import_network
+from nqs_playground.monte_carlo import all_spins
+from nqs_playground.hamiltonian import read_hamiltonian
+import nqs_playground._C_nqs as _C
 
 
 class CombiningState(torch.jit.ScriptModule):
@@ -104,13 +105,23 @@ def _make_checkpoints_for(n: int):
     return important_iterations
 
 
+def optimise_scale(ψ, dataset):
+    with torch.no_grad():
+        x, φ = dataset
+        ψ = ψ(x).view([-1])
+        A = torch.dot(φ, φ).item()
+        B = torch.dot(φ, ψ).item()
+        assert A != 0
+        return -B / A
+
+
 def train_amplitude(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
     logging.info("Learning amplitudes...")
     start = time.time()
 
     epochs = config["epochs"]
     batch_size = config["batch_size"]
-    optimiser = config["optimiser"](ψ.parameters())
+    optimiser = config["optimiser"](ψ)
     loss_fn = config["loss"]
 
     dataloader = torch.utils.data.DataLoader(
@@ -148,7 +159,7 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
 
     epochs = config["epochs"]
     batch_size = config["batch_size"]
-    optimiser = config["optimiser"](ψ.parameters())
+    optimiser = config["optimiser"](ψ)
     loss_fn = config["loss"]
 
     dataloader = torch.utils.data.DataLoader(
@@ -193,7 +204,7 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
 
 
 def generate_train_data(filename, config):
-    explicit = False # True
+    explicit = False  # True
     number_spins = config["number_spins"]
     magnetisation = config["magnetisation"]
     poly = _C.Polynomial(config["hamiltonian"], config["roots"])
@@ -213,25 +224,54 @@ def generate_train_data(filename, config):
         φ = _C.TargetState(filename, poly, (8192, number_spins))(samples)
         target_amplitudes = torch.abs(φ)
         target_signs = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
+        result = None
     else:
-        chain_options = _C.ChainOptions(number_spins=number_spins, magnetisation=magnetisation,
-                batch_size=64, steps=config["steps"])
-        samples, φ, _ = _C.sample_some(filename, poly, chain_options, (8, 2))
+        chain_options = _C.ChainOptions(
+            number_spins=number_spins,
+            magnetisation=magnetisation,
+            batch_size=1024,
+            steps=config["steps"],
+        )
+        result = _C.sample_some(filename, poly, chain_options, (16, 1))
+        samples, φ, counts = result.to_tensors()
+        logging.info(
+            "Visited {} configurations during Monte Carlo sampling".format(
+                torch.sum(counts)
+            )
+        )
         target_amplitudes = torch.abs(φ)
         target_signs = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
-    return samples, target_amplitudes, target_signs
+    return samples, target_amplitudes, target_signs, result
+
+
+def generate_more_data(new_state, old_state, scale, config):
+    number_spins = config["number_spins"]
+    magnetisation = config["magnetisation"]
+    logging.info("scale = {}".format(scale))
+    poly = _C.Polynomial(config["hamiltonian"], config["roots"], scale=scale)
+    chain_options = _C.ChainOptions(
+        number_spins=number_spins,
+        magnetisation=magnetisation,
+        batch_size=1024,
+        steps=config["steps"],
+    )
+    result = _C.sample_difference(new_state, old_state, poly, chain_options, (16, 1))
+    # TODO(twesterhout): This should probably happen on the C++ side...
+    samples, values, _ = result.to_tensors()
+    values += torch.jit.load(new_state)(samples).view([-1])
+    values /= scale
+    result.values(values)
+    return result
 
 
 def swo_step(ψ, config):
     ψ_amplitude, ψ_phase = ψ
-    tempfile_name = ".swo.model.temp"
+    tempfile_name = ".temp-swo-model.old.pt"
     CombiningState(ψ_amplitude, ψ_phase).save(tempfile_name)
-
     logging.info("Generating the training data set...")
-    samples, target_amplitudes, target_phases = generate_train_data(
+    samples, target_amplitudes, target_phases, result = generate_train_data(
         tempfile_name, config
     )
-
     logging.info("Training on {} spin configurations...".format(samples.size(0)))
     ψ_amplitude = train_amplitude(
         ψ_amplitude, TensorDataset(samples, target_amplitudes), config["amplitude"]
@@ -239,34 +279,105 @@ def swo_step(ψ, config):
     ψ_phase = train_phase(
         ψ_phase, TensorDataset(samples, target_phases), config["phase"]
     )
+
+    if config["difference_sampling"]:
+        logging.info("Generating more data...")
+        scale = abs(optimise_scale(ψ_amplitude, (samples, target_amplitudes)))
+        tempfile_name_current = ".temp-swo-model.current.pt"
+        CombiningState(ψ_amplitude, ψ_phase).save(tempfile_name_current)
+        extra_result = generate_more_data(
+            tempfile_name_current, tempfile_name, scale, config
+        )
+        result.merge(extra_result)
+        samples, φ, _ = result.to_tensors()
+        target_amplitudes = torch.abs(φ)
+        target_phases = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
+        logging.info("Training on {} spin configurations...".format(samples.size(0)))
+        ψ_amplitude = train_amplitude(
+            ψ_amplitude, TensorDataset(samples, target_amplitudes), config["amplitude"]
+        )
+        ψ_phase = train_phase(
+            ψ_phase, TensorDataset(samples, target_phases), config["phase"]
+        )
     return ψ_amplitude, ψ_phase
 
 
-AmplitudeNet = import_network("small.py")
+def switch_to_other_net(φ, ψ, config):
+    φ_amplitude, φ_phase = φ
+    ψ_amplitude, ψ_phase = ψ
+    tempfile_name = ".swo.model.temp"
+    CombiningState(ψ_amplitude, ψ_phase).save(tempfile_name)
+    logging.info("Generating the training data set...")
+    samples, target_amplitudes, target_phases = generate_train_data(
+        tempfile_name, config
+    )
+    logging.info("Training on {} spin configurations...".format(samples.size(0)))
+    φ_amplitude = train_amplitude(
+        φ_amplitude, TensorDataset(samples, target_amplitudes), config["amplitude"]
+    )
+    # ψ_phase = train_phase(
+    #     φ_phase, TensorDataset(samples, target_phases), config["phase"]
+    # )
+    return φ_amplitude, φ_phase
+
+
+AmplitudeNet = import_network("test_net.py")
 
 PhaseNet = import_network("phase.py")
 
-_OPTIONS = {
+_CHAIN_10 = {
     "number_spins": 10,
     "magnetisation": 0,
     "hamiltonian": read_hamiltonian("data/1x10.hamiltonian").to_cxx(),
-    "roots": [(-1 - 1j, None), (1 + 1j, None)],
+    "roots": [
+        (1.0200078895671043 + 0.8629637153606778j, None),
+        (1.0200078895671043 - 0.8629637153606778j, None),
+    ],
     "epochs": 20,
-    "output": "result/swo",
-    "steps": (8, 50, 80, 1),
+    "output": "result.1x10/swo",
+    "steps": (8, 50, 250, 1),
+    "difference_sampling": True,
     "amplitude": {
-        "optimiser": lambda p: torch.optim.Adam(p, lr=0.00025),
-        "epochs": 200,
+        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.0005),
+        "epochs": 500,
         "batch_size": 32,
         "loss": lambda x, y: negative_log_overlap_real(x, y),
     },
     "phase": {
-        "optimiser": lambda p: torch.optim.Adam(p, lr=0.003),
+        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.003),
         "epochs": 100,
         "batch_size": 64,
         "loss": torch.nn.CrossEntropyLoss(),
     },
 }
+
+_KAGOME_18 = {
+    "number_spins": 18,
+    "magnetisation": 0,
+    "hamiltonian": read_hamiltonian("data/Kagome-18.hamiltonian").to_cxx(),
+    "roots": [
+        (1.0200078895671043 + 0.8629637153606778j, None),
+        (1.0200078895671043 - 0.8629637153606778j, None),
+    ],
+    "epochs": 100,
+    "output": "result/swo",
+    "steps": (16, 100, 2100, 1),
+    "difference_sampling": True,
+    "amplitude": {
+        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.001),
+        "epochs": 1000,
+        "batch_size": 256,
+        "loss": lambda x, y: negative_log_overlap_real(x, y),
+    },
+    "phase": {
+        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.003),
+        "epochs": 200,
+        "batch_size": 4096,
+        "loss": torch.nn.CrossEntropyLoss(),
+    },
+}
+
+_OPTIONS = _CHAIN_10  # _KAGOME_18
 
 
 def main():
@@ -277,6 +388,9 @@ def main():
     )
 
     number_spins = _OPTIONS["number_spins"]
+    # φ = torch.jit.load("result.backup/swo.model.1000.pt")
+    # φ_amplitude = φ._amplitude
+    # φ_phase = φ._phase
     ψ_amplitude = AmplitudeNet(number_spins)
     ψ_phase = PhaseNet(number_spins)
     for i in range(_OPTIONS["epochs"]):
