@@ -205,16 +205,21 @@ Heisenberg::Heisenberg(std::vector<edge_type> edges, real_type const coupling)
 
 // [Polynomial] {{{
 Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
-                       std::vector<Term>                 terms)
+                       std::vector<Term> terms, real_type const scale)
     : _current{}
     , _old{}
     , _hamiltonian{std::move(hamiltonian)}
     , _terms{std::move(terms)}
+    , _scale{scale}
     , _basis{}
     , _coeffs{}
 {
     TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
               "hamiltonian must not be nullptr (or None)");
+    TCM_CHECK(std::isnormal(scale), std::invalid_argument,
+              fmt::format("invalid scale: {}; expected a normal (i.e. "
+                          "neither zero, subnormal, infinite or NaN) float",
+                          scale));
     auto const estimated_size =
         std::min(static_cast<size_t>(std::round(
                      std::pow(_hamiltonian->size() / 2, _terms.size()))),
@@ -223,7 +228,7 @@ Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
     _current.reserve(estimated_size);
 }
 
-auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
+auto Polynomial::operator()(complex_type coeff, SpinVector const spin)
     -> Polynomial&
 {
     using std::swap;
@@ -235,6 +240,8 @@ auto Polynomial::operator()(complex_type const coeff, SpinVector const spin)
     TCM_CHECK(_hamiltonian->max_index() < spin.size(), std::out_of_range,
               fmt::format("spin configuration too short {}; expected >{}",
                           spin.size(), _hamiltonian->max_index()));
+    // Apply the "normalisation"
+    coeff *= _scale;
     if (_terms.empty()) {
         _old.clear();
         _old.emplace(spin, coeff);
@@ -502,6 +509,24 @@ auto RandomFlipper::shuffle() -> void
 // }}}
 
 // [ChainResult] {{{
+auto ChainResult::values() const -> torch::Tensor
+{
+    return extract_values();
+}
+
+auto ChainResult::values(torch::Tensor const& xs) -> void
+{
+    TCM_CHECK_DIM(xs.dim(), 1);
+    TCM_CHECK_SHAPE(xs.size(0), static_cast<int64_t>(_samples.size()));
+    TCM_CHECK_TYPE(xs.scalar_type(), torch::kFloat32);
+
+    auto accessor = xs.accessor<float, 1>();
+    for (auto i = size_t{0}; i < _samples.size(); ++i) {
+        _samples[i].value =
+            static_cast<real_type>(accessor[static_cast<int64_t>(i)]);
+    }
+}
+
 auto ChainResult::extract_vectors() const -> torch::Tensor
 {
     return unpack_to_tensor(
@@ -569,6 +594,30 @@ auto parallel_sample_some(std::string const& filename,
                  results     = results.data()](int64_t const i) {
         results[i] = sample_some(filename, Polynomial{polynomial, SplitTag{}},
                                  options, num_threads);
+    };
+    static_assert(std::is_nothrow_copy_constructible<decltype(func)>::value,
+                  TCM_BUG_MESSAGE);
+    detail::parallel_for(
+        0, options.steps[0], std::move(func), /*cutoff=*/1,
+        /*num_threads=*/static_cast<int>(std::get<0>(num_threads)));
+    return merge(std::move(results));
+}
+
+auto parallel_sample_difference(std::string const&             new_state,
+                                std::string const&             old_state,
+                                Polynomial const&              polynomial,
+                                Options const&                 options,
+                                std::tuple<unsigned, unsigned> num_threads)
+    -> ChainResult
+{
+    std::vector<ChainResult> results(options.steps[0]);
+
+    auto func = [&new_state, &old_state, &polynomial, &options,
+                 num_threads = static_cast<int>(std::get<1>(num_threads)),
+                 results     = results.data()](int64_t const i) {
+        results[i] = sample_difference(new_state, old_state,
+                                 Polynomial{polynomial, SplitTag{}}, options,
+                                 num_threads);
     };
     static_assert(std::is_nothrow_copy_constructible<decltype(func)>::value,
                   TCM_BUG_MESSAGE);

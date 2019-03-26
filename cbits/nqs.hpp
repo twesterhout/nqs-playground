@@ -1350,6 +1350,8 @@ class Polynomial {
     std::shared_ptr<Heisenberg const> _hamiltonian;
     /// List of terms.
     std::vector<Term> _terms;
+    /// Scale
+    real_type _scale;
     /// The result of applying the polynomial to a state `|ψ⟩`
     /// can be written as ∑cᵢ|σᵢ⟩. `_basis` is the set {|σᵢ⟩}.
     std::vector<SpinVector, boost::alignment::aligned_allocator<SpinVector, 64>>
@@ -1361,7 +1363,7 @@ class Polynomial {
   public:
     /// Constructs the polynomial given the hamiltonian and a list or terms.
     Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
-               std::vector<Term>                 terms);
+               std::vector<Term> terms, real_type scale);
 
     Polynomial(Polynomial const&)           = delete;
     Polynomial(Polynomial&& other) noexcept = default;
@@ -1373,6 +1375,7 @@ class Polynomial {
         , _old{}
         , _hamiltonian{other._hamiltonian}
         , _terms{other._terms}
+        , _scale{other._scale}
         , _basis{}
         , _coeffs{}
     {
@@ -1854,8 +1857,8 @@ struct alignas(32) ChainState {
         TCM_ASSERT(spin == other.spin,
                    "only states with the same spin can be merged");
         TCM_ASSERT(isclose(value, other.value),
-                   "Different forward passes with the same input should "
-                   "produce the same results");
+                   fmt::format("Different forward passes with the same input should "
+                   "produce the same results: {} != {}", value, other.value));
         count += other.count;
     }
 };
@@ -1924,6 +1927,9 @@ struct ChainResult {
     }
 
     auto samples() && noexcept -> SamplesT { return std::move(_samples); }
+
+    auto values() const -> torch::Tensor;
+    auto values(torch::Tensor const&) -> void;
 
     auto to_tensors() const
         -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
@@ -2459,9 +2465,38 @@ inline auto sample_some(std::string const& filename,
     return sample_some(state, options);
 }
 
+inline auto sample_difference(std::string const& new_state, std::string const&
+        old_state, Polynomial polynomial, Options const& options, int
+        num_threads = -1) -> ChainResult
+{
+    if (num_threads <= 0) { num_threads = omp_get_max_threads(); }
+    auto old_forward =
+        detail::load_forward_fn(old_state, static_cast<size_t>(num_threads));
+    auto            new_forward = detail::load_forward_fn(new_state);
+    PolynomialState state{
+        std::move(old_forward), std::move(polynomial),
+        std::make_tuple(options.batch_size, options.number_spins)};
+    return sample_some(
+        [&state, &new_forward](auto const& x) {
+            // TODO(twesterhout): This is an extremely ugly implementation,
+            // but it should suffice for the testing purposes.
+            return state(x)
+                   - new_forward(x.tensor().view({1, -1}))
+                         .template item<float>();
+        },
+        options);
+}
+
 auto parallel_sample_some(std::string const& filename,
                           Polynomial const& polynomial, Options const& options,
                           std::tuple<unsigned, unsigned> num_threads)
+    -> ChainResult;
+
+auto parallel_sample_difference(std::string const&             new_state,
+                                std::string const&             old_state,
+                                Polynomial const&              polynomial,
+                                Options const&                 options,
+                                std::tuple<unsigned, unsigned> num_threads)
     -> ChainResult;
 
 #if 0

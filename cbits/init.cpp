@@ -168,7 +168,8 @@ inline auto bind_polynomial(py::module m) -> void
         .def(
             py::init([](std::shared_ptr<Heisenberg>                        h,
                         std::vector<std::pair<complex_type,
-                                              optional<real_type>>> const& ts) {
+                                              optional<real_type>>> const& ts,
+                        real_type const                                    c) {
                 // TODO(twesterhout): This function performs an ugly
                 // copy... I know it doesn't matter from performance point
                 // of view, but it still bugs me.
@@ -180,9 +181,9 @@ inline auto bind_polynomial(py::module m) -> void
                                    return {t.first, t.second};
                                });
                 return std::make_unique<Polynomial>(std::move(h),
-                                                    std::move(terms));
+                                                    std::move(terms), c);
             }),
-            py::arg("hamiltonian"), py::arg("terms"),
+            py::arg("hamiltonian"), py::arg("terms"), py::arg("scale") = 1.0,
             R"EOF(
                  Given a Hamiltonian H and terms (cᵢ, εᵢ) (i ∈ {0, 1, ..., n-1})
                  constructs the following polynomial
@@ -239,6 +240,22 @@ inline auto bind_options(py::module m) -> void
              [](Options const& self) { return fmt::format("{}", self); });
 }
 
+inline auto bind_result(py::module m) -> void
+{
+    using namespace tcm;
+    py::class_<ChainResult>(m, "ChainResult")
+        .def("values", [](ChainResult const& self) { return self.values(); })
+        .def("values",
+             [](ChainResult& self, torch::Tensor new_values) {
+                 return self.values(new_values);
+             })
+        .def("to_tensors",
+             [](ChainResult const& self) { return self.to_tensors(); })
+        .def("merge", [](ChainResult& self, ChainResult const& other) {
+            self = merge(self, other);
+        });
+}
+
 inline auto bind_sample(py::module m) -> void
 {
     using namespace tcm;
@@ -265,10 +282,26 @@ inline auto bind_sample(py::module m) -> void
                 py::module::import("sys").attr("stdout") // Python output
             );
             return tcm::parallel_sample_some(filename, polynomial, options,
-                                             num_threads)
-                .to_tensors();
+                                             num_threads);
+            // .to_tensors();
         },
         py::arg{"filename"}, py::arg{"polynomial"}, py::arg{"options"},
+        py::arg{"num_threads"} // , py::call_guard<py::gil_scoped_release>()
+    );
+
+    m.def(
+        "sample_difference",
+        [](std::string const& new_state, std::string const& old_state, Polynomial const& polynomial,
+           Options const& options, std::tuple<unsigned, unsigned> num_threads) {
+            py::scoped_ostream_redirect stream(
+                std::cout,                               // std::ostream&
+                py::module::import("sys").attr("stdout") // Python output
+            );
+            return tcm::parallel_sample_difference(
+                new_state, old_state, polynomial, options, num_threads);
+            // .to_tensors();
+        },
+        py::arg{"current"}, py::arg{"old"}, py::arg{"polynomial"}, py::arg{"options"},
         py::arg{"num_threads"} // , py::call_guard<py::gil_scoped_release>()
     );
 }
@@ -317,6 +350,7 @@ PYBIND11_MODULE(_C_nqs, m)
     bind_heisenberg(m);
     bind_polynomial(m);
     bind_options(m);
+    bind_result(m);
     bind_sample(m);
 
     m.def("say_hi", []() {
