@@ -64,7 +64,7 @@ from torch.utils.data import TensorDataset, DataLoader
 # import torch.nn as nn
 # import torch.nn.functional as F
 
-from nqs_playground.core import CompactSpin, negative_log_overlap_real, import_network
+from nqs_playground.core import CompactSpin, negative_log_overlap_real, import_network, load_explicit, ExplicitState
 from nqs_playground.monte_carlo import all_spins
 from nqs_playground.hamiltonian import read_hamiltonian
 import nqs_playground._C_nqs as _C
@@ -353,6 +353,63 @@ def switch_to_other_net(φ, ψ, config):
     #     φ_phase, TensorDataset(samples, target_phases), config["phase"]
     # )
     return φ_amplitude, φ_phase
+
+
+class FastCombiningState(torch.jit.ScriptModule):
+    def __init__(self, amplitude, phase):
+        super().__init__()
+        self._amplitude = amplitude
+        self._phase = phase
+
+    @property
+    def number_spins(self):
+        return self._amplitude.number_spins
+
+    @torch.jit.script_method
+    def forward(self, x):
+        A = self._amplitude(x)
+        _, phi = torch.max(self._phase(x), dim=1, keepdim=True)
+        phi = 1 - 2 * phi
+        return A * phi.float()
+
+
+def load_overlap_states(samples):
+    phi_dicts = []
+    phis = []
+    phis_s = []
+    energies = []
+    labels = []
+
+    for idx in range(20):
+        f = open('./vectors/vector_' + str(idx) + '.txt', 'rb')
+        energies.append(float(f.readline()[2:]))
+        labels.append(int(f.readline()[2:]))
+
+        phi_dicts.append(load_explicit(f)[0])
+        phis.append(ExplicitState(phi_dicts[-1]))
+        phis_s.append(phis[-1](samples))
+    return phis_s, energies, labels
+
+def print_overlaps(ψ_phase, ψ_amplitude, samples, phis_s, energies, labels)
+    torch.jit.save(ψ_phase, 'phase.temp')
+    torch.jit.save(ψ_amplitude, 'amplitude.temp')
+
+    ψ_phase_overlap = torch.jit.load('phase.temp')
+    ψ_amplitude_overlap = torch.jit.load('amplitude.temp')
+    φ_overlap = FastCombiningState(ψ_amplitude_overlap, ψ_phase_overlap)
+    psi_s = φ_overlap(samples)
+
+    y = psi_s.detach().view(-1).numpy()
+    overlap_wr_deg = 0.0
+    prev_label = 0
+    for idx in range(len(phis_s)): 
+        x = phis_s[idx].detach().view(-1).numpy().view(dtype=np.complex64)
+        if labels[idx] == prev_label:
+            overlap_wr_deg += (np.abs(np.dot(x.conj(), y)) / np.linalg.norm(x) / np.linalg.norm(y)) ** 2
+        else:
+            logging.info("overlap with energy {} = {}".format(energies[idx - 1], np.sqrt(overlap_wr_deg)))
+            prev_label = labels[idx]
+            overlap_wr_deg = (np.abs(np.dot(x.conj(), y)) / np.linalg.norm(x) / np.linalg.norm(y)) ** 2
 
 
 _KAGOME_18_SYMMETRIES = [
