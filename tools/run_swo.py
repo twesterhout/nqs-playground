@@ -67,7 +67,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from nqs_playground.core import CompactSpin, negative_log_overlap_real, import_network, load_explicit, ExplicitState
 from nqs_playground.monte_carlo import all_spins
 from nqs_playground.hamiltonian import read_hamiltonian
-import nqs_playground._C_nqs as _C
+import _C_nqs as _C
 
 
 class CombiningState(torch.jit.ScriptModule):
@@ -114,9 +114,11 @@ def optimise_scale(ψ, dataset):
         return -B / A
 
 
-def train_amplitude(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
+def train_amplitude(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config, GPU = False):
     logging.info("Learning amplitudes...")
     start = time.time()
+    if GPU:
+        ψ = ψ.cuda()
 
     epochs = config["epochs"]
     batch_size = config["batch_size"]
@@ -130,6 +132,9 @@ def train_amplitude(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, conf
     for i in range(epochs):
         losses = []
         for samples, target in dataloader:
+            if GPU:
+                samples = samples.cuda()
+                target = target.cuda()
             optimiser.zero_grad()
             loss = loss_fn(ψ(samples), target)
             losses.append(loss.item())
@@ -149,12 +154,17 @@ def train_amplitude(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, conf
 
     finish = time.time()
     logging.info("Done in {:.2f} seconds!".format(finish - start))
+    if GPU:
+        ψ = ψ.cpu()
     return ψ
 
 
-def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
+def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config, GPU = False):
     logging.info("Learning phases...")
     start = time.time()
+
+    if GPU:
+        ψ = ψ.cuda()
 
     epochs = config["epochs"]
     batch_size = config["batch_size"]
@@ -168,6 +178,9 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
 
     indices = torch.arange(len(dataset))
     samples_whole, target_whole = dataset[indices]
+    if GPU:
+        samples_whole = samples_whole.cuda()
+        target_whole = target_whole.cuda()
     del indices
 
     def accuracy():
@@ -179,6 +192,10 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
     for i in range(epochs):
         losses = []
         for samples, target in dataloader:
+            if GPU:
+                samples = samples.cuda()
+                target = target.cuda()
+
             optimiser.zero_grad()
             loss = loss_fn(ψ(samples), target)
             losses.append(loss.item())
@@ -199,11 +216,13 @@ def train_phase(ψ: torch.nn.Module, dataset: torch.utils.data.Dataset, config):
 
     finish = time.time()
     logging.info("Done in {:.2f} seconds!".format(finish - start))
+    if GPU:
+        ψ = ψ.cpu()
     return ψ
 
 
 def generate_train_data(filename, config):
-    explicit = False  # True
+    explicit = False
     number_spins = config["number_spins"]
     magnetisation = config["magnetisation"]
     poly = _C.Polynomial(config["hamiltonian"], config["roots"])
@@ -328,10 +347,10 @@ def swo_step(ψ, config):
         target_phases = torch.where(φ >= 0.0, torch.tensor([0]), torch.tensor([1]))
         logging.info("Training on {} spin configurations...".format(samples.size(0)))
         ψ_amplitude = train_amplitude(
-            ψ_amplitude, TensorDataset(samples, target_amplitudes), config["amplitude"]
+            ψ_amplitude, TensorDataset(samples, target_amplitudes), config["amplitude"], GPU = True
         )
         ψ_phase = train_phase(
-            ψ_phase, TensorDataset(samples, target_phases), config["phase"]
+            ψ_phase, TensorDataset(samples, target_phases), config["phase"], GPU = True
         )
     return ψ_amplitude, ψ_phase
 
@@ -390,7 +409,7 @@ def load_overlap_states(samples):
         phis_s.append(phis[-1](samples))
     return phis_s, energies, labels
 
-def print_overlaps(ψ_phase, ψ_amplitude, samples, phis_s, energies, labels)
+def print_overlaps(ψ_phase, ψ_amplitude, samples, phis_s, energies, labels):
     torch.jit.save(ψ_phase, 'phase.temp')
     torch.jit.save(ψ_amplitude, 'amplitude.temp')
 
@@ -464,21 +483,21 @@ _KAGOME_18_SYMMETRIES = [
 ]
 
 
-AmplitudeNet = import_network("test_net.py")
+AmplitudeNet = import_network("../nqs-playground/nqs_playground/extra_files/small.py")
 
-PhaseNet = import_network("phase.py")
+PhaseNet = import_network("../nqs-playground/nqs_playground/extra_files/phase.py")
 
 _CHAIN_10 = {
     "number_spins": 10,
     "magnetisation": 0,
-    "hamiltonian": read_hamiltonian("data/1x10.hamiltonian").to_cxx(),
+    "hamiltonian": read_hamiltonian("../nqs-playground/nqs_playground/extra_files/1x10.hamiltonian").to_cxx(),
     "roots": [
         (1.0200078895671043 + 0.8629637153606778j, None),
         (1.0200078895671043 - 0.8629637153606778j, None),
     ],
     "epochs": 20,
     "output": "result.1x10/swo",
-    "steps": (8, 50, 250, 1),
+    "steps": (4, 50, 250, 1),
     "difference_sampling": True,
     "amplitude": {
         "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.0005),
@@ -497,19 +516,19 @@ _CHAIN_10 = {
 _KAGOME_18 = {
     "number_spins": 18,
     "magnetisation": 0,
-    "hamiltonian": read_hamiltonian("data/Kagome-18.hamiltonian").to_cxx(),
+    "hamiltonian": read_hamiltonian("../nqs-playground/nqs_playground/extra_files/Kagome-18.hamiltonian").to_cxx(),
     "roots": [
         (1.0200078895671043 + 0.8629637153606778j, None),
         (1.0200078895671043 - 0.8629637153606778j, None),
     ],
     "epochs": 100,
     "output": "result/swo",
-    "steps": (16, 100, 2100, 1),
+    "steps": (4, 100, 2100, 1),
     "difference_sampling": True,
     "amplitude": {
-        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.001),
+        "optimiser": lambda p: torch.optim.Adam(p.parameters(), lr=0.003),
         "epochs": 1000,
-        "batch_size": 256,
+        "batch_size": 4096,
         "loss": lambda x, y: negative_log_overlap_real(x, y),
     },
     "phase": {
@@ -520,7 +539,7 @@ _KAGOME_18 = {
     },
 }
 
-_OPTIONS = _CHAIN_10  # _KAGOME_18
+_OPTIONS = _CHAIN_10
 
 
 def main():
@@ -539,9 +558,9 @@ def main():
     for i in range(_OPTIONS["epochs"]):
         logging.info("-" * 10 + str(i + 1) + "-" * 10)
         ψ_amplitude, ψ_phase = swo_step((ψ_amplitude, ψ_phase), _OPTIONS)
-        CombiningState(ψ_amplitude, ψ_phase).save(
-            "{}.model.{}.pt".format(_OPTIONS["output"], i + 1)
-        )
+        #CombiningState(ψ_amplitude, ψ_phase).save(
+        #    "{}.model.{}.pt".format(_OPTIONS["output"], i + 1)
+        #)
 
 
 if __name__ == "__main__":
