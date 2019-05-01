@@ -26,27 +26,15 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "nqs.hpp"
+#pragma once
 
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wmissing-prototypes"
-#endif
-PYBIND11_MODULE(_C_nqs, m)
-{
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic pop
-#endif
-    m.doc() = R"EOF()EOF";
+#include "config.hpp"
+#include <random>
 
-    using namespace tcm;
+TCM_NAMESPACE_BEGIN
 
-    bind_spin(m);
-    bind_heisenberg(m);
-    bind_polynomial(m);
-    bind_options(m);
-    bind_chain_result(m);
-    bind_sampling(m);
-    bind_networks(m);
-    bind_dataloader(m);
-}
+using RandomGenerator = std::mt19937;
+
+auto global_random_generator() -> RandomGenerator&;
+
+TCM_NAMESPACE_END
