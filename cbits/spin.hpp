@@ -231,6 +231,8 @@ class TCM_EXPORT SpinVector {
     unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
                      torch::Tensor dst, Projection proj) -> void;
 
+    static auto numpy_dtype() -> pybind11::dtype;
+
   private:
     // [private junk] {{{
     static constexpr auto get_bit(uint16_t const x,
@@ -700,7 +702,7 @@ inline auto get_store_mask_for(unsigned const rest) TCM_NOEXCEPT -> __m256i
         _mm256_set_epi32(-1, -1, -1, -1, -1, -1, -1, -1),
     };
     // clang-format on
-    TCM_ASSERT(0 <= rest && rest <= 8, "Invalid value for `rest`");
+    TCM_ASSERT(rest <= 8, "Invalid value for `rest`");
     return masks[rest];
 }
 } // namespace detail
