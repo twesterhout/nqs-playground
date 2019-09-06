@@ -1,4 +1,10 @@
+import numpy as np
 import torch
+
+# NOTE(twesterhout): Yes, it's not nice to depend on internal functions, but
+# it's so tiring to reimplement _with_file_like every time...
+from torch.serialization import _with_file_like
+
 import nqs_playground._C_nqs as _C
 
 
@@ -17,12 +23,10 @@ class SpinDataset(torch.utils.data.Dataset):
     """
 
     def __init__(self, spins, values, unpack=False):
-        size = lambda x, i: x.size(i) if isinstance(x, torch.Tensor) else x.shape[i]
-        if size(spins, 0) != size(values, 0):
+        if spins.shape[0] != values.shape[0]:
             raise ValueError(
-                "spins and values must have the same size of the first dimension, but {} != {}".format(
-                    size(spins, 0), size(values, 0)
-                )
+                "spins and values must have the same size of the first dimension, but "
+                "spins.shape={} != values.shape={}".format(spins.shape, values.shape)
             )
         if not isinstance(unpack, bool):
             raise ValueError(
@@ -31,10 +35,9 @@ class SpinDataset(torch.utils.data.Dataset):
         self.spins = spins
         self.values = values
         self.unpack = unpack
-        self._size = size(spins, 0)
 
     def __len__(self) -> int:
-        return self._size
+        return self.spins.shape[0]
 
     def __getitem__(self, index):
         if self.unpack:
@@ -118,3 +121,54 @@ def make_spin_dataloader(
     return torch.utils.data.DataLoader(
         dataset, batch_size=1, shuffle=False, sampler=sampler, collate_fn=lambda x: x[0]
     )
+
+
+def random_split(dataset, k, replacement=False, weights=None):
+    r"""Randomly splits dataset into two parts.
+
+    :param dataset: a tuple of NumPy arrays or Torch tensors.
+    :param k: either a ``float`` or an ``int`` specifying the size of the first
+        part. If ``k`` is a ``float``, then it must lie in ``[0, 1]`` and is
+        understood as a fraction of the whole dataset. If ``k`` is an ``int``,
+        then it specifies the number of elements.
+    :param weights: specifies how elements for the first part are chosen. If
+        ``None``, uniform sampling is used. Otherwise elements are sampled from
+        a multinomial distribution with probabilities proportional to ``weights``.
+    """
+    if not all(
+        (isinstance(x, np.ndarray) or isinstance(x, torch.Tensor) for x in dataset)
+    ):
+        raise ValueError("dataset should be a tuple of NumPy arrays or Torch tensors")
+    n = dataset[0].shape[0]
+    if not all((x.shape[0] == n for x in dataset)):
+        raise ValueError(
+            "all elements of dataset should have the same size along the first dimension"
+        )
+
+    if isinstance(k, float):
+        if k < 0.0 or k > 1.0:
+            raise ValueError("k should be in [0, 1]; got k={}".format(k))
+        k = round(k * n)
+    elif isinstance(k, int):
+        if k < 0 or k > n:
+            raise ValueError("k should be in [0, {}]; got k={}".format(n, k))
+    else:
+        raise ValueError("k must be either an int or a float; got {}".format(type(k)))
+
+    if weights is None:
+        # Uniform sampling
+        if replacement:
+            indices = torch.randint(n, size=k)
+        else:
+            indices = torch.randperm(n)[:k]
+    else:
+        # Sampling with specified weights
+        indices = torch.multinomial(weights, num_samples=k, replacement=replacement)
+
+    remaining_indices = np.setdiff1d(
+        np.arange(n), indices, assume_unique=not replacement
+    )
+    return [
+        tuple(x[indices] for x in dataset),
+        tuple(x[remaining_indices] for x in dataset),
+    ]
