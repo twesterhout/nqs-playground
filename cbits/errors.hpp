@@ -67,13 +67,11 @@ template <class T, class... Ts>
 auto noexcept_format(T&& fmt, Ts&&... args) noexcept -> std::string
 {
     try {
-        auto s = fmt::format(std::forward<T>(fmt), std::forward<Ts>(args)...);
-        return std::move(s);
+        return fmt::format(std::forward<T>(fmt), std::forward<Ts>(args)...);
     }
     catch (...) {
         try {
-            auto s = std::string{};
-            return std::move(s);
+            return std::string{};
         }
         catch (...) {
             std::fprintf(

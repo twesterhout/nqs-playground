@@ -369,6 +369,35 @@ class TCM_EXPORT SpinVector {
         }
     }
 
+  public:
+    auto find_nth_up(unsigned n) const TCM_NOEXCEPT -> unsigned
+    {
+        ++n;
+        auto i = 0u;
+        while (true) {
+            if (unsafe_at(i) == Spin::up) {
+                if (--n == 0) { break; }
+            }
+            ++i;
+            TCM_ASSERT(i < size(), "");
+        }
+        return i;
+    }
+
+    auto find_nth_down(unsigned n) const TCM_NOEXCEPT -> unsigned
+    {
+        ++n;
+        auto i = 0u;
+        while (true) {
+            if (unsafe_at(i) == Spin::down) {
+                if (--n == 0) { break; }
+            }
+            ++i;
+            TCM_ASSERT(i < size(), "");
+        }
+        return i;
+    }
+
   private:
     class SpinReference {
       public:

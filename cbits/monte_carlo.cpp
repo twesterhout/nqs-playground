@@ -27,6 +27,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "monte_carlo.hpp"
+#include "monte_carlo_v2.hpp"
 #include "common.hpp"
 
 #include <gsl/gsl-lite.hpp>
@@ -378,6 +379,12 @@ auto bind_options(pybind11::module m) -> void
              [](Options const& self) { return fmt::format("{}", self); })
         .def("__repr__",
              [](Options const& self) { return fmt::format("{}", self); });
+
+    py::class_<_Options>(m, "_Options")
+        .def(py::init<unsigned, int, unsigned, unsigned, unsigned, unsigned>(),
+             py::arg{"number_spins"}, py::arg{"magnetisation"},
+             py::arg{"number_chains"}, py::arg{"number_samples"},
+             py::arg{"sweep_size"}, py::arg{"number_discarded"});
 }
 
 auto bind_chain_result(pybind11::module m) -> void
@@ -428,9 +435,29 @@ auto bind_chain_result(pybind11::module m) -> void
         });
 }
 
+template <class T, class Allocator>
+inline auto to_numpy_array(std::vector<T, Allocator>&& xs) -> pybind11::array
+{
+    using V         = std::vector<T, Allocator>;
+    auto const size = xs.size();
+    auto const data = xs.data();
+    auto       base = pybind11::capsule{new V{std::move(xs)},
+                                  [](void* p) { delete static_cast<V*>(p); }};
+    return py::array_t<T>{size, data, std::move(base)};
+}
+
 auto bind_sampling(pybind11::module m) -> void
 {
     namespace py = pybind11;
+
+    m.def("_sample_some",
+          [](std::string const& filename, _Options const& options) {
+              auto r      = v2::sample_some(filename, options);
+              auto spins  = to_numpy_array(std::move(std::get<0>(r)));
+              auto values = to_numpy_array(std::move(std::get<1>(r)));
+              return std::make_tuple(spins, values, std::get<2>(r));
+          });
+
     m.def("sample_target_state",
           [](CombiningState const& psi, Polynomial const& polynomial,
              Options const& options, int num_threads) {

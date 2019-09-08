@@ -27,6 +27,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "nqs.hpp"
+#include <pybind11/pybind11.h>
 
 #if defined(TCM_CLANG)
 #    pragma clang diagnostic push

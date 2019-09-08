@@ -30,10 +30,15 @@
 
 #include "config.hpp"
 #include "errors.hpp"
+#include <boost/align/is_aligned.hpp>
 #include <torch/types.h>
 
-#include <algorithm>
+#if defined(TCM_DEBUG)
+#include <c10/core/CPUAllocator.h>
+#endif
+
 #include <immintrin.h>
+#include <algorithm>
 
 TCM_NAMESPACE_BEGIN
 
@@ -89,6 +94,8 @@ template <> struct ToScalarType<int64_t> {
 template <class T, class... Ints>
 auto make_tensor(Ints... dims) -> torch::Tensor
 {
+    static_assert(c10::gAlignment == 64U,
+                  "It is assumed that PyTorch tensors are aligned to 64 bytes");
     // TODO(twesterhout): This could overflow if one of `dims` is of type
     // `uint64_t` and is huge.
     auto out = torch::empty({static_cast<int64_t>(dims)...},
@@ -97,11 +104,9 @@ auto make_tensor(Ints... dims) -> torch::Tensor
                                 .requires_grad(false));
     TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
                                     "using `torch::empty` are contiguous");
-    // TODO(twesterhout): I really want that, but in PyTorch v1.0.1 only tensors
-    // larger than 5120 bytes have 64 byte alignment.
-    // TCM_ASSERT(boost::alignment::is_aligned(64, out.template data<T>()),
-    //            "it is assumed that tensors allocated using `torch::empty` are "
-    //            "aligned to 64-byte boundary");
+    TCM_ASSERT(boost::alignment::is_aligned(64U, out.template data<T>()),
+               "it is assumed that tensors allocated using `torch::empty` are "
+               "aligned to 64-byte boundary");
     return out;
 }
 } // namespace detail

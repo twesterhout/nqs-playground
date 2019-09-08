@@ -308,23 +308,21 @@ auto PolynomialState::time_psi() const -> std::pair<real_type, real_type>
 
 auto load_forward_fn(std::string const& filename) -> ForwardT
 {
-    auto module = torch::jit::load(filename);
-    TCM_CHECK(
-        module != nullptr, std::runtime_error,
-        fmt::format("could not load torch::jit::script::Module from \"{}\"",
-                    filename));
-    auto& method = module->get_method("forward");
-
     struct Function {
-        torch::jit::script::Method&                 _method;
-        std::shared_ptr<torch::jit::script::Module> _module;
+        torch::jit::script::Module _module;
+        torch::jit::script::Method _method;
+
+        Function(torch::jit::script::Module&& m)
+            : _module{std::move(m)}, _method{_module.get_method("forward")}
+        {}
 
         auto operator()(torch::Tensor const& input) -> torch::Tensor
         {
             return _method({input}).toTensor();
         }
     };
-    return Function{method, std::move(module)};
+    return [f = std::make_shared<Function>(torch::jit::load(filename))](
+               auto const& x) { return (*f)(x); };
 }
 
 auto load_forward_fn(std::string const& filename, size_t count)

@@ -589,6 +589,7 @@ auto bind_spin(pybind11::module m) -> void
         .def_property_readonly_static("dtype", [](py::object /*self*/) {
             return SpinVector::numpy_dtype();
         });
+    SpinVector::numpy_dtype();
 
     m.def("random_spin",
           [](unsigned const size, optional<int> magnetisation) {
@@ -624,6 +625,12 @@ auto bind_spin(pybind11::module m) -> void
             return *xs.data(i);
         },
         py::arg{"array"}.noconvert(), py::arg{"index"});
+
+    m.def(
+        "unsafe_set",
+        [](py::array_t<SpinVector, py::array::c_style> xs, size_t const i,
+           SpinVector const& spin) { *xs.mutable_data(i) = spin; },
+        py::arg{"array"}.noconvert(), py::arg{"index"}, py::arg{"spin"});
 
     m.def(
         "unpack",
@@ -663,6 +670,19 @@ auto bind_spin(pybind11::module m) -> void
                 [data = array.data()](auto const i) { return data[i]; });
         },
         py::arg{"array"}.noconvert(), py::arg{"indices"}.noconvert());
+
+    m.def(
+        "pack",
+        [](torch::Tensor tensor) {
+            auto accessor = tensor.accessor<float, 2>();
+            auto array = py::array{SpinVector::numpy_dtype(), accessor.size(0)};
+            auto const data = static_cast<SpinVector*>(array.mutable_data());
+            for (auto i = int64_t{0}; i < accessor.size(0); ++i) {
+                data[i] = SpinVector{accessor[i]};
+            }
+            return array;
+        },
+        py::arg{"spins"}.noconvert());
 }
 
 TCM_NAMESPACE_END

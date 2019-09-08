@@ -32,8 +32,9 @@
 #include "errors.hpp"
 #include <boost/align/aligned_allocator.hpp>
 #include <mkl.h>
-#include <sleef.h>
+// #include <sleef.h>
 #include <torch/extension.h>
+#include <immintrin.h>
 
 #if defined(TCM_GCC)
 #    pragma GCC diagnostic push
@@ -101,10 +102,11 @@ struct Softplus {
 struct Tanh {
     auto operator()(float const x) const noexcept -> float
     {
-        return Sleef_tanhf_u10(x);
-        // return std::tanh(x);
+        // return Sleef_tanhf_u10(x);
+        return std::tanh(x);
     }
 
+#if 0
     auto operator()(__m128 const x) const noexcept -> __m128
     {
         return Sleef_tanhf4_u10sse4(x);
@@ -114,6 +116,7 @@ struct Tanh {
     {
         return Sleef_tanhf8_u10avx(x);
     }
+#endif
 
     auto operator()(torch::Tensor const& input) const -> torch::Tensor
     {
