@@ -1,9 +1,12 @@
+import os
+import sys
+
 import numpy as np
 import torch
 
 # NOTE(twesterhout): Yes, it's not nice to depend on internal functions, but
 # it's so tiring to reimplement _with_file_like every time...
-from torch.serialization import _with_file_like
+from torch.serialization import _with_file_like as with_file_like
 
 import nqs_playground._C_nqs as _C
 
@@ -172,3 +175,25 @@ def random_split(dataset, k, replacement=False, weights=None):
         tuple(x[indices] for x in dataset),
         tuple(x[remaining_indices] for x in dataset),
     ]
+
+
+def import_network(filename: str):
+    r"""Loads ``Net`` class defined in Python source file ``filename``."""
+    import importlib
+
+    module_name, extension = os.path.splitext(os.path.basename(filename))
+    module_dir = os.path.dirname(filename)
+    if extension != ".py":
+        raise ValueError(
+            "Could not import the network from {!r}: ".format(filename)
+            + "not a Python source file."
+        )
+    if not os.path.exists(filename):
+        raise ValueError(
+            "Could not import the network from {!r}: ".format(filename)
+            + "no such file or directory"
+        )
+    sys.path.insert(0, module_dir)
+    module = importlib.import_module(module_name)
+    sys.path.pop(0)
+    return module.Net
