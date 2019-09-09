@@ -459,7 +459,7 @@ class PolynomialState {
             , _num_spins{num_spins}
         {
             // Access the memory to make sure it belongs to us
-            if (batch_size * num_spins != 0) { *_buffer.data<float>() = 0.0f; }
+            // if (batch_size * num_spins != 0) { *_buffer.data<float>() = 0.0f; }
         }
 
         Worker(Worker const&)     = delete;

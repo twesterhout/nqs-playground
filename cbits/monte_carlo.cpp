@@ -384,7 +384,13 @@ auto bind_options(pybind11::module m) -> void
         .def(py::init<unsigned, int, unsigned, unsigned, unsigned, unsigned>(),
              py::arg{"number_spins"}, py::arg{"magnetisation"},
              py::arg{"number_chains"}, py::arg{"number_samples"},
-             py::arg{"sweep_size"}, py::arg{"number_discarded"});
+             py::arg{"sweep_size"}, py::arg{"number_discarded"})
+        .def_readonly("number_spins", &_Options::number_spins)
+        .def_readonly("magnetisation", &_Options::magnetisation)
+        .def_readonly("number_chains", &_Options::number_chains)
+        .def_readonly("number_samples", &_Options::number_samples)
+        .def_readonly("sweep_size", &_Options::sweep_size)
+        .def_readonly("number_discarded", &_Options::number_discarded);
 }
 
 auto bind_chain_result(pybind11::module m) -> void
