@@ -1,163 +1,72 @@
 #!/usr/bin/env python3
 
-import cmath
-from copy import deepcopy
-import enum
-import itertools
-import logging
-import math
+from collections import namedtuple
 import glob
+from math import sqrt
 import os
-import pwd  # Used by Scratch.getusername() function
+import pickle
+import pwd
 import sys
 import tempfile
 import time
 from typing import Dict, List, Tuple, Optional
-import pickle
-
-import numpy as np
 
 import cProfile
+import numpy as np
 
-# from mpi4py import MPI
 import ignite
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
 import ignite.contrib.handlers.tqdm_logger
 
-import collections
+import torch
+from torch.utils.tensorboard import SummaryWriter
+
+from tqdm import tqdm
 
 from nqs_playground import _C
 from nqs_playground.core import ExplicitState, load_explicit
 from nqs_playground.hamiltonian import read_hamiltonian
-
 import training as _core
 
-from tqdm import tqdm
 
-# from nqs_playground import mpi
-import torch
-from torch.utils.tensorboard import SummaryWriter
+def sample_some(
+    ψ: torch.jit.ScriptModule, options: _C._Options, explicit: bool = False
+) -> Tuple[np.ndarray, torch.FloatTensor, float]:
+    r"""Runs Monte Carlo sampling for state ψ.
 
-
-class _Train(object):
+    If ``explicit`` is ``False``, we sample from ``|ψ|²``. Otherwise, we simply
+    use the whole Hilbert space basis (constraining the magnetisation)
     """
-    Temporary sets the module (i.e. a ``torch.nn.Module``) into training mode.
-
-    We rely on the following: if ``m`` is a module, then
-
-      * ``m.training`` returns whether ``m`` is currently in the training mode;
-      * ``m.train()`` puts ``m`` into training mode;
-      * ``m.eval()`` puts ``m`` into inference mode.
-
-    This class is meant to be used in the ``with`` construct:
-
-    .. code:: python
-
-       with _Train(m):
-           ...
-    """
-
-    def __init__(self, module):
-        """
-        :param module:
-            a ``torch.nn.Module`` or an intance of another class with the same
-            interface.
-        """
-        self._module = module
-        # Only need to update the mode if not already training
-        self._update = module.training == False
-
-    def __enter__(self):
-        if self._update:
-            self._module.train()
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self._update:
-            self._module.eval()
-
-
-class _Eval(object):
-    """
-    Temporary sets the network (i.e. a ``torch.nn.Module``) into inference mode.
-
-    We rely on the following: if ``m`` is a network, then
-
-      * ``m.training`` returns whether ``m`` is currently in the training mode;
-      * ``m.train()`` puts ``m`` into training mode;
-      * ``m.eval()`` puts ``m`` into inference mode.
-
-    This class is meant to be used in the ``with`` construct:
-
-    .. code:: python
-
-       with _Train(m):
-           ...
-    """
-
-    def __init__(self, module):
-        """
-        :param module:
-            a ``torch.nn.Module`` or an intance of another class with the same
-            interface.
-        """
-        self._module = module
-        # Only need to update the mode if currently training
-        self._update = module.training == True
-
-    def __enter__(self):
-        if self._update:
-            self._module.eval()
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self._update:
-            self._module.train()
-
-
-def _NumThreads(object):
-    """
-    Temporary changes the number of threads used by PyTorch.
-
-    This is useful when we, for example, want to run multiple different neural
-    networks in parallel rather than use multiple threads within a single
-    network.
-    """
-
-    def __init__(self, num_threads):
-        self._new = num_threads
-        self._old = torch.get_num_threads()
-
-    def __enter__(self):
-        if self._new != self._old:
-            torch.set_num_threads(self._new)
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self._new != self._old:
-            torch.set_num_threads(self._old)
-
-
-def sample_some(ψ: torch.jit.ScriptModule, options: _C._Options, explicit=False):
     if not explicit:
-        with torch.no_grad():
-            with tempfile.NamedTemporaryFile(delete=False) as f:
-                filename = f.name
-            try:
-                ψ.save(filename)
-                spins, values, acceptance = _C._sample_some(filename, options)
-                values = torch.from_numpy(values)
-                return spins, values, acceptance
-            finally:
-                os.remove(filename)
+        # Since torch.jit.ScriptModules can't be directly passed to C++
+        # code as torch::jit::script::Modules, we first save ψ to a
+        # temporary file and then load it back in C++ code.
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            filename = f.name
+        try:
+            ψ.save(filename)
+            spins, values, acceptance = _C._sample_some(filename, options)
+            values = torch.from_numpy(values)
+            return spins, values, acceptance
+        finally:
+            os.remove(filename)
     else:
         spins = _C.all_spins(options.number_spins, options.magnetisation)
         with torch.no_grad():
-            values = ψ.forward(_C.unpack(spins))
+            values = ψ.forward(_C.unpack(spins)).squeeze()
         return spins, values, 1.0
 
 
-def apply_polynomial(polynomial: _C.Polynomial, spins: np.ndarray, ψ):
+def apply_polynomial(
+    polynomial: _C.Polynomial, spins: np.ndarray, ψ: torch.jit.ScriptModule
+) -> torch.FloatTensor:
+    r"""Computes the target state coefficient for every σ in ``spins``.
+    
+    :param polynomial: Polynomial to apply to ψ.
+    :param spins: An array of :py:class:`CompactSpin` for which to compute the
+        coefficients.
+    :param ψ: Current state.
+    """
     r = torch.empty(spins.shape[0], dtype=torch.float32)
     for i in range(spins.shape[0]):
         polynomial(1.0, _C.unsafe_get(spins, i))
@@ -165,37 +74,9 @@ def apply_polynomial(polynomial: _C.Polynomial, spins: np.ndarray, ψ):
     return r
 
 
-class CombiningState(torch.nn.Module):
-    def __init__(self, amplitude, sign):
-        super().__init__()
-        self.amplitude = amplitude
-        self.sign = sign
-
-    def forward(self, x):
-        a = self.amplitude.forward(x).squeeze()
-        b = (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(dtype=torch.float32)
-        return a * b
-
-
-# def sign_prepare_batch(batch, device, non_blocking):
-#     x, y = batch
-#     if device is not None:
-#         x = x.to(device=device, non_blocking=non_blocking)
-#         y = y.to(device=device, non_blocking=non_blocking)
-#     y = torch.where(y >= 0, torch.tensor([0]), torch.tensor([1])).squeeze()
-#     return x, y
-#
-#
-# def amplitude_prepare_batch(batch, device, non_blocking):
-#     x, y = batch
-#     if device is not None:
-#         x = x.to(device=device, non_blocking=non_blocking)
-#         y = y.to(device=device, non_blocking=non_blocking)
-#     y = torch.abs(y).squeeze()
-#     return x, y
-
-
-def create_sign_trainer(model, optimiser):
+def _create_sign_trainer(
+    model: torch.nn.Module, optimiser: torch.optim.Optimizer
+) -> ignite.engine.Engine:
     r"""Creates an engine for training the network on the sign structure.
 
     Cross entropy is used as loss function.
@@ -205,7 +86,10 @@ def create_sign_trainer(model, optimiser):
     )
 
 
-def create_sign_evaluator(model):
+def _create_sign_evaluator(model: torch.nn.Module) -> ignite.engine.Engine:
+    r"""Creates an engine for evaluating how well the network learned the sign
+    structure.
+    """
     return create_supervised_evaluator(
         model,
         metrics={
@@ -217,10 +101,11 @@ def create_sign_evaluator(model):
     )
 
 
-def create_amplitude_trainer(model, optimiser):
+def _create_amplitude_trainer(model, optimiser):
     r"""Creates an engine for training the network on wavefunction amplitudes."""
 
-    def loss_fn(predicted, expected):
+    @torch.jit.script
+    def loss_fn(predicted: torch.Tensor, expected: torch.Tensor):
         predicted = predicted.squeeze()
         return (
             1
@@ -232,22 +117,34 @@ def create_amplitude_trainer(model, optimiser):
     return create_supervised_trainer(model, optimiser, loss_fn=loss_fn)
 
 
-def create_trainer(target, model, optimiser):
-    return {"sign": create_sign_trainer, "amplitude": create_amplitude_trainer}[target](
-        model, optimiser
-    )
+def _create_amplitude_evaluator(model):
+    return create_supervised_evaluator(model, metrics={"overlap": OverlapMetric()})
 
 
-def create_evaluators(target, model):
-    make = {"sign": create_sign_evaluator, "amplitude": create_amplitude_evaluator}[
+def create_trainer(
+    target: str, model: torch.nn.Module, optimiser: torch.optim.Optimizer
+) -> ignite.engine.Engine:
+    r"""Creates an engine for optimising either the amplitude of the sign of the
+    wavefunction.
+    """
+    return {"sign": _create_sign_trainer, "amplitude": _create_amplitude_trainer}[
+        target
+    ](model, optimiser)
+
+
+def create_evaluators(target: str, model: torch.nn.Module) -> ignite.engine.Engine:
+    make = {"sign": _create_sign_evaluator, "amplitude": _create_amplitude_evaluator}[
         target
     ]
-    return collections.namedtuple("Evaluators", ["training", "validation"])(
+    return namedtuple("Evaluators", ["training", "validation"])(
         make(model), make(model)
     )
 
 
 class OverlapMetric(ignite.metrics.metric.Metric):
+    r"""An Ignite metric for computing overlap of with the target state.
+    """
+
     def __init__(self, output_transform=lambda x: x):
         self._dot = None
         self._norm_predicted = None
@@ -261,9 +158,6 @@ class OverlapMetric(ignite.metrics.metric.Metric):
 
     def update(self, output):
         predicted, expected = output
-        predicted = predicted.squeeze()
-        expected = expected.squeeze()
-        assert torch.all(expected >= 0)
         self._dot += torch.dot(predicted, expected).item()
         self._norm_predicted += torch.norm(predicted).item() ** 2
         self._norm_expected += torch.norm(expected).item() ** 2
@@ -273,14 +167,10 @@ class OverlapMetric(ignite.metrics.metric.Metric):
             raise ignite.exceptions.NotComputableError(
                 "OverlapMetric must have at least one example before it can be computed."
             )
-        return abs(self._dot) / math.sqrt(self._norm_predicted * self._norm_expected)
+        return abs(self._dot) / sqrt(self._norm_predicted * self._norm_expected)
 
 
-def create_amplitude_evaluator(model):
-    return create_supervised_evaluator(model, metrics={"overlap": OverlapMetric()})
-
-
-class Trainer(object):
+class _Trainer(object):
     def __init__(self, target, model, dataset, output, config):
         self.target = target
         self.model = model
@@ -293,15 +183,7 @@ class Trainer(object):
         self.__add_loggers()
         self.__add_handlers()
 
-    def __add_engines(self):
-        self.trainer = create_trainer(self.target, self.model, self.optimiser)
-        self.evaluators = create_evaluators(self.target, self.model)
-
-    def __add_loggers(self):
-        self.tb_writer = SummaryWriter(log_dir=self.output, max_queue=1000)
-        self.tqdm_writer = ignite.contrib.handlers.tqdm_logger.ProgressBar()
-
-    def __add_loaders(self, dataset):
+    def __add_loaders(self, dataset: Tuple[torch.Tensor, torch.Tensor]):
         with torch.no_grad():
             x, y = dataset
             if self.target == "sign":
@@ -310,29 +192,32 @@ class Trainer(object):
                 y = torch.abs(y).squeeze()
             dataset = (x, y)
 
-            if self.config.train_fraction == 1.0:
-                self.loaders = collections.namedtuple(
-                    "Loaders", ["training", "validation"]
-                )(
-                    _core.make_spin_dataloader(
-                        *dataset, batch_size=self.config.train_batch_size
-                    ),
-                    None,
+        Loaders = namedtuple("Loaders", ["training", "validation"], defaults=[None])
+        # Special case when we don't want to use validation dataset
+        if self.config.train_fraction == 1.0:
+            self.loaders = Loaders(
+                _core.make_spin_dataloader(
+                    *dataset, batch_size=self.config.train_batch_size
                 )
-            else:
-                train, val = _core.random_split(
-                    dataset, self.config.train_fraction, weights=None, replacement=False
-                )
-                self.loaders = collections.namedtuple(
-                    "Loaders", ["training", "validation"]
-                )(
-                    _core.make_spin_dataloader(
-                        *train, batch_size=self.config.train_batch_size
-                    ),
-                    _core.make_spin_dataloader(
-                        *val, batch_size=self.config.val_batch_size
-                    ),
-                )
+            )
+        else:
+            train, val = _core.random_split(
+                dataset, self.config.train_fraction, weights=None, replacement=False
+            )
+            self.loaders = Loaders(
+                _core.make_spin_dataloader(
+                    *train, batch_size=self.config.train_batch_size
+                ),
+                _core.make_spin_dataloader(*val, batch_size=self.config.val_batch_size),
+            )
+
+    def __add_engines(self):
+        self.trainer = create_trainer(self.target, self.model, self.optimiser)
+        self.evaluators = create_evaluators(self.target, self.model)
+
+    def __add_loggers(self):
+        self.tb_writer = SummaryWriter(log_dir=self.output, max_queue=1000)
+        self.tqdm_writer = ignite.contrib.handlers.tqdm_logger.ProgressBar()
 
     def __add_handlers(self):
         self.tqdm_writer.attach(
@@ -341,6 +226,7 @@ class Trainer(object):
             closing_event_name=Events.COMPLETED,
         )
 
+        # TODO(twesterhout): Check how badly this hurts performance
         @self.trainer.on(Events.ITERATION_COMPLETED)
         def log_loss(engine):
             self.tb_writer.add_scalar(
@@ -422,6 +308,10 @@ class Trainer(object):
         self.load_best()
 
 
+def train(target, model, dataset, output, config):
+    _Trainer(target, model, dataset, output, config).run()
+
+
 class Runner(object):
     def __init__(self, config):
         self.config = config
@@ -429,6 +319,7 @@ class Runner(object):
         self.__load_model()
         self.mc_options = self.__build_options()
         self.polynomial = self.__build_polynomial()
+        self.compute_overlap = self.__load_exact()
         self._iteration = 0
 
     def __load_hamiltonian(self):
@@ -478,46 +369,71 @@ class Runner(object):
     def __build_polynomial(self):
         return _C.Polynomial(self.hamiltonian, self.config.roots)
 
+    def __load_exact(self):
+        if self.config.exact is None:
+            return None
+        _, y = _core.with_file_like(self.config.exact, "rb", pickle.load)
+        y = torch.from_numpy(y).squeeze()
+        x = _C.all_spins(self.mc_options.number_spins, self.mc_options.magnetisation)
+        dataset = _core.make_spin_dataloader(x, y, batch_size=2048)
+        evaluator = create_supervised_evaluator(
+            _core.CombiningState(self.amplitude, self.sign),
+            metrics={"overlap": OverlapMetric()},
+        )
+
+        def evaluate():
+            evaluator.run(dataset)
+            return evaluator.state.metrics["overlap"]
+
+        return evaluate
+
     def monte_carlo(self):
-        tqdm.write("Monte Carlo sampling from |ψ|²...")
+        tqdm.write("Monte Carlo sampling from |ψ|²...", end="")
         start = time.time()
         (spins, values, acceptance) = sample_some(
             self.amplitude, self.mc_options, explicit=True
         )
-        state = torch.jit.script(CombiningState(self.amplitude, self.sign))
+        state = _core.CombiningState(self.amplitude, self.sign)
         values = apply_polynomial(self.polynomial, spins, state)
-        # values *= (
-        #     (1 - 2 * torch.argmax(self.sign.forward(_C.unpack(spins)), dim=1))
-        #     .to(torch.float32)
-        #     .squeeze()
-        # )
         stop = time.time()
         tqdm.write(
-            "Done in {:.2f} seconds. ".format(stop - start)
+            " Done in {:.2f} seconds. ".format(stop - start)
             + "Acceptance {:.2f}%".format(100 * acceptance)
         )
         return (spins, values)
 
+    def load_checkpoint(self, i: int):
+        def load(target, model):
+            pattern = os.path.join(self.config.output, str(i), target, "best_model_*")
+            [filename] = glob.glob(pattern)
+            model.load_state_dict(torch.load(filename))
+
+        load("amplitude", self.amplitude)
+        load("sign", self.sign)
+
     def step(self):
         dataset = self.monte_carlo()
-        Trainer(
+        train(
             "amplitude",
             self.amplitude,
             dataset,
             "{}/{}/amplitude".format(self.config.output, self._iteration),
             self.config.amplitude,
-        ).run()
-        Trainer(
+        )
+        train(
             "sign",
             self.sign,
             dataset,
             "{}/{}/sign".format(self.config.output, self._iteration),
             self.config.sign,
-        ).run()
+        )
+        if self.compute_overlap is not None:
+            overlap = self.compute_overlap()
+            tqdm.write("[{}] Overlap: {}".format(self._iteration, overlap))
         self._iteration += 1
 
 
-Config = collections.namedtuple(
+Config = namedtuple(
     "Config",
     [
         "model",
@@ -530,14 +446,15 @@ Config = collections.namedtuple(
         "amplitude",
         "sign",
         ## OPTIONAL
+        "exact",
         "magnetisation",
         "sweep_size",
         "number_discarded",
     ],
-    defaults=[None, None, None],
+    defaults=[None, None, None, None],
 )
 
-TrainingOptions = collections.namedtuple(
+TrainingOptions = namedtuple(
     "TrainingOptions",
     [
         "train_batch_size",
@@ -550,7 +467,7 @@ TrainingOptions = collections.namedtuple(
     defaults=[
         16,
         200,
-        0.95,
+        0.90,
         10,
         "lambda m: torch.optim.RMSprop(m.parameters(), lr=1e-3, weight_decay=1e-4)",
         1024,
@@ -558,101 +475,16 @@ TrainingOptions = collections.namedtuple(
 )
 
 
-class Dummy(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return torch.ones(x.size(0))
-
-
-def foo():
-    m = torch.jit.script(Dummy())
-    m.save("dummy.pt")
-
-    r = _C._sample_some(
-        "dummy.pt",
-        _C._Options(
-            number_spins=10,
-            magnetisation=0,
-            number_chains=4,
-            number_samples=100000,
-            sweep_size=1,
-            number_discarded=0,
-        ),
-    )
-
-    all_spins = _C.all_spins(10, 0)
-    ids = [(_C.unsafe_get(all_spins, i), i) for i in range(all_spins.shape[0])]
-    # for (k, v) in ids[:20]:
-    #     print(k, v)
-    ids = dict(ids)
-
-    # for i in range(min(r[0].shape[0], 10)):
-    #     print(_C.unsafe_get(r[0], i))
-    spins = [ids[_C.unsafe_get(r[0], i)] for i in range(r[0].shape[0])]
-    hist = np.histogram(spins, bins=252, range=(0, 252))
-    print(hist)
-    print(hist[0].mean(), hist[0].std())
-
-
-# def load_exact(filename):
-#     phi = _core.with_file_like(filename, "rb", lambda f: load_explicit(f)[0])
-#     number_spins = len(next(iter(phi)))
-#     phi = ExplicitState(phi)
-#     magnetisation = number_spins % 2
-#     spins = _C.unpack(_C.all_spins(number_spins, magnetisation))
-#     values = phi(spins)
-# 
-#     with open("1x10.exact", "wb") as output:
-#         pickle.dump((_C.all_spins(number_spins, magnetisation), values), output)
-#     return spins, values
-
-def load_exact(filename):
-    (spins, values) = _core.with_file_like(filename, "rb", pickle.load)
-    return torch.from_numpy(spins), values
-
-
-def analyse(dirname, exact):
-
-    spins, exact_coefficients = load_exact(exact)
-    number_spins = spins.size(1)
-
-    def load(name):
-        return torch.jit.script(_core.import_network(name)(number_spins))
-
-    def overlap(predicted, expected):
-        predicted = predicted.squeeze().detach().numpy()
-        # expected = expected.view(-1).detach().numpy().view(np.complex64)
-        return (
-            abs(np.dot(predicted, expected))
-            / np.linalg.norm(predicted)
-            / np.linalg.norm(expected)
-        )
-
-    psi = CombiningState(load("test_amplitude.py"), load("test_phase.py"))
-    dirnames = sorted(
-        filter(lambda p: os.path.isdir(os.path.join(dirname, p)), os.listdir(dirname)),
-        key=lambda x: int(x),
-    )
-    for d in dirnames:
-        [amplitude] = glob.glob(os.path.join(dirname, d, "amplitude/best_model_*"))
-        [sign] = glob.glob(os.path.join(dirname, d, "sign/best_model_*"))
-        psi.amplitude.load_state_dict(torch.load(amplitude))
-        psi.sign.load_state_dict(torch.load(sign))
-        coefficients = psi.forward(spins)
-        print(d, overlap(coefficients, exact_coefficients))
-
-
 def main():
     config = Config(
         model=("test_amplitude.py", "test_phase.py"),
         hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10.hamiltonian",
-        epochs=50,
+        epochs=5,
         roots=[(10.0, None), (10.0, None)],
         number_samples=1000,
         number_chains=2,
-        output="swo/run/2",
+        output="swo/run/3",
+        exact="/vol/tcm01/westerhout_tom/nqs_frustrated_phase/data/chain/10/exact/dataset_1000.pickle",
         amplitude=TrainingOptions(
             max_epochs=200,
             patience=100,
@@ -667,14 +499,17 @@ def main():
         ),
     )
 
-    runner = Runner(config)
-
-    for i in range(config.epochs):
-        runner.step()
-
-    # analyse("swo/run/2", "workdir/cxx/1x10.out")
-    analyse("swo/run/2", "../nqs_frustrated_phase/data/chain/10/exact/dataset_1000.pickle")
-    return
+    if True:
+        # Running the simulation
+        runner = Runner(config)
+        for i in range(config.epochs):
+            runner.step()
+    else:
+        # Analysis of the results
+        runner = Runner(config)
+        for i in range(config.epochs):
+            runner.load_checkpoint(i)
+            tqdm.write("{}\t{}".format(i, runner.compute_overlap()))
 
 
 if __name__ == "__main__":

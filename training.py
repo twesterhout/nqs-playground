@@ -11,6 +11,110 @@ from torch.serialization import _with_file_like as with_file_like
 import nqs_playground._C_nqs as _C
 
 
+class SetToTrain(object):
+    """
+    Temporary sets the module (i.e. a ``torch.nn.Module``) into training mode.
+
+    We rely on the following: if ``m`` is a module, then
+
+      * ``m.training`` returns whether ``m`` is currently in the training mode;
+      * ``m.train()`` puts ``m`` into training mode;
+      * ``m.eval()`` puts ``m`` into inference mode.
+
+    This class is meant to be used in the ``with`` construct:
+
+    .. code:: python
+
+       with _Train(m):
+           ...
+    """
+
+    def __init__(self, module: torch.nn.Module):
+        """
+        :param module:
+            a ``torch.nn.Module`` or an intance of another class with the same
+            interface.
+        """
+        self._module = module
+        # Only need to update the mode if not already training
+        self._update = module.training == False
+
+    def __enter__(self):
+        if self._update:
+            self._module.train()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._update:
+            self._module.eval()
+
+
+class SetToEval(object):
+    """
+    Temporary sets the network (i.e. a ``torch.nn.Module``) into inference mode.
+
+    We rely on the following: if ``m`` is a network, then
+
+      * ``m.training`` returns whether ``m`` is currently in the training mode;
+      * ``m.train()`` puts ``m`` into training mode;
+      * ``m.eval()`` puts ``m`` into inference mode.
+
+    This class is meant to be used in the ``with`` construct:
+
+    .. code:: python
+
+       with _Train(m):
+           ...
+    """
+
+    def __init__(self, module: torch.nn.Module):
+        """
+        :param module:
+            a ``torch.nn.Module`` or an intance of another class with the same
+            interface.
+        """
+        self._module = module
+        # Only need to update the mode if currently training
+        self._update = module.training == True
+
+    def __enter__(self):
+        if self._update:
+            self._module.eval()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._update:
+            self._module.train()
+
+
+def SetNumThreads(object):
+    """
+    Temporary changes the number of threads used by PyTorch.
+
+    This is useful when we, for example, want to run multiple different neural
+    networks in parallel rather than use multiple threads within a single
+    network.
+    """
+
+    def __init__(self, num_threads: int):
+        if not isinstance(num_threads, int) or num_threads <= 0:
+            raise ValueError(
+                "num_threads should be a positive integer, but got {}"
+                "".format(num_threads)
+            )
+        self._new = num_threads
+        self._old = torch.get_num_threads()
+
+    def __enter__(self):
+        if self._new != self._old:
+            torch.set_num_threads(self._new)
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._new != self._old:
+            torch.set_num_threads(self._old)
+
+
 class SpinDataset(torch.utils.data.Dataset):
     r"""Dataset wrapping spin configurations and corresponding values.
 
@@ -158,23 +262,24 @@ def random_split(dataset, k, replacement=False, weights=None):
     else:
         raise ValueError("k must be either an int or a float; got {}".format(type(k)))
 
-    if weights is None:
-        # Uniform sampling
-        if replacement:
-            indices = torch.randint(n, size=k)
+    with torch.no_grad():
+        if weights is None:
+            # Uniform sampling
+            if replacement:
+                indices = torch.randint(n, size=k)
+            else:
+                indices = torch.randperm(n)[:k]
         else:
-            indices = torch.randperm(n)[:k]
-    else:
-        # Sampling with specified weights
-        indices = torch.multinomial(weights, num_samples=k, replacement=replacement)
+            # Sampling with specified weights
+            indices = torch.multinomial(weights, num_samples=k, replacement=replacement)
 
-    remaining_indices = np.setdiff1d(
-        np.arange(n), indices, assume_unique=not replacement
-    )
-    return [
-        tuple(x[indices] for x in dataset),
-        tuple(x[remaining_indices] for x in dataset),
-    ]
+        remaining_indices = np.setdiff1d(
+            np.arange(n), indices, assume_unique=not replacement
+        )
+        return [
+            tuple(x[indices] for x in dataset),
+            tuple(x[remaining_indices] for x in dataset),
+        ]
 
 
 def import_network(filename: str):
@@ -197,3 +302,23 @@ def import_network(filename: str):
     module = importlib.import_module(module_name)
     sys.path.pop(0)
     return module.Net
+
+
+def CombiningState(amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True):
+    class CombiningState(torch.nn.Module):
+        def __init__(self, amplitude, sign):
+            super().__init__()
+            self.amplitude = amplitude
+            self.sign = sign
+
+        def forward(self, x):
+            y = self.amplitude.forward(x).squeeze()
+            y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
+                dtype=torch.float32
+            )
+            return y
+
+    m = CombiningState(amplitude, sign)
+    if use_jit:
+        m = torch.jit.script(m)
+    return m
