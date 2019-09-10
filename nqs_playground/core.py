@@ -177,12 +177,10 @@ class SpinDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self.spins.shape[0]
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: torch.Tensor):
         if self.unpack:
-            if isinstance(index, int):
-                return _C.unsafe_get(self.spins, index), self.values[index]
-            return _C.unpack(self.spins[index]), self.values[index]
-        return self.spins[index], self.values[index]
+            return _C.unpack(self.spins[index.numpy()]), self.values[index]
+        return self.spins[index.numpy()], self.values[index]
 
 
 class BatchedRandomSampler(torch.utils.data.Sampler):

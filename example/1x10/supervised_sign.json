@@ -1,0 +1,14 @@
+{
+    "dataset": "../../data/1x10/ground_state.pickle",
+    "model": "sign.py",
+    "optimiser": "lambda m: torch.optim.RMSprop(m.parameters(), lr=1e-3, weight_decay=1e-4)",
+    "output": "runs/sign/1",
+    "target": "sign",
+    "train_fraction": 0.60,
+    "val_fraction": 0.10,
+    "train_batch_size": 16,
+    "patience": 50,
+    "max_epochs": 1000,
+    "sampling": "quadratic",
+    "replacement": true
+}
