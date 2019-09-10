@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # Copyright Tom Westerhout (c) 2019
 #
 # All rights reserved.
@@ -31,425 +29,329 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import cmath
-import collections
-from functools import reduce
-import importlib
 import os
 import sys
-from typing import Dict, Optional
-import pathlib
 
 import numpy as np
 import torch
 
-from . import _C_nqs
-from ._C_nqs import CompactSpin
+# NOTE(twesterhout): Yes, it's not nice to depend on internal functions, but
+# it's so tiring to reimplement _with_file_like every time...
+from torch.serialization import _with_file_like as with_file_like
+
+from . import _C_nqs as _C
 
 
-def random_spin(n: int, magnetisation: int = None) -> np.ndarray:
-    return _C_nqs.random_spin(n, magnetisation).numpy()
-
-
-class Machine(torch.nn.Module):
+class SetToTrain(object):
     """
-    Neural Network Quantum State.
-    """
+    Temporary sets the module (i.e. a ``torch.nn.Module``) into training mode.
 
-    Cell = collections.namedtuple("Cell", ["log_wf", "der_log_wf"])
+    We rely on the following: if ``m`` is a module, then
 
-    def __init__(self, ψ: torch.nn.Module):
-        """
-        Constructs a new NQS given a PyTorch neural network ψ.
-        """
-        super().__init__()
-        self._ψ = ψ
-        # Total number of variational (i.e. trainable parameters)
-        self._size = sum(
-            map(
-                lambda p: reduce(int.__mul__, p.size()),
-                filter(lambda p: p.requires_grad, self.parameters()),
-            )
-        )
-        # Hash-table mapping Spin to _Machine.Cell
-        self._cache = {}
+      * ``m.training`` returns whether ``m`` is currently in the training mode;
+      * ``m.train()`` puts ``m`` into training mode;
+      * ``m.eval()`` puts ``m`` into inference mode.
 
-    @property
-    def size(self) -> int:
-        """
-        :return: number of variational parameters.
-        """
-        return self._size
+    This class is meant to be used in the ``with`` construct:
 
-    @property
-    def number_spins(self):
-        """
-        :return: number of spins in the system
-        """
-        return self._ψ.number_spins
+    .. code:: python
 
-    @property
-    def ψ(self) -> torch.nn.Module:
-        """
-        :return: underlying neural network.
-        """
-        return self._ψ
-
-    @property
-    def psi(self) -> torch.nn.Module:
-        """
-        Same as ``Machine.ψ``.
-
-        :return: underlying neural network
-        """
-        return self.ψ
-
-    def _log_wf(self, σ: np.ndarray):
-        """
-        Given a spin configuration ``σ``, calculates ``log(⟨σ|ψ⟩)``
-        and returns it wrapped in a ``Cell``.
-        """
-        (amplitude, phase) = self._ψ.forward(torch.from_numpy(σ))
-        return Machine.Cell(log_wf=complex(amplitude, phase), der_log_wf=None)
-
-    def log_wf(self, σ: np.ndarray) -> complex:
-        """
-        Given a spin configuration ``σ``, returns ``log(⟨σ|ψ⟩)``.
-
-        :param np.ndarray σ:
-            Spin configuration. Must be a numpy array of ``float32``.
-        """
-        compact_spin = CompactSpin(σ)
-        cell = self._cache.get(compact_spin)
-        if cell is None:
-            cell = self._log_wf(σ)
-            self._cache[compact_spin] = cell
-        return cell.log_wf
-
-    def _copy_grad_to(self, out: np.ndarray):
-        """
-        Treats gradients of all the parameters of ``ψ`` as a long 1D vector
-        and saves them to ``out``.
-        """
-        i = 0
-        for p in map(
-            lambda p_: p_.grad.view(-1).numpy(),
-            filter(lambda p_: p_.requires_grad, self.parameters()),
-        ):
-            out[i : i + p.size] = p
-            i += p.size
-
-    def _der_log_wf(self, σ: np.ndarray):
-        """
-        Given a spin configuration ``σ``, calculates ``log(⟨σ|ψ⟩)`` and
-        ``∂log(⟨σ|ψ⟩)/∂Wᵢ`` and returns them wrapped in a ``Cell``.
-        """
-        der_log_wf = np.empty((self.size,), dtype=np.complex64)
-        # Forward-propagation to construct the graph
-        result = self._ψ.forward(torch.from_numpy(σ))
-        (amplitude, phase) = result
-        # Computes ∇Re[log(Ψ(x))]
-        self._ψ.zero_grad()
-        result.backward(torch.tensor([1, 0], dtype=torch.float32), retain_graph=True)
-        self._copy_grad_to(der_log_wf.real)
-        # Computes ∇Im[log(Ψ(x))]
-        self._ψ.zero_grad()
-        result.backward(torch.tensor([0, 1], dtype=torch.float32))
-        self._copy_grad_to(der_log_wf.imag)
-
-        # Make sure the user doesn't modify our cached value
-        der_log_wf.flags["WRITEABLE"] = False
-        return Machine.Cell(log_wf=complex(amplitude, phase), der_log_wf=der_log_wf)
-
-    def der_log_wf(self, σ: np.ndarray, out: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        Computes ``∇log(⟨σ|Ψ⟩) = ∂log(⟨σ|ψ⟩)/∂Wᵢ`` and saves it to out.
-
-        .. warning:: Don't modify the returned array!
-
-        :param np.ndarray σ:
-            Spin configuration. Must be a numpy array of ``float32``.
-        :param Optional[np.ndarray] out:
-            Destination array. Must be a numpy array of ``complex64``.
-        """
-        compact_spin = CompactSpin(σ)
-        cell = self._cache.get(compact_spin)
-        if cell is None:
-            cell = self._der_log_wf(σ)
-            self._cache[compact_spin] = cell
-        elif cell.der_log_wf is None:
-            log_wf = cell.log_wf
-            cell = self._der_log_wf(σ)
-            self._cache[compact_spin] = cell
-            assert np.allclose(log_wf, cell.log_wf)
-
-        if out is None:
-            return cell.der_log_wf
-        out[:] = cell.der_log_wf
-        return out
-
-    def clear_cache(self):
-        """
-        Clears the internal cache.
-        
-        .. note::
-            This function must be called when the variational
-            parameters are updated.
-        """
-        self._cache = {}
-
-    def set_gradients(self, x: np.ndarray):
-        """
-        Performs ``∇log(⟨σ|Ψ⟩) <- x``, i.e. sets the gradients of the
-        variational parameters to the specified values.
-
-        :param np.ndarray x:
-            New value for ``∇log(⟨σ|Ψ⟩)``. Must be a numpy array of
-            type ``float32`` of length ``self.size``.
-        """
-        with torch.no_grad():
-            gradients = torch.from_numpy(x)
-            i = 0
-            for dp in map(
-                lambda p_: p_.grad.data.view(-1),
-                filter(lambda p_: p_.requires_grad, self.parameters()),
-            ):
-                (n,) = dp.size()
-                dp.copy_(gradients[i : i + n])
-                i += n
-
-
-class ExplicitState(torch.nn.Module):
-    """
-    Wraps a ``Dict[Spin, complex]`` into a ``torch.nn.Module`` which can
-    be used to construct a ``_Machine``.
+       with _Train(m):
+           ...
     """
 
-    def __init__(self, state: Dict[CompactSpin, complex], apply_log=False):
+    def __init__(self, module: torch.nn.Module):
         """
-        :param state:
-            a dictionary mapping spins ``σ`` to their corresponding ``⟨σ|ψ⟩``
-            or ``log(⟨σ|ψ⟩)``.
-        :param apply_log:
-            specifies whether ``log_wf`` and co. should apply logarithm to
-            the values in the dictionary.
+        :param module:
+            a ``torch.nn.Module`` or an intance of another class with the same
+            interface.
         """
-        super().__init__()
-        self._state = state
-        self._number_spins = (
-            len(next(iter(self._state))) if len(self._state) != 0 else None
-        )
-        # function used to convert a complex number into a PyTorch tensor
-        self._c2t = None
-        if apply_log:
+        self._module = module
+        # Only need to update the mode if not already training
+        self._update = module.training == False
 
-            def _f(z):
-                z = cmath.log(z)
-                return torch.tensor([z.real, z.imag], dtype=torch.float32)
+    def __enter__(self):
+        if self._update:
+            self._module.train()
+        return self
 
-            self._c2t = _f
-        else:
-
-            def _f(z):
-                return torch.tensor([z.real, z.imag], dtype=torch.float32)
-
-            self._c2t = _f
-        # Make sure we don't try to compute log(0)
-        self._default = complex(1e-45, 0.0) if apply_log else complex(0.0, 0.0)
-
-    @property
-    def number_spins(self) -> int:
-        """
-        :return:
-            number of spins in the system. If ``self.dict`` is empty,
-            ``None`` is returned instead.
-        """
-        return self._number_spins
-
-    @property
-    def dict(self) -> Dict[CompactSpin, complex]:
-        """
-        :return: the underlying dictionary
-        """
-        return self._state
-
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        if x.dim() == 1:
-            return self._c2t(self._state.get(CompactSpin(x), self._default))
-        else:
-            assert x.dim() == 2
-            out = torch.empty((x.size(0), 2), dtype=torch.float32)
-            for i in range(x.size(0)):
-                out[i] = self._c2t(self._state.get(CompactSpin(x[i]), self._default))
-            return out
-
-    def backward(self, _):
-        """
-        No backward propagation, because there are no parameters to train.
-        """
-        raise NotImplementedError()
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._update:
+            self._module.eval()
 
 
-# Calculates ``log(1/‖ψ‖₂)``
-#
-#     (‖ψ‖₂)² = ∑|ψᵢ|² = ∑exp(log(|ψᵢ|²)) = ∑exp(2 * log(|ψᵢ|) - log(ψₘₐₓ) + log(ψₘₐₓ))
-#             = exp(log(ψₘₐₓ)) ∙ ∑exp(2 * log(|ψᵢ|) - log(ψₘₐₓ))
-#
-# where ψₘₐₓ = max({|ψᵢ|}ᵢ). Now
-#
-#     log(1/‖ψ‖₂) = -0.5 * log((‖ψ‖₂)²) = -0.5 * [log(ψₘₐₓ) + log(∑exp(2 * log(|ψᵢ|) - log(ψₘₐₓ)))]
-#
-# :param log_ψ: torch.FloatTensor ``[log(|ψᵢ|) for ∀i]``.
-# :return:      ``log(1/‖ψ‖₂)``.
-@torch.jit.script
-def normalisation_constant(log_psi):
-    log_psi = log_psi.view([-1])
-    max_log_amplitude = torch.max(log_psi)
-    scale = -0.5 * (
-        max_log_amplitude
-        + torch.log(torch.sum(torch.exp(2 * log_psi - max_log_amplitude)))
-    )
-    return scale
-
-
-@torch.jit.script
-def negative_log_overlap_real(predicted, expected):
-    predicted = predicted.view([-1])
-    expected = expected.view([-1])
-    sqr_l2_expected = torch.dot(expected, expected)
-    sqr_l2_predicted = torch.dot(predicted, predicted)
-    expected_dot_predicted = torch.dot(expected, predicted)
-    return -0.5 * torch.log(
-        expected_dot_predicted
-        * expected_dot_predicted
-        / (sqr_l2_expected * sqr_l2_predicted)
-    )
-
-
-def negative_log_overlap(φ: torch.Tensor, ψ: torch.Tensor) -> torch.Tensor:
+class SetToEval(object):
     """
-    Computes ``-log(|⟨φ|ψ⟩| / (‖φ‖₂∙‖ψ‖₂))``.
+    Temporary sets the network (i.e. a ``torch.nn.Module``) into inference mode.
 
-      * ‖φ‖₂ = sqrt( ∑(Reφᵢ)² + (Imφᵢ)²  )
-      * ‖ψ‖₂ = sqrt( ∑(Reψᵢ)² + (Imψᵢ)²  )
-      * ⟨φ|ψ⟩ = Re⟨φ|ψ⟩ + i∙Im⟨φ|ψ⟩
-              = ∑Re[φᵢ*∙ψᵢ] + i∙∑Im[φᵢ*∙ψᵢ]
-              = ∑(Reφᵢ∙Reψᵢ + Imφᵢ∙Imψᵢ) + i∑(Reφᵢ∙Imψᵢ - Imφᵢ∙Reψᵢ)
+    We rely on the following: if ``m`` is a network, then
 
-    :param φ:
-        ``(n, 2)`` tensor of floats, where each row represents
-        a single complex number.
-    :param ψ:
-        ``(n, 2)`` tensor of floats, where each row represents
-        a single complex number.
-    :return:
-        A one-element tensor ``-log(|⟨φ|ψ⟩| / (‖φ‖₂∙‖ψ‖₂))``.
-    """
-    Re_φ, Im_φ = φ
-    Re_ψ, Im_ψ = ψ
-    sqr_l2_φ = torch.dot(Re_φ, Re_φ) + torch.dot(Im_φ, Im_φ)
-    sqr_l2_ψ = torch.dot(Re_ψ, Re_ψ) + torch.dot(Im_ψ, Im_ψ)
-    Re_φ_dot_ψ = torch.dot(Re_φ, Re_ψ) + torch.dot(Im_φ, Im_ψ)
-    Im_φ_dot_ψ = torch.dot(Re_φ, Im_ψ) - torch.dot(Im_φ, Re_ψ)
-    # return -0.5 * torch.log((Re_φ_dot_ψ ** 2 + Im_φ_dot_ψ ** 2) / (sqr_l2_φ * sqr_l2_ψ))
-    return 1 - torch.sqrt((Re_φ_dot_ψ ** 2 + Im_φ_dot_ψ ** 2) / (sqr_l2_φ * sqr_l2_ψ))
+      * ``m.training`` returns whether ``m`` is currently in the training mode;
+      * ``m.train()`` puts ``m`` into training mode;
+      * ``m.eval()`` puts ``m`` into inference mode.
 
+    This class is meant to be used in the ``with`` construct:
 
-class WorthlessConfiguration(Exception):
-    """
-    An exception thrown by ``Heisenberg`` if it encounters a spin configuration
-    with a very low weight.
+    .. code:: python
+
+       with _Train(m):
+           ...
     """
 
-    def __init__(self, flips):
-        super().__init__("The current spin configuration has too low a weight.")
-        self.suggestion = flips
+    def __init__(self, module: torch.nn.Module):
+        """
+        :param module:
+            a ``torch.nn.Module`` or an intance of another class with the same
+            interface.
+        """
+        self._module = module
+        # Only need to update the mode if currently training
+        self._update = module.training == True
+
+    def __enter__(self):
+        if self._update:
+            self._module.eval()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._update:
+            self._module.train()
 
 
-"""
-A Monte Carlo state is an element of the Markov Chain and is a triple
-``(wᵢ, σᵢ, ψ)``, where ``wᵢ`` is the *weight*, ``σᵢ`` is the current
-spin configuration, and ``ψ`` is the NQS.
-"""
-MonteCarloState = collections.namedtuple(
-    "MonteCarloState", ["weight", "spin", "machine"]
-)
-
-
-class _MonteCarloResult(object):
-    def __init__(self, energies, gradients, weights, samples=None):
-        self.energies = energies
-        self.gradients = gradients
-        self.weights = weights
-        self.samples = samples
-
-
-class _MonteCarloStats(object):
-    def __init__(self, acceptance, dimension, time=None):
-        self.acceptance = acceptance
-        self.dimension = dimension
-        self.time = time
-
-
-# "Borrowed" from pytorch/torch/serialization.py.
-# All credit goes to PyTorch developers.
-def _with_file_like(f, mode, body):
+def SetNumThreads(object):
     """
-    Executes a body function with a file object for f, opening
-    it in 'mode' if it is a string filename.
+    Temporary changes the number of threads used by PyTorch.
+
+    This is useful when we, for example, want to run multiple different neural
+    networks in parallel rather than use multiple threads within a single
+    network.
     """
-    new_fd = False
-    if (
-        isinstance(f, str)
-        or (sys.version_info[0] == 2 and isinstance(f, unicode))
-        or (sys.version_info[0] == 3 and isinstance(f, pathlib.Path))
-    ):
-        new_fd = True
-        f = open(f, mode)
-    try:
-        return body(f)
-    finally:
-        if new_fd:
-            f.close()
 
-
-def _load_explicit(stream):
-    psi = {}
-    number_spins = None
-    for line in stream:
-        if line.startswith(b"#"):
-            continue
-        (spin, real, imag) = line.split()
-        number_spins = len(spin)
-        psi[CompactSpin(spin)] = complex(float(real), float(imag))
-        break
-    for line in stream:
-        if line.startswith(b"#"):
-            continue
-        (spin, real, imag) = line.split()
-        if len(spin) != number_spins:
+    def __init__(self, num_threads: int):
+        if not isinstance(num_threads, int) or num_threads <= 0:
             raise ValueError(
-                "A single state cannot contain spin "
-                "configurations of different sizes"
+                "num_threads should be a positive integer, but got {}"
+                "".format(num_threads)
             )
-        psi[CompactSpin(spin)] = complex(float(real), float(imag))
-    return psi, number_spins
+        self._new = num_threads
+        self._old = torch.get_num_threads()
+
+    def __enter__(self):
+        if self._new != self._old:
+            torch.set_num_threads(self._new)
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._new != self._old:
+            torch.set_num_threads(self._old)
 
 
-def load_explicit(stream):
-    return _with_file_like(stream, "rb", _load_explicit)
+class SpinDataset(torch.utils.data.Dataset):
+    r"""Dataset wrapping spin configurations and corresponding values.
+
+    Each sample will be retrieved by indexing along the first dimension.
+
+    .. note:: This class is very similar to :py:class:`torch.utils.data.TensorDataset`
+              except that ``spins`` is a NumPy array of structured type and is
+              thus incompatible with :py:class:`torch.utils.data.TensorDataset`.
+
+    :param spins: a NumPy array of :py:class:`CompactSpin`.
+    :param values: a NumPy array or a Torch tensor.
+    :param bool unpack: if ``True``, ``spins`` will be unpacked into Torch tensors. 
+    """
+
+    def __init__(self, spins, values, unpack=False):
+        if spins.shape[0] != values.shape[0]:
+            raise ValueError(
+                "spins and values must have the same size of the first dimension, but "
+                "spins.shape={} != values.shape={}".format(spins.shape, values.shape)
+            )
+        if not isinstance(unpack, bool):
+            raise ValueError(
+                "unpack should be a boolean, but got unpack={}".format(unpack)
+            )
+        self.spins = spins
+        self.values = values
+        self.unpack = unpack
+
+    def __len__(self) -> int:
+        return self.spins.shape[0]
+
+    def __getitem__(self, index):
+        if self.unpack:
+            if isinstance(index, int):
+                return _C.unsafe_get(self.spins, index), self.values[index]
+            return _C.unpack(self.spins[index]), self.values[index]
+        return self.spins[index], self.values[index]
+
+
+class BatchedRandomSampler(torch.utils.data.Sampler):
+    r"""Samples batches of elements randomly.
+
+    :param int num_samples: number of elements in the dataset
+    :param int batch_size: size of mini-batch
+    :param bool drop_last: if ``True``, the sampler will ignore the last batch
+        if its size would be less than ``batch_size``.
+
+    Example:
+        >>> list(BatchedRandomSampler(10, batch_size=3, drop_last=True))
+        [tensor([6, 8, 0]), tensor([2, 3, 1]), tensor([4, 7, 9])]
+        >>> list(BatchedRandomSampler(10, batch_size=3, drop_last=False))
+        [tensor([3, 4, 7]), tensor([0, 2, 8]), tensor([1, 5, 9]), tensor([6])]
+    """
+
+    def __init__(self, num_samples: int, batch_size: int, drop_last: bool):
+        self.num_samples = num_samples
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self._indices = None
+
+        if not isinstance(num_samples, int) or num_samples <= 0:
+            raise ValueError(
+                "num_samples should be a positive integer, but got num_samples={}".format(
+                    num_samples
+                )
+            )
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError(
+                "batch_size should be a positive integer, but got batch_size={}".format(
+                    batch_size
+                )
+            )
+        if not isinstance(drop_last, bool):
+            raise ValueError(
+                "drop_last should be a boolean, but got drop_last={}".format(drop_last)
+            )
+
+    def __iter__(self):
+        if self._indices is None:
+            self._indices = torch.randperm(self.num_samples)
+        else:
+            torch.randperm(self.num_samples, out=self._indices)
+        i = 0
+        while i + self.batch_size <= self.num_samples:
+            yield self._indices[i : i + self.batch_size]
+            i += self.batch_size
+        if i < self.num_samples and not self.drop_last:
+            yield self._indices[i:]
+
+    def __len__(self) -> int:
+        """
+        Returns the number of batches that will be produced by :py:func:`__iter__`.
+        """
+        if self.drop_last:
+            return self.num_samples // self.batch_size
+        return (self.num_samples + self.batch_size - 1) // self.batch_size
+
+
+def make_spin_dataloader(
+    spins, values, batch_size: int, drop_last: bool = False, unpack: bool = True
+):
+    r"""Creates a new dataloader from packed spin configurations and corresponding
+    values.
+    """
+    dataset = SpinDataset(spins, values, unpack)
+    sampler = BatchedRandomSampler(len(dataset), batch_size, drop_last)
+    # This is a bit of a hack. We want to use our custom batch sampler, but don't
+    # want PyTorch to use auto_collate. So we tell PyTorch that our sampler is
+    # a plain sampler (i.e. not batch_sampler), but set batch_size to 1 to
+    # disable automatic batching
+    return torch.utils.data.DataLoader(
+        dataset, batch_size=1, shuffle=False, sampler=sampler, collate_fn=lambda x: x[0]
+    )
+
+
+def random_split(dataset, k, replacement=False, weights=None):
+    r"""Randomly splits dataset into two parts.
+
+    :param dataset: a tuple of NumPy arrays or Torch tensors.
+    :param k: either a ``float`` or an ``int`` specifying the size of the first
+        part. If ``k`` is a ``float``, then it must lie in ``[0, 1]`` and is
+        understood as a fraction of the whole dataset. If ``k`` is an ``int``,
+        then it specifies the number of elements.
+    :param weights: specifies how elements for the first part are chosen. If
+        ``None``, uniform sampling is used. Otherwise elements are sampled from
+        a multinomial distribution with probabilities proportional to ``weights``.
+    """
+    if not all(
+        (isinstance(x, np.ndarray) or isinstance(x, torch.Tensor) for x in dataset)
+    ):
+        raise ValueError("dataset should be a tuple of NumPy arrays or Torch tensors")
+    n = dataset[0].shape[0]
+    if not all((x.shape[0] == n for x in dataset)):
+        raise ValueError(
+            "all elements of dataset should have the same size along the first dimension"
+        )
+
+    if isinstance(k, float):
+        if k < 0.0 or k > 1.0:
+            raise ValueError("k should be in [0, 1]; got k={}".format(k))
+        k = round(k * n)
+    elif isinstance(k, int):
+        if k < 0 or k > n:
+            raise ValueError("k should be in [0, {}]; got k={}".format(n, k))
+    else:
+        raise ValueError("k must be either an int or a float; got {}".format(type(k)))
+
+    with torch.no_grad():
+        if weights is None:
+            # Uniform sampling
+            if replacement:
+                indices = torch.randint(n, size=k)
+            else:
+                indices = torch.randperm(n)[:k]
+        else:
+            # Sampling with specified weights
+            indices = torch.multinomial(weights, num_samples=k, replacement=replacement)
+
+        remaining_indices = np.setdiff1d(
+            np.arange(n), indices, assume_unique=not replacement
+        )
+        return [
+            tuple(x[indices] for x in dataset),
+            tuple(x[remaining_indices] for x in dataset),
+        ]
 
 
 def import_network(filename: str):
+    r"""Loads ``Net`` class defined in Python source file ``filename``."""
+    import importlib
+
     module_name, extension = os.path.splitext(os.path.basename(filename))
     module_dir = os.path.dirname(filename)
     if extension != ".py":
         raise ValueError(
-            "Could not import the network from '{}': not a python source file.".format(
-                filename
-            )
+            "Could not import the network from {!r}: ".format(filename)
+            + "not a Python source file."
+        )
+    if not os.path.exists(filename):
+        raise ValueError(
+            "Could not import the network from {!r}: ".format(filename)
+            + "no such file or directory"
         )
     sys.path.insert(0, module_dir)
     module = importlib.import_module(module_name)
     sys.path.pop(0)
     return module.Net
+
+
+def CombiningState(
+    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True
+) -> torch.nn.Module:
+    class CombiningState(torch.nn.Module):
+        def __init__(self, amplitude, sign):
+            super().__init__()
+            self.amplitude = amplitude
+            self.sign = sign
+
+        def forward(self, x):
+            y = self.amplitude.forward(x).squeeze()
+            y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
+                dtype=torch.float32
+            )
+            return y
+
+    m = CombiningState(amplitude, sign)
+    if use_jit:
+        m = torch.jit.script(m)
+    return m

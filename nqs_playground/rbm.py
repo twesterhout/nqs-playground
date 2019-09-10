@@ -30,25 +30,22 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import torch
-from nqs_playground.functional import logcosh
+from .functional import logcosh
 
 
-class Net(torch.nn.Module):
-    """
+class Rbm(torch.nn.Module):
+    r"""
     Complex Restricted Boltzmann Machine (RBM).
     """
 
-    def __init__(self, n: int):
-        """
+    def __init__(self, n: int, alpha: float = 2):
+        r"""
         Constructs a new RBM given the number of spins ``n``
         """
         if n < 1:
             raise ValueError("Number of spins must be positive, but got".format(n))
         super().__init__()
         self._number_spins = n
-
-        # NOTE: Feel free to tune alpha for your needs
-        alpha = 2
 
         # Extra factor 2 comes from the fact that a complex number is
         # equivalent to two real numbers.
@@ -62,17 +59,19 @@ class Net(torch.nn.Module):
         self._dense = torch.nn.Linear(n, number_hidden, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
+        r"""
         Runs the forward propagation.
         """
-        x = logcosh(self._dense(x)).view(-1, self._dense.out_features // 2, 2).sum(1)
-        if x.size(0) == 1:
-            x = x.view(x.size()[1:])
-        return x
+        return (
+            logcosh(self._dense(x))
+            .view(-1, self._dense.out_features // 2, 2)
+            .sum(dim=1)
+            .squeeze()
+        )
 
     @property
     def number_spins(self) -> int:
-        """
+        r"""
         Returns the number of spins the network expects as input.
         """
         return self._number_spins

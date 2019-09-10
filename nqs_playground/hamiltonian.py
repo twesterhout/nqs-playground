@@ -35,8 +35,9 @@ import cmath
 from typing import List, Tuple
 import numpy as np
 
-from . import _C_nqs
-from .core import _with_file_like, WorthlessConfiguration
+from .core import _C, with_file_like
+
+__all__ = ["Heisenberg", "read_hamiltonian"]
 
 
 class Heisenberg(object):
@@ -59,35 +60,8 @@ class Heisenberg(object):
             )
         self._number_spins = largest + 1
 
-    def __call__(self, state, cutoff=5.5) -> np.complex64:
-        """
-        Calculates local energy in the given state.
-        """
-        spin = state.spin
-
-        def log_quot_wf(flips: List[int]) -> complex:
-            state.spin[flips] *= -1
-            log_wf = state.machine.log_wf(state.spin)
-            state.spin[flips] *= -1
-            return log_wf - log_quot_wf.log_wf_old
-
-        log_quot_wf.log_wf_old = state.machine.log_wf(state.spin)
-
-        energy = 0
-        for (i, j) in self._graph:
-            if spin[i] == spin[j]:
-                energy += 1
-            else:
-                assert spin[i] == -spin[j]
-                x = log_quot_wf([i, j])
-                if cutoff is not None and x.real > cutoff:
-                    raise WorthlessConfiguration([i, j])
-                energy += -1 + 2 * cmath.exp(x)
-        energy = np.complex64(energy)
-        return energy if not cmath.isinf(energy) else np.complex64(1e38)
-
-    def to_cxx(self) -> _C_nqs.Heisenberg:
-        return _C_nqs.Heisenberg(edges=self._graph, coupling=self._coupling)
+    def to_cxx(self) -> _C.Heisenberg:
+        return _C.Heisenberg(edges=self._graph, coupling=self._coupling)
 
     @property
     def number_spins(self) -> int:

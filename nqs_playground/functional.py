@@ -1,9 +1,39 @@
-#!/usr/bin/env python3
+# Copyright Tom Westerhout (c) 2019
+#
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above
+#       copyright notice, this list of conditions and the following
+#       disclaimer in the documentation and/or other materials provided
+#       with the distribution.
+#
+#     * Neither the name of Tom Westerhout nor the names of other
+#       contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from numba import jit, float32, float64, complex64, complex128, void
 import numpy as np
 import torch
-from torch.autograd import Function
+
+__all__ = ["logcosh"]
 
 
 @jit(
@@ -75,7 +105,7 @@ def _log_cosh_backward_impl(dz, out, tanh_x, tan_y):
         out[i] = ((D * dx - C * dy) + 1j * (C * dx + D * dy)) / (1 + B_over_A ** 2)
 
 
-class _LogCosh(Function):
+class _LogCosh(torch.autograd.Function):
     @staticmethod
     def forward(ctx, z):
         """
@@ -109,105 +139,6 @@ class _LogCosh(Function):
         )
         ctx.save_for_backward(z, tanh_x)
         return out
-
-        # with torch.no_grad():
-        #     x_ = z.detach().numpy().view(dtype=complex_type)
-
-        #     y  = torch.empty(z.size(), dtype=z.dtype, requires_grad=False)
-        #     y_ = y.numpy().view(dtype=complex_type)
-
-        #     _LogCosh.logcosh(x_.copy(), out=y_)
-        #     ctx.save_for_backward(z.detach(), None)
-        #     assert not np.any(np.isnan(y_.real)) and not np.any(np.isnan(y_.imag))
-        #     assert not np.any(np.isinf(y_.real)) and not np.any(np.isinf(y_.imag))
-        #     if not torch.allclose(out, y):
-        #         print(out)
-        #         print(y)
-        #     return y
-
-    @staticmethod
-    def backward(ctx, dz):
-        """
-        :return: ``dlog(cosh(z)) = ∂log(cosh(z))/∂Re[z] * Re[dz] + ∂log(cosh(zₙ))/∂Im[z] * Im[dz]``.
-        """
-        z, tanh_x = ctx.saved_tensors
-        if z.dtype == torch.float32:
-            complex_type = np.complex64
-        elif z.dtype == torch.float64:
-            complex_type = np.complex128
-        else:
-            raise TypeError(
-                "Supported float types are float and double, but got {}.".format(
-                    z.dtype
-                )
-            )
-
-        x = z.view(-1, 2)[:, 0]
-        y = z.view(-1, 2)[:, 1]
-        tan_y = torch.tan(y)
-        out = torch.empty(z.size(), dtype=z.dtype, requires_grad=False)
-        _log_cosh_backward_impl(
-            dz.view(-1).detach().numpy().view(dtype=complex_type),
-            out.view(-1).numpy().view(dtype=complex_type),
-            tanh_x.numpy(),
-            tan_y.numpy(),
-        )
-        return out
-
-        # z_ = z.detach().numpy().view(dtype=complex_type)
-        # x_ = z_.real
-        # y_ = z_.imag
-
-        # dz_ = dz.detach().numpy().view(dtype=complex_type)
-        # dx_ = dz_.real
-        # dy_ = dz_.imag
-
-        # tan_y_ = np.tan(y_)
-        # tanh_x_ = np.tanh(x_)
-        # # tanh_x_ = tanh_x.numpy()
-
-        # # Preparation
-
-        # # cos_y_  = np.cos(y_)
-        # # sin_y_  = np.sin(y_)
-        # # cosh_x_ = np.cosh(x_)
-        # # sinh_x_ = np.sinh(x_)
-
-        # # A(x_, y_) = Re[cosh(z_)] = cos(y_) * cosh(x_)
-        # # B(x_, y_) = Im[cosh(z_)] = sin(y_) * sinh(x_)
-
-        # # A_ = cos_y_ * cosh_x_
-        # # B_ = sin_y_ * sinh_x_
-        # B_over_A_ = tan_y_ * tanh_x_
-
-        # # dA(x_, y_)/dx_ = cos(y_) * sinh(x_)
-
-        # # Dx_A_ = cos_y_ * sinh_x_
-        # Dx_A_over_A_ = tanh_x_
-
-        # # dA(x_, y_)/dy_ = - sin(y_) * cosh(x_)
-
-        # # Dy_A_ = -sin_y_ * cosh_x_
-        # Dy_A_over_A_ = - tan_y_
-        #
-        # # C(x_, y_) = A dA/dy + B dA/dx
-
-        # # C_ = A_ * Dy_A_ + B_ * Dx_A_
-        # C_ = Dy_A_over_A_ + B_over_A_ * Dx_A_over_A_
-
-        # # D(x_, y_) = A dA/dx - B dA/dy
-        # D_ = Dx_A_over_A_ - B_over_A_ * Dy_A_over_A_
-
-        # dF  = torch.empty(z.size(), dtype=z.dtype, requires_grad=False)
-        # dF_ = dF.numpy().view(dtype=complex_type)
-        #
-        # dF_.real[:] = D_ * dx_ - C_ * dy_
-        # dF_.imag[:] = C_ * dx_ + D_ * dy_
-        # dF_.real /= (1 + B_over_A_**2)
-        # dF_.imag /= (1 + B_over_A_**2)
-        # assert not np.any(np.isnan(dF_.real)) and not np.any(np.isnan(dF_.imag))
-        # assert not np.any(np.isinf(dF_.real)) and not np.any(np.isinf(dF_.imag))
-        # return dF
 
 
 """
