@@ -3,6 +3,7 @@
 from collections import namedtuple
 import glob
 from math import sqrt
+from math import pi as PI
 import os
 import pickle
 import pwd
@@ -24,9 +25,10 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from nqs_playground import _C
-from nqs_playground.core import ExplicitState, load_explicit
+
+# from nqs_playground.core import ExplicitState, load_explicit
 from nqs_playground.hamiltonian import read_hamiltonian
-import training as _core
+import nqs_playground.core as _core
 
 
 def sample_some(
@@ -53,25 +55,60 @@ def sample_some(
     else:
         spins = _C.all_spins(options.number_spins, options.magnetisation)
         with torch.no_grad():
-            values = ψ.forward(_C.unpack(spins)).squeeze()
+            values = ψ.forward(_C.unpack(spins))
         return spins, values, 1.0
 
 
 def apply_polynomial(
-    polynomial: _C.Polynomial, spins: np.ndarray, ψ: torch.jit.ScriptModule
-) -> torch.FloatTensor:
-    r"""Computes the target state coefficient for every σ in ``spins``.
+    polynomial: _C.Polynomial,
+    spins: np.ndarray,
+    ψ: torch.jit.ScriptModule,
+    batch_size: int = 128,
+) -> torch.Tensor:
+    r"""Computes log(⟨σ|P|ψ⟩) for every |σ⟩ in ``spins``.
     
-    :param polynomial: Polynomial to apply to ψ.
+    :param polynomial: Polynomial P to apply to |ψ⟩.
     :param spins: An array of :py:class:`CompactSpin` for which to compute the
         coefficients.
-    :param ψ: Current state.
+    :param ψ: Current state. Given a ``torch.FloatTensor`` of shape
+        ``(batch_size, num_spins)`` ψ must return a ``torch.FloatTensor`` of
+        shape ``(batch_size, 2)``. Columns of the output tensor are interpreted
+        as real and imaginary parts of log(⟨σ|ψ⟩).
     """
-    r = torch.empty(spins.shape[0], dtype=torch.float32)
-    for i in range(spins.shape[0]):
-        polynomial(1.0, _C.unsafe_get(spins, i))
-        r[i] = torch.dot(ψ.forward(polynomial.vectors()), polynomial.coefficients())
-    return r
+    if not isinstance(ψ, torch.jit.ScriptModule):
+        raise TypeError(
+            "ψ has wrong type: {}; expected torch.jit.ScriptModule".format(type(ψ))
+        )
+    if batch_size <= 0:
+        raise ValueError(
+            "invalid batch_size: {}; expected a positive integer".format(batch_size)
+        )
+    # Since torch.jit.ScriptModules can't be directly passed to C++
+    # code as torch::jit::script::Modules, we first save ψ to a
+    # temporary file and then load it back in C++ code.
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        filename = f.name
+    try:
+        ψ.save(filename)
+        return _C.PolynomialState(
+            polynomial, filename, (32, len(_C.unsafe_get(spins, 0)))
+        )(spins)
+    finally:
+        os.remove(filename)
+
+
+@torch.jit.script
+def safe_real_exp(values: torch.Tensor) -> torch.Tensor:
+    assert values.dim() == 2 and values.size(1) == 2
+    amplitude = values[:, 0]
+    amplitude -= torch.max(amplitude)
+    torch.exp_(amplitude)
+    phase = values[:, 1]
+    phase /= 3.141592653589793
+    torch.round_(phase)
+    torch.abs_(phase)
+    phase = torch.fmod(phase, 2.0)
+    return amplitude * (1.0 - 2.0 * phase)
 
 
 def _create_sign_trainer(
@@ -80,6 +117,12 @@ def _create_sign_trainer(
     r"""Creates an engine for training the network on the sign structure.
 
     Cross entropy is used as loss function.
+
+    :param model: PyTorch model to train. Given a ``torch.FloatTensor`` of
+        shape ``(batch_size, num_spins)``, ``model`` must return a
+        ``torch.FloatTensor`` of shape ``(batch_size, 2)``. Columns of the
+        output tensor are interpreted as unnormalised probabilities of spin
+        configurations having signs ``+1`` or ``-1``.
     """
     return create_supervised_trainer(
         model, optimiser, loss_fn=torch.nn.CrossEntropyLoss()
@@ -124,8 +167,12 @@ def _create_amplitude_evaluator(model):
 def create_trainer(
     target: str, model: torch.nn.Module, optimiser: torch.optim.Optimizer
 ) -> ignite.engine.Engine:
-    r"""Creates an engine for optimising either the amplitude of the sign of the
+    r"""Creates an engine for optimising either the amplitude or the sign of the
     wavefunction.
+
+    :param target: either "amplitude" or "sign".
+    :param model: PyTorch model to train.
+    :param optimiser: PyTorch optimiser to use for training.
     """
     return {"sign": _create_sign_trainer, "amplitude": _create_amplitude_trainer}[
         target
@@ -158,6 +205,7 @@ class OverlapMetric(ignite.metrics.metric.Metric):
 
     def update(self, output):
         predicted, expected = output
+        predicted = predicted.squeeze()
         self._dot += torch.dot(predicted, expected).item()
         self._norm_predicted += torch.norm(predicted).item() ** 2
         self._norm_expected += torch.norm(expected).item() ** 2
@@ -341,6 +389,16 @@ class Runner(object):
         self.amplitude = load(amplitude_file)
         self.sign = load(sign_file)
 
+    def __load_model_v2(self, target):
+        def load(name):
+            return torch.jit.script(_core.import_network(name)(self.number_spins))
+
+        amplitude_file, sign_file = self.config.model
+        if target == "sign":
+            return load(sign_file)
+        else:
+            return load(amplitude_file)
+
     def __build_options(self):
         sweep_size = (
             self.config.sweep_size
@@ -393,12 +451,18 @@ class Runner(object):
         (spins, values, acceptance) = sample_some(
             self.amplitude, self.mc_options, explicit=True
         )
-        state = _core.CombiningState(self.amplitude, self.sign)
-        values = apply_polynomial(self.polynomial, spins, state)
+
+        with torch.no_grad():
+            state = _core.CombiningState(self.amplitude, self.sign, use_log=True)
+            values = apply_polynomial(self.polynomial, spins, state)
+            values = safe_real_exp(values)
+
+        size = len(set((_C.unsafe_get(spins, i) for i in range(len(spins)))))
         stop = time.time()
         tqdm.write(
             " Done in {:.2f} seconds. ".format(stop - start)
             + "Acceptance {:.2f}%".format(100 * acceptance)
+            + " Sampled {} spin configurations".format(size)
         )
         return (spins, values)
 
@@ -413,13 +477,16 @@ class Runner(object):
 
     def step(self):
         dataset = self.monte_carlo()
+        # ψ = self.__load_model_v2("amplitude")
         train(
             "amplitude",
+            # ψ,
             self.amplitude,
             dataset,
             "{}/{}/amplitude".format(self.config.output, self._iteration),
             self.config.amplitude,
         )
+        # self.amplitude.load_state_dict(ψ.state_dict())
         train(
             "sign",
             self.sign,
@@ -477,25 +544,27 @@ TrainingOptions = namedtuple(
 
 def main():
     config = Config(
-        model=("test_amplitude.py", "test_phase.py"),
-        hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10.hamiltonian",
-        epochs=5,
-        roots=[(10.0, None), (10.0, None)],
+        model=("example/1x10/amplitude_wip.py", "example/1x10/sign_wip.py"),
+        hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/hamiltonian.txt",
+        epochs=50,
+        roots=[10.0, 10.0],
         number_samples=1000,
         number_chains=2,
         output="swo/run/3",
-        exact="/vol/tcm01/westerhout_tom/nqs_frustrated_phase/data/chain/10/exact/dataset_1000.pickle",
+        exact="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/ground_state.pickle",
         amplitude=TrainingOptions(
             max_epochs=200,
-            patience=100,
+            patience=20,
             train_fraction=1.0,
-            optimiser="lambda m: torch.optim.RMSprop(m.parameters(), lr=5e-3, weight_decay=1e-5)",
+            train_batch_size=16,
+            optimiser="lambda m: torch.optim.RMSprop(m.parameters(), lr=5e-4, weight_decay=2e-4)",
         ),
         sign=TrainingOptions(
             max_epochs=200,
-            patience=100,
+            patience=20,
             train_fraction=1.0,
-            optimiser="lambda m: torch.optim.RMSprop(m.parameters(), lr=5e-3, weight_decay=1e-5)",
+            train_batch_size=16,
+            optimiser="lambda m: torch.optim.RMSprop(m.parameters(), lr=1e-3, weight_decay=1e-4)",
         ),
     )
 
