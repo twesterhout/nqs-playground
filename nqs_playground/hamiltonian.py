@@ -45,14 +45,13 @@ class Heisenberg(object):
     Isotropic Heisenberg Hamiltonian on a lattice.
     """
 
-    def __init__(self, edges: List[Tuple[int, int]], coupling: complex = 1.0):
+    def __init__(self, specs: List[Tuple[float, int, int]]):
         """
         Initialises the Hamiltonian given a list of edges.
         """
-        self._graph = edges
-        self._coupling = coupling
-        smallest = min(map(min, edges))
-        largest = max(map(max, edges))
+        self._specs = specs
+        smallest = min(map(lambda t: min(t[1:]), specs))
+        largest = max(map(lambda t: max(t[1:]), specs))
         if smallest != 0:
             ValueError(
                 "Invalid graph: Counting from 0, but the minimal index "
@@ -61,7 +60,7 @@ class Heisenberg(object):
         self._number_spins = largest + 1
 
     def to_cxx(self) -> _C.Heisenberg:
-        return _C.Heisenberg(edges=self._graph, coupling=self._coupling)
+        return _C.Heisenberg(self._specs)
 
     @property
     def number_spins(self) -> int:
@@ -72,11 +71,7 @@ class Heisenberg(object):
 
     @property
     def edges(self) -> List[Tuple[int, int]]:
-        return self._graph
-
-    @property
-    def coupling(self) -> complex:
-        return self._coupling
+        return [(i, j) for _, i, j in self._specs]
 
 
 def _read_hamiltonian(stream):
@@ -88,13 +83,9 @@ def _read_hamiltonian(stream):
         coupling = float(coupling)
         # TODO: Parse the edges properly, it's not that difficult...
         edges = eval(edges)
-        specs.append((coupling, edges))
-    # TODO: Generalise Heisenberg to support multiple graphs with different
-    # couplings
-    if len(specs) != 1:
-        raise NotImplementedError("Multiple couplings are not yet supported.")
-    coupling, edges = specs[0]
-    return Heisenberg(edges, coupling)
+        for i, j in edges:
+            specs.append((coupling, i, j))
+    return Heisenberg(specs)
 
 
 def read_hamiltonian(stream) -> Heisenberg:
@@ -102,4 +93,4 @@ def read_hamiltonian(stream) -> Heisenberg:
     Reads the Hamiltonian from ``stream``. ``stream`` could be either a
     file-like object or a ``str`` file name.
     """
-    return _with_file_like(stream, "rb", _read_hamiltonian)
+    return with_file_like(stream, "rb", _read_hamiltonian)

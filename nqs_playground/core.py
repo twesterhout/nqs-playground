@@ -334,20 +334,38 @@ def import_network(filename: str):
 
 
 def CombiningState(
-    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True
+    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True, use_log=False
 ) -> torch.nn.Module:
-    class CombiningState(torch.nn.Module):
-        def __init__(self, amplitude, sign):
-            super().__init__()
-            self.amplitude = amplitude
-            self.sign = sign
 
-        def forward(self, x):
-            y = self.amplitude.forward(x).squeeze()
-            y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
-                dtype=torch.float32
-            )
-            return y
+    if use_log:
+
+        class CombiningState(torch.nn.Module):
+            def __init__(self, amplitude, sign):
+                super().__init__()
+                self.amplitude = amplitude
+                self.sign = sign
+
+            def forward(self, x):
+                A = torch.log(self.amplitude.forward(x))
+                phase = 3.141592653589793 * torch.argmax(
+                    self.sign.forward(x), dim=1
+                ).to(dtype=torch.float32).view([-1, 1])
+                return torch.cat([A, phase], dim=1)
+
+    else:
+
+        class CombiningState(torch.nn.Module):
+            def __init__(self, amplitude, sign):
+                super().__init__()
+                self.amplitude = amplitude
+                self.sign = sign
+
+            def forward(self, x):
+                y = self.amplitude.forward(x).squeeze()
+                y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
+                    dtype=torch.float32
+                )
+                return y
 
     m = CombiningState(amplitude, sign)
     if use_jit:
