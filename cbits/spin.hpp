@@ -663,8 +663,8 @@ inline auto unpack(uint8_t const src) noexcept -> __m256
                    alignas(32) float dst[8];
                    _mm256_store_ps(dst, y);
                    // This is how unpack is supposed to work
-                   auto const get = [](uint8_t v, auto i) -> float {
-                       return 2.0f * static_cast<float>((v >> (7 - i)) & 0x01)
+                   auto const get = [](uint8_t v, auto _i) -> float {
+                       return 2.0f * static_cast<float>((v >> (7 - _i)) & 0x01)
                               - 1.0f;
                    };
                    for (auto i = 0; i < 8; ++i) {
@@ -704,8 +704,8 @@ inline auto unpack(uint16_t const src, float* dst) noexcept -> void
     // Tests the correctness
     TCM_ASSERT(([src, dst]() {
                    // This is how unpack is supposed to work
-                   auto const get = [](uint16_t v, auto i) -> float {
-                       return 2.0f * static_cast<float>((v >> (15 - i)) & 0x01)
+                   auto const get = [](uint16_t v, auto _i) -> float {
+                       return 2.0f * static_cast<float>((v >> (15 - _i)) & 0x01)
                               - 1.0f;
                    };
                    for (auto i = 0; i < 16; ++i) {
@@ -968,7 +968,8 @@ auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
 }
 // [unpack_to_tensor] }}}
 
-auto bind_spin(pybind11::module) -> void;
+auto bind_spin(PyObject*) -> void;
+// auto bind_spin(pybind11::module) -> void;
 
 TCM_NAMESPACE_END
 

@@ -28,6 +28,29 @@
 
 #include "nqs.hpp"
 #include <pybind11/pybind11.h>
+#include <torch/extension.h>
+
+namespace py = pybind11;
+
+namespace {
+auto bind_polynomial_state(py::module m) -> void
+{
+    using namespace tcm;
+
+    py::class_<PolynomialStateV2>(m, "PolynomialState")
+        .def(py::init([](std::shared_ptr<Polynomial> polynomial,
+                         std::string const&          state,
+                         std::pair<size_t, size_t>   input_shape) {
+            return std::make_unique<PolynomialStateV2>(
+                std::move(polynomial), load_forward_fn(state), input_shape);
+        }))
+        .def("__call__", [](PolynomialStateV2&                          self,
+                            py::array_t<SpinVector, py::array::c_style> spins) {
+            return self({spins.data(0), spins.shape(0)});
+        });
+}
+} // namespace
+
 
 #if defined(TCM_CLANG)
 #    pragma clang diagnostic push
@@ -42,12 +65,15 @@ PYBIND11_MODULE(_C_nqs, m)
 
     using namespace tcm;
 
-    bind_spin(m);
+    bind_spin(m.ptr());
     bind_heisenberg(m);
+    bind_explicit_state(m);
     bind_polynomial(m);
-    bind_options(m);
-    bind_chain_result(m);
-    bind_sampling(m);
-    bind_networks(m);
-    bind_dataloader(m);
+    // bind_options(m);
+    // bind_chain_result(m);
+    // bind_sampling(m);
+    // bind_networks(m);
+    // bind_dataloader(m);
+    bind_monte_carlo(m.ptr());
+    bind_polynomial_state(m);
 }

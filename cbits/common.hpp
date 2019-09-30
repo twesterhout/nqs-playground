@@ -30,7 +30,10 @@
 
 #include "config.hpp"
 #include "errors.hpp"
+#include <boost/align/aligned_allocator.hpp>
 #include <boost/align/is_aligned.hpp>
+#include <gsl/gsl-lite.hpp>
+#include <SG14/inplace_function.h>
 #include <torch/types.h>
 
 #if defined(TCM_DEBUG)
@@ -39,6 +42,7 @@
 
 #include <immintrin.h>
 #include <algorithm>
+#include <vector>
 
 TCM_NAMESPACE_BEGIN
 
@@ -137,5 +141,22 @@ auto compress(ForwardIterator first, ForwardIterator last, EqualFn equal,
     return first;
 }
 //------------------------------- [compress] ------------------------------- }}}
+
+template <class T>
+using aligned_vector =
+    std::vector<T, boost::alignment::aligned_allocator<T, std::max<size_t>(
+                                                              64, alignof(T))>>;
+
+class SpinVector;
+
+using RawForwardT =
+    stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
+                             /*capacity=*/32, /*alignment=*/8>;
+static_assert(sizeof(RawForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
+
+using ForwardT =
+    stdext::inplace_function<auto(gsl::span<SpinVector const>)->torch::Tensor,
+                             /*capacity=*/32, /*alignment=*/8>;
+static_assert(sizeof(ForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
 
 TCM_NAMESPACE_END

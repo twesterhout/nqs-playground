@@ -119,6 +119,13 @@ is_shape_okay(std::tuple<int64_t, int64_t> const& shape,
     return shape == expected;
 }
 
+inline auto is_shape_okay(c10::IntArrayRef const         shape,
+                          std::initializer_list<int64_t> expected) noexcept
+    -> bool
+{
+    return shape == c10::IntArrayRef{expected};
+}
+
 auto make_wrong_dim_msg(int64_t dimension, int64_t expected) -> std::string;
 auto make_wrong_dim_msg(int64_t dimension, int64_t expected_1,
                         int64_t expected_2) -> std::string;
@@ -126,6 +133,9 @@ auto make_wrong_shape_msg(int64_t const shape, int64_t const expected)
     -> std::string;
 auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
                           std::tuple<int64_t, int64_t> const& expected)
+    -> std::string;
+auto make_wrong_shape_msg(c10::IntArrayRef               shape,
+                          std::initializer_list<int64_t> expected)
     -> std::string;
 } // namespace detail
 

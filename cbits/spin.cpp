@@ -31,6 +31,7 @@
 #include <torch/extension.h>
 
 #include <mutex>
+#include <string_view>
 
 TCM_NAMESPACE_BEGIN
 
@@ -458,46 +459,107 @@ auto SpinVector::numpy_dtype() -> pybind11::dtype
     return pybind11::dtype::of<SpinVector>();
 }
 
-auto bind_spin(pybind11::module m) -> void
+namespace detail {
+template <class First, class Middle, class Last>
+constexpr auto for_each_line(std::string_view str, First first_fn,
+                             Middle middle_fn, Last last_fn) -> void
+{
+    auto prev = std::string_view::size_type{0};
+    auto pos  = str.find_first_of('\n');
+    if (pos != std::string_view::npos) {
+        first_fn(str.substr(prev, pos - prev));
+        prev = pos + 1;
+        while ((pos = str.find_first_of('\n', prev))
+               != std::string_view::npos) {
+            middle_fn(str.substr(prev, pos - prev));
+            prev = pos + 1;
+        }
+    }
+    last_fn(str.substr(prev));
+}
+
+constexpr auto excess_indent(std::string_view const str) -> size_t
+{
+    auto       max    = std::string_view::npos;
+    auto const update = [&max](auto const line) {
+        auto const n = line.find_first_not_of(' ');
+        if (n != 0 && n != std::string_view::npos && n < max) { max = n; }
+    };
+    for_each_line(
+        str, [](auto) {}, update, update);
+    return max != std::string_view::npos ? max : 0;
+}
+} // namespace detail
+
+inline auto trim(std::vector<std::string>& keep_alive, std::string_view raw)
+    -> char const*
+{
+    auto const n = detail::excess_indent(raw);
+    if (n == 0) { return raw.data(); }
+
+    std::string out;
+    out.reserve(raw.size());
+    detail::for_each_line(
+        raw,
+        [&out](auto const line) {
+            if (!line.empty()) {
+                out.append(line.data(), line.size());
+                out.push_back('\n');
+            }
+        },
+        [&out, n](auto line) {
+            line.remove_prefix(std::min(n, line.size()));
+            out.append(line.data(), line.size());
+            out.push_back('\n');
+        },
+        [&out, n](auto line) {
+            line.remove_prefix(std::min(n, line.size()));
+            out.append(line.data(), line.size());
+        });
+    keep_alive.push_back(std::move(out));
+    return keep_alive.back().c_str();
+}
+
+auto bind_spin(PyObject* module) -> void
 {
     namespace py = pybind11;
+    auto m       = py::module{py::reinterpret_borrow<py::object>(module)};
+
+    std::vector<std::string> keep_alive;
 
     py::class_<SpinVector>(m, "CompactSpin", R"EOF(
-        Compact representation of spin configurations. Each spin is encoded in a one bit.
+        Compact representation of spin configurations. Each spin is encoded in
+        one bit.
     )EOF")
         .def(py::init<unsigned, uint64_t>(), py::arg{"size"}, py::arg{"data"},
-             R"EOF(
-                 Creates a compact spin configuration from bits packed into an integer.
+             trim(keep_alive, R"EOF(
+                 Creates a compact spin configuration from bits packed into an
+                 integer.
 
                  :param size: number of spins. This parameter can't be deduced
-                              from ``data``, because that would discard the leading
-                              zeros.
-                 :param data: a sequence of bits packed into an int. The value of the
-                              ``i``'th spin is given by the ``i``'th most significant
-                              bit of ``data``.
-             )EOF")
+                              from ``data``, because that would discard the
+                              leading zeros.
+                 :param data: a sequence of bits packed into an int. The value
+                              of the ``i``'th spin is given by the ``i``'th most
+                              significant bit of ``data``.)EOF"))
         .def(py::init<torch::Tensor const&>(), py::arg{"x"},
-             R"EOF(
+             trim(keep_alive, R"EOF(
                  Creates a compact spin configuration from a tensor.
 
                  :param x: a one-dimensional tensor of ``float``. ``-1.0`` means
-                           spin down and ``1.0`` means spin up.
-             )EOF")
-        .def(py::init<py::str>(), py::arg{"x"},
-             R"EOF(
+                           spin down and ``1.0`` means spin up.)EOF"))
+        .def(py::init<py::str>(), py::arg{"x"}, trim(keep_alive, R"EOF(
                  Creates a compact spin configuration from a string.
 
                  :param x: a string consisting of '0's and '1's. '0' means spin
-                           down and '1' means spin up.
-             )EOF")
+                           down and '1' means spin up.)EOF"))
         .def(py::init<py::array_t<float, py::array::c_style> const&>(),
-             py::arg{"x"},
-             R"EOF(
+             py::arg{"x"}, trim(keep_alive, R"EOF(
                  Creates a compact spin configuration from a numpy array.
 
-                 :param x: a one-dimensional contiguous array of ``float``. ``-1.0``
-                           means spin down and ``1.0`` means spin up.
-             )EOF")
+                 :param x: a one-dimensional contiguous array of ``float``.
+                           ``-1.0`` means spin down and ``1.0`` means spin
+                           up.)EOF"))
         .def(
             "__copy__", [](SpinVector const& x) { return SpinVector{x}; },
             R"EOF(Copies the current spin configuration.)EOF")

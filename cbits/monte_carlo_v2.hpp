@@ -51,11 +51,6 @@ struct _Options {
     constexpr _Options& operator=(_Options&&) noexcept = default;
 };
 
-template <class T>
-using aligned_vector =
-    std::vector<T, boost::alignment::aligned_allocator<T, std::max<size_t>(
-                                                              64, alignof(T))>>;
-
 namespace v2 {
 auto sample_some(std::string const& filename, _Options const& options)
     -> std::tuple<aligned_vector<SpinVector>, aligned_vector<float>, float>;
@@ -64,6 +59,8 @@ auto sample_some(std::function<auto(torch::Tensor const&)->torch::Tensor> state,
                  _Options const& options)
     -> std::tuple<aligned_vector<SpinVector>, aligned_vector<float>, float>;
 } // namespace v2
+
+auto bind_monte_carlo(PyObject* module) -> void;
 
 TCM_NAMESPACE_END
 

@@ -32,25 +32,18 @@
 #include "errors.hpp"
 #include "spin.hpp"
 
-#include <SG14/inplace_function.h>
 #include <torch/script.h>
 #include <flat_hash_map/bytell_hash_map.hpp>
-// #include <ska_sort/ska_sort.hpp>
 
 #include <memory>
 #include <vector>
 
 TCM_NAMESPACE_BEGIN
 
-using ForwardT =
-    stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
-                             /*capacity=*/32, /*alignment=*/8>;
-static_assert(sizeof(ForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
-
 /// \brief Explicit representation of a quantum state `|ψ⟩`.
 class QuantumState // {{{
     : public ska::bytell_hash_map<SpinVector, complex_type> {
-  private:
+  public:
     using base = ska::bytell_hash_map<SpinVector, complex_type>;
     using base::value_type;
 
@@ -62,7 +55,6 @@ class QuantumState // {{{
     // static_assert(std::is_trivially_copyable<base::value_type>::value,
     //               "\n" TCM_BUG_MESSAGE);
 
-  public:
     using base::base;
 
     QuantumState(QuantumState const&) = default;
@@ -93,27 +85,30 @@ class QuantumState // {{{
     }
 }; // }}}
 
+auto keys(QuantumState const&) -> aligned_vector<SpinVector>;
+auto values(QuantumState const&, bool only_real = true) -> torch::Tensor;
+auto items(QuantumState const&, bool only_real = true)
+    -> std::pair<aligned_vector<SpinVector>, torch::Tensor>;
+
 /// \brief Represents the Heisenberg Hamiltonian.
 class Heisenberg // {{{
     : public std::enable_shared_from_this<Heisenberg> {
   public:
-    using edge_type = std::pair<unsigned, unsigned>;
+    using edge_type = std::tuple<real_type, uint16_t, uint16_t>;
+    using spec_type =
+        std::vector<edge_type,
+                    boost::alignment::aligned_allocator<edge_type, 64>>;
 
   private:
-    std::vector<edge_type> _edges; ///< Graph edges
-    real_type _coupling;           ///< Coupling J. It should usually be taken
-                                   ///< ≈1/#edges to ensure that the operator
-                                   ///< norm of H is less than 1.
-    unsigned _max_index; ///< The greatest site index present in `_edges`.
-                         ///< It is used to detect errors when one tries to
-                         ///< apply the hamiltonian to a spin configuration
-                         ///< which is too short.
+    spec_type _edges;     ///< Graph edges
+    unsigned  _max_index; ///< The greatest site index present in `_edges`.
+                          ///< It is used to detect errors when one tries to
+                          ///< apply the hamiltonian to a spin configuration
+                          ///< which is too short.
 
   public:
-    /// Constructs a hamiltonian given graph edges and the coupling.
-    ///
-    /// \precondition coupling is normal, i.e. neither zero, infinite or NaN.
-    Heisenberg(std::vector<edge_type> edges, real_type coupling);
+    /// Constructs a hamiltonian given graph edges and couplings.
+    Heisenberg(spec_type edges);
 
     /// Copy and Move constructors/assignments
     Heisenberg(Heisenberg const&)     = default;
@@ -123,11 +118,6 @@ class Heisenberg // {{{
 
     /// Returns the number of edges in the graph
     /*constexpr*/ auto size() const noexcept -> size_t { return _edges.size(); }
-
-    /// Returns the coupling.
-    constexpr auto coupling() const noexcept -> real_type { return _coupling; }
-    /// Updates the coupling.
-    auto coupling(real_type coupling) -> void;
 
     /// Returns the greatest index encountered in `_edges`.
     ///
@@ -166,6 +156,9 @@ class Heisenberg // {{{
                                spin.size(), max_index()));
         auto c = complex_type{0, 0};
         for (auto const& edge : edges()) {
+            real_type coupling;
+            uint16_t  first, second;
+            std::tie(coupling, first, second) = edge;
             // Heisenberg hamiltonian works more or less like this:
             //
             //     K|↑↑⟩ = J|↑↑⟩
@@ -176,13 +169,14 @@ class Heisenberg // {{{
             // where K is the "kernel". We want to perform
             // |ψ⟩ += c * K|σᵢσⱼ⟩ for each edge (i, j).
             //
-            auto const aligned = spin[edge.first] == spin[edge.second];
-            // sign == 1.0 when aligned == true and sign == -1.0 when aligned == false
+            auto const aligned = spin[first] == spin[second];
+            // sign == 1.0 when aligned == true and sign == -1.0
+            // when aligned == false
             auto const sign = static_cast<real_type>(-1 + 2 * aligned);
-            c += sign * coeff * coupling();
+            c += sign * coeff * coupling;
             if (!aligned) {
-                psi += {real_type{2} * coeff * coupling(),
-                        spin.flipped({edge.first, edge.second})};
+                psi += {real_type{2} * coeff * coupling,
+                        spin.flipped({first, second})};
             }
         }
         psi += {c, spin};
@@ -200,10 +194,11 @@ class Heisenberg // {{{
         TCM_ASSERT(begin != end, "Range is empty");
         // This implementation is quite inefficient, but it's not on the hot
         // bath, so who cares ;)
-        auto max_index = std::max(begin->first, begin->second);
+        auto max_index = std::max(std::get<1>(*begin), std::get<2>(*begin));
+        ++begin;
         for (; begin != end; ++begin) {
-            max_index =
-                std::max(max_index, std::max(begin->first, begin->second));
+            max_index = std::max(
+                max_index, std::max(std::get<1>(*begin), std::get<2>(*begin)));
         }
         return max_index;
     }
@@ -214,79 +209,46 @@ class Heisenberg // {{{
 ///
 ///
 class Polynomial {
-
-  public:
-    /// `P[ε](H - A)` term.
-    struct Term {
-        complex_type        root;    ///< A in the formula above
-        optional<real_type> epsilon; ///< ε in the formula above
-    };
-
   private:
     QuantumState _current;
     QuantumState _old;
     /// Hamiltonian which knows how to perform `|ψ⟩ += c * H|σ⟩`.
     std::shared_ptr<Heisenberg const> _hamiltonian;
-    /// List of terms.
-    std::vector<Term> _terms;
-    /// Scale
-    real_type _scale;
-    /// The result of applying the polynomial to a state `|ψ⟩`
-    /// can be written as ∑cᵢ|σᵢ⟩. `_basis` is the set {|σᵢ⟩}.
-    std::vector<SpinVector, boost::alignment::aligned_allocator<SpinVector, 64>>
-        _basis;
-    /// The result of applying the polynomial to a state `|ψ⟩`
-    /// can be written as ∑cᵢ|σᵢ⟩. `_coeffs` is the set {cᵢ}.
-    torch::Tensor _coeffs;
+    /// List of roots A.
+    std::vector<complex_type> _roots;
+    bool _normalising;
 
   public:
     /// Constructs the polynomial given the hamiltonian and a list or terms.
     Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
-               std::vector<Term> terms, real_type scale);
+               std::vector<complex_type> roots, bool normalising);
 
     Polynomial(Polynomial const&)           = delete;
     Polynomial(Polynomial&& other) noexcept = default;
     Polynomial& operator=(Polynomial const&) = delete;
     Polynomial& operator=(Polynomial&&) = delete;
 
-    Polynomial(Polynomial const& other, SplitTag)
-        : _current{}
-        , _old{}
-        , _hamiltonian{other._hamiltonian}
-        , _terms{other._terms}
-        , _scale{other._scale}
-        , _basis{}
-        , _coeffs{}
-    {
-        auto size = std::max(other._current.size(), other._old.size());
-        _current.reserve(size);
-        _old.reserve(size);
-        _basis.reserve(other._basis.capacity());
-        if (other._coeffs.defined()) {
-            _coeffs = detail::make_tensor<float>(other._coeffs.size(0));
-        }
-    }
-
     inline auto degree() const noexcept -> size_t;
-    inline auto size() const noexcept -> size_t;
-    inline auto clear() noexcept -> void;
 
     /// Applies the polynomial to state `|ψ⟩ = coeff * |spin⟩`.
-    TCM_NOINLINE TCM_HOT auto operator()(complex_type const coeff,
-                                         SpinVector const spin) -> Polynomial&;
+    TCM_HOT auto operator()(complex_type coeff, SpinVector spin)
+        -> QuantumState const&;
 
-    auto vectors() const noexcept -> gsl::span<SpinVector const>
-    {
-        return {_basis};
-    }
-
-    auto coefficients() const -> torch::Tensor { return _coeffs; }
+    /// Applies the polynomial to state.
+    TCM_HOT auto operator()(QuantumState const& state) -> QuantumState const&;
 
   private:
+    auto iteration(complex_type root, QuantumState& current,
+                   QuantumState const& old) const -> void;
+
+    template <size_t Offset> auto kernel() -> QuantumState const&;
+
+#if 0
     template <class Map>
     TCM_NOINLINE auto save_results(Map const&                        map,
                                    torch::optional<real_type> const& eps)
         -> void;
+#endif
 
 #if 0
     template <class Map> static auto check_all_real(Map const& map) -> void
@@ -311,28 +273,10 @@ class Polynomial {
 
 inline auto Polynomial::degree() const noexcept -> size_t
 {
-    return _terms.size();
-}
-
-inline auto Polynomial::size() const noexcept -> size_t
-{
-    return _basis.size();
-}
-
-inline auto Polynomial::clear() noexcept -> void
-{
-    _current.clear();
-    _old.clear();
-    _basis.clear();
+    return _roots.size();
 }
 
 #if 0
-constexpr auto Polynomial::items() const & noexcept -> QuantumState const&
-{
-    return _old;
-}
-#endif
-
 template <class Map>
 auto Polynomial::save_results(Map const& map, optional<real_type> const& eps)
     -> void
@@ -367,8 +311,10 @@ auto Polynomial::save_results(Map const& map, optional<real_type> const& eps)
         TCM_ASSERT(i == static_cast<int64_t>(size), "");
     }
 }
+#endif
 // [Polynomial] }}}
 
+#if 0
 // [VarAccumulator] {{{
 struct VarAccumulator {
     using value_type = real_type;
@@ -428,7 +374,9 @@ struct VarAccumulator {
 static_assert(std::is_trivially_copyable<VarAccumulator>::value, "");
 static_assert(std::is_trivially_destructible<VarAccumulator>::value, "");
 // }}}
+#endif
 
+#if 0
 // [PolynomialState] {{{
 class PolynomialState {
     struct Worker {
@@ -525,13 +473,14 @@ class PolynomialState {
     auto time_psi() const -> std::pair<real_type, real_type>;
 };
 // }}}
+#endif
 
 auto load_forward_fn(std::string const& filename) -> ForwardT;
-auto load_forward_fn(std::string const& filename, size_t count)
-    -> std::vector<ForwardT>;
+// auto load_forward_fn(std::string const& filename, size_t count)
+//     -> std::vector<ForwardT>;
 
 auto bind_heisenberg(pybind11::module) -> void;
+auto bind_explicit_state(pybind11::module m) -> void;
 auto bind_polynomial(pybind11::module) -> void;
-auto bind_polynomial_state(pybind11::module) -> void;
 
 TCM_NAMESPACE_END
