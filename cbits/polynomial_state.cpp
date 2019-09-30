@@ -120,14 +120,15 @@ auto ForwardPropagator::run(ForwardFn&& fn)
 {
     TCM_ASSERT(full(), "batch is not yet filled");
     auto output = std::forward<ForwardFn>(fn)(_spins);
-    TCM_CHECK_SHAPE(output.sizes(), {static_cast<int64_t>(_batch_size), 2L});
-    TCM_CHECK(output.is_contiguous(), std::domain_error,
-              "expected output tensor to be contiguous");
+    TCM_CHECK_SHAPE("output tensor", output,
+                    {static_cast<int64_t>(_batch_size), 2});
+    TCM_CHECK_CONTIGUOUS("output tensor", output);
     _count = 0;
     return {coeffs(), std::move(output)};
 }
 
-inline auto max_real(gsl::span<std::complex<float> const> xs) -> float
+namespace {
+auto max_real(gsl::span<std::complex<float> const> xs) -> float
 {
     auto        chunks = xs.size() / 8;
     auto        rest   = xs.size() % 8;
@@ -163,8 +164,8 @@ inline auto max_real(gsl::span<std::complex<float> const> xs) -> float
     return scalar_max;
 }
 
-inline auto dotu(gsl::span<std::complex<float> const> xs,
-                 gsl::span<std::complex<float> const> ys) TCM_NOEXCEPT
+auto dotu(gsl::span<std::complex<float> const> xs,
+          gsl::span<std::complex<float> const> ys) TCM_NOEXCEPT
     -> std::complex<float>
 {
     TCM_ASSERT(xs.size() == ys.size(), "dimensions don't match");
@@ -174,10 +175,9 @@ inline auto dotu(gsl::span<std::complex<float> const> xs,
 }
 
 /// Computes xs <- exp(xs - k)
-inline auto exp_min_const(gsl::span<std::complex<float>> xs, float const k)
-    -> void
+auto exp_min_const(gsl::span<std::complex<float>> xs, float const k) -> void
 {
-#    if 0
+#if 0
     auto const factor = vcl::Vec8f{k, 0.0f, k, 0.0f, k, 0.0f, k, 0.0f};
     auto       chunks = xs.size() / 4;
     auto       rest   = xs.size() % 4;
@@ -192,10 +192,11 @@ inline auto exp_min_const(gsl::span<std::complex<float>> xs, float const k)
     x.load_partial(2 * rest, data);
     x = __svml_cexpf8(x - factor);
     x.store_partial(2 * rest, data);
-#    else
+#else
     std::for_each(xs.begin(), xs.end(), [k](auto& x) { x = std::exp(x - k); });
-#    endif
+#endif
 }
+} // namespace
 
 Accumulator::Accumulator(std::pair<size_t, size_t> const input_shape,
                          gsl::span<std::complex<float>>  out)

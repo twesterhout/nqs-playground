@@ -49,36 +49,21 @@ auto spin_configuration_to_string(gsl::span<float const> spin) -> std::string
     msg << ']';
     return msg.str();
 }
-
-namespace {
-    template <
-        int ExtraFlags,
-        class = std::enable_if_t<ExtraFlags & pybind11::array::c_style
-                                 || ExtraFlags & pybind11::array::f_style> /**/>
-    auto copy_to_numpy_array(SpinVector const&                     spin,
-                             pybind11::array_t<float, ExtraFlags>& out) -> void
-    {
-        TCM_CHECK_DIM(out.ndim(), 1);
-        TCM_CHECK_SHAPE(out.shape(0), spin.size());
-
-        auto const spin2float = [](Spin const s) noexcept->float
-        {
-            return s == Spin::up ? 1.0f : -1.0f;
-        };
-
-        auto access = out.template mutable_unchecked<1>();
-        for (auto i = 0u; i < spin.size(); ++i) {
-            access(i) = spin2float(spin[i]);
-        }
-    }
-} // unnamed namespace
 } // namespace detail
 
 auto SpinVector::numpy() const
     -> pybind11::array_t<float, pybind11::array::c_style>
 {
+    auto const spin2float = [](Spin const s) noexcept->float
+    {
+        return s == Spin::up ? 1.0f : -1.0f;
+    };
+
     pybind11::array_t<float, pybind11::array::c_style> out{size()};
-    detail::copy_to_numpy_array(*this, out);
+    auto access = out.template mutable_unchecked<1>();
+    for (auto i = 0u; i < size(); ++i) {
+        access(i) = spin2float((*this)[i]);
+    }
     return out;
 }
 
