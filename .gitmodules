@@ -22,3 +22,9 @@
 [submodule "external/ska_sort"]
 	path = external/ska_sort
 	url = https://github.com/skarupke/ska_sort
+[submodule "external/vectorclass/version2"]
+	path = external/vectorclass/version2
+	url = git@github.com:vectorclass/version2
+[submodule "external/vectorclass/add-on"]
+	path = external/vectorclass/add-on
+	url = git@github.com:vectorclass/add-on
