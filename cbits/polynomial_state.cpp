@@ -119,6 +119,7 @@ auto ForwardPropagator::run(ForwardFn&& fn)
     -> std::pair<gsl::span<std::complex<float> const>, torch::Tensor>
 {
     TCM_ASSERT(full(), "batch is not yet filled");
+    TCM_ASSERT(_spins.size() == _batch_size, "precondition violated");
     auto output = std::forward<ForwardFn>(fn)(_spins);
     TCM_CHECK_SHAPE("output tensor", output,
                     {static_cast<int64_t>(_batch_size), 2});
