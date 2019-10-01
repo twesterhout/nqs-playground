@@ -45,7 +45,7 @@ struct ForwardPropagator {
   public:
     explicit ForwardPropagator(std::pair<size_t, size_t> input_shape);
 
-    constexpr auto clear() noexcept -> void;
+    /*constexpr*/ auto clear() noexcept -> void;
     constexpr auto batch_size() const noexcept -> size_t;
     constexpr auto full() const noexcept -> bool;
     constexpr auto empty() const noexcept -> bool;

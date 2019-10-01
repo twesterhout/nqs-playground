@@ -116,6 +116,7 @@ auto make_tensor(Ints... dims) -> torch::Tensor
 } // namespace detail
 // ------------------------- [detail::make_tensor] ------------------------- }}}
 
+#if 0
 //------------------------------- [compress] ------------------------------- {{{
 /// This is very similar to std::unique from libc++ except for the else
 /// branch which combines equal values.
@@ -141,6 +142,7 @@ auto compress(ForwardIterator first, ForwardIterator last, EqualFn equal,
     return first;
 }
 //------------------------------- [compress] ------------------------------- }}}
+#endif
 
 template <class T>
 using aligned_vector =

@@ -67,17 +67,27 @@ ForwardPropagator::ForwardPropagator(std::pair<size_t, size_t> input_shape)
               fmt::format("invalid input_shape: [{}, {}]; expected a "
                           "positive system size",
                           input_shape.first, input_shape.second));
-    _spins.resize(input_shape.first);
-    _coeffs.resize(input_shape.first);
+    _spins.resize(input_shape.first, SpinVector{});
+    constexpr auto NaN = std::numeric_limits<float>::quiet_NaN();
+    _coeffs.resize(input_shape.first, std::complex<float>{NaN, NaN});
 }
 
 auto ForwardPropagator::coeffs() const noexcept
     -> gsl::span<std::complex<float> const>
 {
+    TCM_ASSERT(_coeffs.size() == batch_size(),
+               "ForwardPropagator is in an invalid state");
     return _coeffs;
 }
 
-constexpr auto ForwardPropagator::clear() noexcept -> void { _count = 0; }
+auto ForwardPropagator::clear() noexcept -> void
+{
+    using std::begin, std::end;
+    std::fill(begin(_spins), end(_spins), SpinVector{});
+    constexpr auto NaN = std::numeric_limits<float>::quiet_NaN();
+    std::fill(begin(_coeffs), end(_coeffs), std::complex<float>{NaN, NaN});
+    _count = 0;
+}
 
 constexpr auto ForwardPropagator::batch_size() const noexcept -> size_t
 {
@@ -86,11 +96,13 @@ constexpr auto ForwardPropagator::batch_size() const noexcept -> size_t
 
 constexpr auto ForwardPropagator::full() const noexcept -> bool
 {
+    TCM_ASSERT(_count <= _batch_size, "precondition violated");
     return _count == _batch_size;
 }
 
 constexpr auto ForwardPropagator::empty() const noexcept -> bool
 {
+    TCM_ASSERT(_count <= _batch_size, "precondition violated");
     return _count == 0;
 }
 
