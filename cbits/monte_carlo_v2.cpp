@@ -23,8 +23,8 @@ _Options::_Options(unsigned const _number_spins, int const _magnetisation,
               fmt::format("invalid number_spins: {}; expected a positive "
                           "integer not greater than {}",
                           number_spins, SpinVector::max_size()));
-    TCM_CHECK(std::abs(magnetisation) <= number_spins
-                  && (number_spins + magnetisation) % 2 == 0,
+    TCM_CHECK(static_cast<unsigned>(std::abs(magnetisation)) <= number_spins
+                  && (static_cast<int>(number_spins) + magnetisation) % 2 == 0,
               std::invalid_argument,
               fmt::format("invalid magnetisation: {}", magnetisation));
     TCM_CHECK(
@@ -135,7 +135,8 @@ class MarkovChain {
         current *= current;
         suggested *= suggested;
         if (current <= suggested) return 1.0F;
-        return std::pow(suggested / current, 0.25F);
+        // return std::pow(suggested / current, 0.25F);
+        return suggested / current;
     }
 
     auto random() -> float
@@ -189,7 +190,8 @@ class MarkovChain {
         // Forward propagation on the initial state
         unpack_to_tensor(begin(_current_x), end(_current_x),
                          _proposed_x_unpacked);
-        torch::from_blob(_current_y.data(), {_current_y.size()}) =
+        torch::from_blob(_current_y.data(),
+                         {static_cast<int64_t>(_current_y.size())}) =
             _forward(_proposed_x_unpacked);
     }
 
@@ -319,7 +321,9 @@ auto sample_some(std::string const& filename, _Options const& options)
     return _sample_some(
         [&method](torch::Tensor const& x) {
             std::vector<torch::jit::IValue> stack{{x}};
-            return method(std::move(stack)).toTensor();
+            auto r = method(std::move(stack)).toTensor();
+            if (r.dim() == 2) { r.squeeze_(/*dim=*/1); }
+            return r;
         },
         options);
 }
@@ -332,5 +336,42 @@ auto sample_some(std::function<auto(torch::Tensor const&)->torch::Tensor> state,
     return _sample_some(state, options);
 }
 } // namespace v2
+
+template <class T, class Allocator>
+inline auto to_numpy_array(std::vector<T, Allocator>&& xs) -> pybind11::array
+{
+    using V         = std::vector<T, Allocator>;
+    auto const size = xs.size();
+    auto const data = xs.data();
+    auto       base = pybind11::capsule{new V{std::move(xs)},
+                                  [](void* p) { delete static_cast<V*>(p); }};
+    return py::array_t<T>{size, data, std::move(base)};
+}
+
+auto bind_monte_carlo(PyObject* module) -> void
+{
+    namespace py = pybind11;
+    auto m       = py::module{py::reinterpret_borrow<py::object>(module)};
+
+    py::class_<_Options>(m, "_Options")
+        .def(py::init<unsigned, int, unsigned, unsigned, unsigned, unsigned>(),
+             py::arg{"number_spins"}, py::arg{"magnetisation"},
+             py::arg{"number_chains"}, py::arg{"number_samples"},
+             py::arg{"sweep_size"}, py::arg{"number_discarded"})
+        .def_readonly("number_spins", &_Options::number_spins)
+        .def_readonly("magnetisation", &_Options::magnetisation)
+        .def_readonly("number_chains", &_Options::number_chains)
+        .def_readonly("number_samples", &_Options::number_samples)
+        .def_readonly("sweep_size", &_Options::sweep_size)
+        .def_readonly("number_discarded", &_Options::number_discarded);
+
+    m.def("_sample_some",
+          [](std::string const& filename, _Options const& options) {
+              auto r      = v2::sample_some(filename, options);
+              auto spins  = to_numpy_array(std::move(std::get<0>(r)));
+              auto values = to_numpy_array(std::move(std::get<1>(r)));
+              return std::make_tuple(spins, values, std::get<2>(r));
+          });
+}
 
 TCM_NAMESPACE_END

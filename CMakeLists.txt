@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -102,7 +102,7 @@ if(NOT TARGET gsl::gsl-lite)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     add_library(gsl-lite INTERFACE)
     target_include_directories(gsl-lite
-        INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/gsl-lite/include)
+        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/gsl-lite/include)
     if("${TCM_BUILD_TYPE}" STREQUAL "DEBUG")
         target_compile_definitions(gsl-lite INTERFACE
             gsl_CONFIG_CONTRACT_LEVEL_ON=1
@@ -145,6 +145,17 @@ if(NOT TARGET ska_sort)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/ska_sort)
 endif()
 
+if(NOT TARGET vectorclass)
+    execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    execute_process(COMMAND git submodule update --init -- external/vectorclass/add-on
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    add_library(vectorclass INTERFACE)
+    target_include_directories(vectorclass
+        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+    target_compile_definitions(vectorclass INTERFACE VCL_NAMESPACE=vcl)
+endif()
+
 # cpuinfo library
 # execute_process(COMMAND git submodule update --init -- external/cpuinfo
 #     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -173,8 +184,10 @@ if(NOT TARGET Boost::boost)
     execute_process(COMMAND git submodule update --init -- libs/align
                                                            libs/assert
                                                            libs/config
+                                                           libs/container
                                                            libs/core
                                                            libs/detail
+                                                           libs/move
                                                            libs/pool
                                                            libs/static_assert
                                                            libs/throw_exception
@@ -185,8 +198,10 @@ if(NOT TARGET Boost::boost)
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/container/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/move/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/throw_exception/include
@@ -265,6 +280,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               ska_sort
               Boost::boost
               SG14
+              vectorclass
               OpenMP::OpenMP_CXX
 )
 
@@ -272,14 +288,15 @@ set(nqs_cbits_HEADERS)
 
 pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
     cbits/nqs.cpp
-    cbits/data.cpp
+    # cbits/data.cpp
     cbits/errors.cpp
-    cbits/monte_carlo.cpp
-    cbits/nn.cpp
+    # cbits/monte_carlo.cpp
+    cbits/monte_carlo_v2.cpp
+    # cbits/nn.cpp
     cbits/polynomial.cpp
+    cbits/polynomial_state.cpp
     cbits/random.cpp
     cbits/spin.cpp
-    cbits/monte_carlo_v2.cpp
 )
 nqs_cbits_add_low_level_flags(_C_nqs)
 target_compile_definitions(_C_nqs PUBLIC

@@ -47,56 +47,96 @@
 
 TCM_NAMESPACE_BEGIN
 
-Heisenberg::Heisenberg(std::vector<edge_type> edges, real_type const coupling)
+auto keys(QuantumState const& psi) -> aligned_vector<SpinVector>
+{
+    using std::begin, std::end;
+    aligned_vector<SpinVector> spins;
+    spins.reserve(psi.size());
+    std::transform(begin(psi), end(psi), std::back_inserter(spins),
+                   [](auto const& item) { return item.first; });
+    return spins;
+}
+
+auto values(QuantumState const& psi, bool only_real) -> torch::Tensor
+{
+    using std::begin, std::end;
+    if (only_real) {
+        auto  coeffs = detail::make_tensor<float>(psi.size());
+        auto* data   = reinterpret_cast<float*>(coeffs.data_ptr());
+        std::transform(begin(psi), end(psi), data, [](auto const& item) {
+            return static_cast<float>(item.second.real());
+        });
+        return coeffs;
+    }
+    else {
+        auto  coeffs = detail::make_tensor<float>(psi.size(), 2);
+        auto* data = reinterpret_cast<std::complex<float>*>(coeffs.data_ptr());
+        std::transform(begin(psi), end(psi), data,
+                       [](auto const& item) { return item.second; });
+        return coeffs;
+    }
+}
+
+auto items(QuantumState const& psi, bool only_real)
+    -> std::pair<aligned_vector<SpinVector>, torch::Tensor>
+{
+    return std::make_pair(keys(psi), values(psi, only_real));
+}
+
+Heisenberg::Heisenberg(spec_type edges)
     : _edges{std::move(edges)}
-    , _coupling{coupling}
     , _max_index{std::numeric_limits<unsigned>::max()}
 {
-    TCM_CHECK(std::isnormal(coupling), std::invalid_argument,
-              fmt::format("invalid coupling: {}; expected a normal (i.e. "
-                          "neither zero, subnormal, infinite or NaN) float",
-                          coupling));
+    for (auto const& edge : _edges) {
+        auto const coupling = std::get<0>(edge);
+        TCM_CHECK(std::isnormal(coupling), std::invalid_argument,
+                  fmt::format("invalid coupling: {}; expected a normal (i.e. "
+                              "neither zero, subnormal, infinite or NaN) float",
+                              coupling));
+    }
     if (!_edges.empty()) {
         _max_index = find_max_index(std::begin(_edges), std::end(_edges));
     }
 }
 
-auto Heisenberg::coupling(real_type const coupling) -> void
-{
-    TCM_CHECK(std::isnormal(coupling), std::invalid_argument,
-              fmt::format("invalid coupling: {}; expected a normal (i.e. "
-                          "neither zero, subnormal, infinite or NaN) float",
-                          coupling));
-    _coupling = coupling;
-}
-
 Polynomial::Polynomial(std::shared_ptr<Heisenberg const> hamiltonian,
-                       std::vector<Term> terms, real_type const scale)
+                       std::vector<complex_type> roots, bool const normalising)
     : _current{}
     , _old{}
     , _hamiltonian{std::move(hamiltonian)}
-    , _terms{std::move(terms)}
-    , _scale{scale}
-    , _basis{}
-    , _coeffs{}
+    , _roots{std::move(roots)}
+    , _normalising{normalising}
 {
     TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
               "hamiltonian must not be nullptr (or None)");
-    TCM_CHECK(std::isnormal(scale), std::invalid_argument,
-              fmt::format("invalid scale: {}; expected a normal (i.e. "
-                          "neither zero, subnormal, infinite or NaN) float",
-                          scale));
+    TCM_CHECK(!_roots.empty(), std::invalid_argument,
+              "zero-degree polynomials are not supported");
     auto const estimated_size =
         std::min(static_cast<size_t>(std::round(
-                     std::pow(_hamiltonian->size() / 2, _terms.size()))),
-                 size_t{4096});
+                     std::pow(_hamiltonian->size() / 2, _roots.size()))),
+                 size_t{16384});
     _old.reserve(estimated_size);
     _current.reserve(estimated_size);
 }
 
 auto Polynomial::operator()(complex_type coeff, SpinVector const spin)
-    -> Polynomial&
+    -> QuantumState const&
 {
+    TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
+              std::runtime_error,
+              fmt::format("invalid coefficient ({}, {}); expected a finite "
+                          "(i.e. either normal, subnormal or zero)",
+                          coeff.real(), coeff.imag()));
+    TCM_CHECK(_hamiltonian->max_index() < spin.size(), std::out_of_range,
+              fmt::format("spin configuration too short {}; expected >{}",
+                          spin.size(), _hamiltonian->max_index()));
+    // `|_old⟩ := - coeff * root|spin⟩`
+    _old.clear();
+    _old.emplace(spin, -coeff * _roots[0]);
+    // `|_old⟩ += coeff * H|spin⟩`
+    (*_hamiltonian)(coeff, spin, _old);
+    return kernel<1>();
+#if 0
     using std::swap;
     TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
               std::runtime_error,
@@ -106,64 +146,98 @@ auto Polynomial::operator()(complex_type coeff, SpinVector const spin)
     TCM_CHECK(_hamiltonian->max_index() < spin.size(), std::out_of_range,
               fmt::format("spin configuration too short {}; expected >{}",
                           spin.size(), _hamiltonian->max_index()));
-    // Apply the "normalisation"
-    coeff *= _scale;
-    if (_terms.empty()) {
+    if (_roots.empty()) {
         _old.clear();
         _old.emplace(spin, coeff);
-        save_results(_old, torch::nullopt);
-        return *this;
+        return _old;
     }
 
     // The zeroth iteration: goal is to perform `_old := coeff * (H - root)|spin⟩`
     {
         // `|_old⟩ := - coeff * root|spin⟩`
         _old.clear();
-        _old.emplace(spin, -_terms[0].root * coeff);
+        _old.emplace(spin, -_roots[0] * _scale * coeff);
         // `|_old⟩ += coeff * H|spin⟩`
-        (*_hamiltonian)(coeff, spin, _old);
+        (*_hamiltonian)(_scale * coeff, spin, _old);
     }
     // Other iterations
     TCM_ASSERT(_current.empty(), "Bug!");
-    for (auto i = size_t{1}; i < _terms.size(); ++i) {
-        auto const  root    = _terms[i].root;
-        auto const& epsilon = _terms[i - 1].epsilon;
-        if (epsilon.has_value()) {
-            // Performs `|_current⟩ := (H - root)P[epsilon]|_old⟩` in two steps:
-            // 1) `|_current⟩ := - root * P[epsilon]|_old⟩`
-            for (auto const& item : _old) {
-                if (std::abs(item.second.real()) >= *epsilon) {
-                    _current.emplace(item.first, -root * item.second);
-                }
-            }
-            // 2) `|_current⟩ += H P[epsilon]|_old⟩`
-            for (auto const& item : _old) {
-                if (std::abs(item.second.real()) >= *epsilon) {
-                    (*_hamiltonian)(item.second, item.first, _current);
-                }
-            }
+    for (auto i = size_t{1}; i < _roots.size(); ++i) {
+        // Performs `|_current⟩ := (H - root)|_old⟩` in two steps:
+        // 1) `|_current⟩ := - root|_old⟩`
+        for (auto const& item : _old) {
+            _current.emplace(item.first, -_roots[i] * _scale * item.second);
         }
-        else {
-            // Performs `|_current⟩ := (H - root)|_old⟩` in two steps:
-            // 1) `|_current⟩ := - root|_old⟩`
-            for (auto const& item : _old) {
-                _current.emplace(item.first, -root * item.second);
-            }
-            // 2) `|_current⟩ += H |_old⟩`
-            for (auto const& item : _old) {
-                (*_hamiltonian)(item.second, item.first, _current);
-            }
+        // 2) `|_current⟩ += H |_old⟩`
+        for (auto const& item : _old) {
+            (*_hamiltonian)(_scale * item.second, item.first, _current);
         }
         // |_old⟩ := |_current⟩, but to not waste allocated memory, we use
         // `swap + clear` instead.
         swap(_old, _current);
         _current.clear();
     }
-    // Final filtering, i.e. `P[epsilon] |_old⟩`
-    save_results(_old, _terms.back().epsilon);
-    return *this;
+    return _old;
+#endif
 }
 
+auto Polynomial::iteration(complex_type root, QuantumState& current,
+                           QuantumState const& old) const -> void
+{
+    TCM_ASSERT(current.empty(), "Bug!");
+    if (_normalising) {
+        auto norm = real_type{0};
+        // Performs `|current⟩ := (H - root)|old⟩ / ‖old‖₂` in two steps:
+        // 1) `|current⟩ := - root|old⟩`
+        for (auto const& item : old) {
+            current.emplace(item.first, -root * item.second);
+            norm += std::norm(item.second);
+        }
+        // `|current⟩ := |current⟩ / ‖old‖₂`
+        auto const scale = real_type{1} / std::sqrt(norm);
+        for (auto& item : current) {
+            item.second *= scale;
+        }
+        // 2) `|current⟩ += H |old⟩ / ‖old‖₂`
+        for (auto const& item : old) {
+            (*_hamiltonian)(item.second * scale, item.first, current);
+        }
+    }
+    else {
+        // Performs `|current⟩ := (H - root)|old⟩` in two steps:
+        // 1) `|current⟩ := - root|old⟩`
+        for (auto const& item : old) {
+            current.emplace(item.first, -root * item.second);
+        }
+        // 2) `|current⟩ += H |old⟩`
+        for (auto const& item : old) {
+            (*_hamiltonian)(item.second, item.first, current);
+        }
+    }
+}
+
+template <size_t Offset> auto Polynomial::kernel() -> QuantumState const&
+{
+    using std::swap;
+    for (auto i = Offset; i < _roots.size(); ++i) {
+        // `|_current⟩ := (H - root)|_old⟩`
+        iteration(_roots[i], _current, _old);
+        // |_old⟩ := |_current⟩, but to not waste allocated memory, we use
+        // `swap + clear` instead.
+        swap(_old, _current);
+        _current.clear();
+    }
+    return _old;
+}
+
+auto Polynomial::operator()(QuantumState const& state) -> QuantumState const&
+{
+    if (std::addressof(state) == std::addressof(_old)) { return kernel<0>(); }
+    iteration(_roots[0], /*current=*/_old, /*old=*/state);
+    return kernel<1>();
+}
+
+#if 0
 /// Sets all `xs` to `0`.
 template <size_t N>
 inline auto zero_results(float (&xs)[N]) TCM_NOEXCEPT -> void
@@ -191,7 +265,9 @@ inline auto sum_results(float (&xs)[N]) TCM_NOEXCEPT -> float
     }
     return detail::hadd(sum);
 }
+#endif
 
+#if 0
 auto PolynomialState::Worker::operator()(int64_t const batch_index) -> float
 {
     TCM_ASSERT(batch_index >= 0, "Invalid index");
@@ -305,26 +381,56 @@ auto PolynomialState::time_psi() const -> std::pair<real_type, real_type>
 {
     return {_psi_time.mean(), std::sqrt(_psi_time.variance())};
 }
+#endif
 
 auto load_forward_fn(std::string const& filename) -> ForwardT
 {
     struct Function {
         torch::jit::script::Module _module;
         torch::jit::script::Method _method;
+        torch::Tensor              _buffer;
 
-        Function(torch::jit::script::Module&& m)
-            : _module{std::move(m)}, _method{_module.get_method("forward")}
+        explicit Function(torch::jit::script::Module&& m)
+            : _module{std::move(m)}
+            , _method{_module.get_method("forward")}
+            , _buffer{}
         {}
 
-        auto operator()(torch::Tensor const& input) -> torch::Tensor
+        auto operator()(gsl::span<SpinVector const> spins) -> torch::Tensor
         {
-            return _method({input}).toTensor();
+            TCM_CHECK(!spins.empty(), std::invalid_argument,
+                      "empty batches are not supported");
+            auto const batch_size  = static_cast<int64_t>(spins.size());
+            auto const system_size = static_cast<int64_t>(spins[0].size());
+            TCM_ASSERT(
+                std::all_of(spins.begin() + 1, spins.end(),
+                            [system_size](auto const& s) {
+                                return s.size() == system_size;
+                            }),
+                "all spin configurations in the batch must have the same size");
+            if (!_buffer.defined()) {
+                _buffer = detail::make_tensor<float>(batch_size, system_size);
+            }
+            _buffer.resize_({batch_size, system_size});
+            unpack_to_tensor(spins.begin(), spins.end(), _buffer);
+            auto       output = _method({_buffer}).toTensor();
+            auto const shape  = output.sizes();
+            TCM_CHECK(((shape.size() == 1 && shape[0] == batch_size)
+                       || (shape.size() == 2 && shape[0] == batch_size
+                           && (shape[1] == 1 || shape[1] == 2))),
+                      std::runtime_error,
+                      fmt::format("output tensor has invalid shape: {}; "
+                                  "expected [{}], [{}, 1] or [{}, 2]",
+                                  fmt::join(shape, ", "), batch_size,
+                                  batch_size, batch_size));
+            return output;
         }
     };
     return [f = std::make_shared<Function>(torch::jit::load(filename))](
                auto const& x) { return (*f)(x); };
 }
 
+#if 0
 auto load_forward_fn(std::string const& filename, size_t count)
     -> std::vector<ForwardT>
 {
@@ -354,94 +460,138 @@ auto load_forward_fn(std::string const& filename, size_t count)
     if (err_ptr != nullptr) { std::rethrow_exception(err_ptr); }
     return modules;
 }
+#endif
 
 auto bind_heisenberg(pybind11::module m) -> void
 {
     namespace py = pybind11;
     py::class_<Heisenberg, std::shared_ptr<Heisenberg>>(m, "Heisenberg")
-        .def(py::init<std::vector<std::pair<unsigned, unsigned>>, real_type>(),
-             py::arg{"edges"}, py::arg{"coupling"},
+        .def(py::init<Heisenberg::spec_type>(), py::arg{"edges"},
              R"EOF(
                  Creates an isotropic Heisenberg Hamiltonian from a list of edges.
+
+                 :param edges: A list of tuples ``(coupling, i, j)``.
              )EOF")
-        .def("__len__", [](Heisenberg const& self) { return self.size(); },
-             R"EOF(
+        .def(
+            "__len__", [](Heisenberg const& self) { return self.size(); },
+            R"EOF(
                  Returns the number of edges in the graph.
-             )EOF")
-        .def_property("coupling",
-                      [](Heisenberg const& self) { return self.coupling(); },
-                      [](Heisenberg& self, real_type const coupling) {
-                          self.coupling(coupling);
-                      })
-        .def("edges", [](Heisenberg const& self) { return self.edges(); },
-             R"EOF(
+            )EOF")
+        .def_property_readonly(
+            "edges", [](Heisenberg const& self) { return self.edges(); },
+            R"EOF(
                  Returns graph edges
 
                  .. warning:: This function copies the edges
-             )EOF");
+            )EOF");
+}
+
+auto bind_explicit_state(pybind11::module m) -> void
+{
+    py::class_<QuantumState>(m, "ExplicitState",
+                             R"EOF(
+            Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a table {(σᵢ, cᵢ)}.
+        )EOF")
+        .def("__getitem__",
+             [](QuantumState const& self, SpinVector const& spin) {
+                 auto i = self.find(spin);
+                 if (i != self.end()) { return i->second; }
+                 throw py::key_error{};
+             })
+        .def("__setitem__",
+             [](QuantumState& self, SpinVector const& spin,
+                complex_type const& value) {
+                 TCM_CHECK(
+                     std::isfinite(value.real()) && std::isfinite(value.imag()),
+                     std::runtime_error,
+                     fmt::format(
+                         "invalid value ({}, {}); expected a finite (i.e. "
+                         "either normal, subnormal or zero) complex float",
+                         value.real(), value.imag()));
+                 auto i = self.find(spin);
+                 if (i != self.end()) { i->second = value; }
+                 throw py::key_error{};
+             })
+        .def(
+            "__len__", [](QuantumState const& self) { return self.size(); },
+            R"EOF(Returns number of elements in |ψ⟩.)EOF")
+        .def(
+            "keys", [](QuantumState const& self) { return keys(self); },
+            R"EOF(Returns basis vectors {|σᵢ⟩} as a ``numpy.ndarray``.)EOF")
+        .def(
+            "values",
+            [](QuantumState const& self, bool only_real) {
+                return values(self, only_real);
+            },
+            pybind11::arg{"only_real"} = true,
+            R"EOF(
+                Returns coefficients {cᵢ} or {Re[cᵢ]} (depending on the value
+                of ``only_real``) as a ``torch.Tensor``.
+            )EOF");
 }
 
 auto bind_polynomial(pybind11::module m) -> void
 {
     namespace py = pybind11;
-    py::class_<Polynomial>(m, "Polynomial",
-                           R"EOF(
+    py::class_<Polynomial, std::shared_ptr<Polynomial>>(m, "Polynomial",
+                                                        R"EOF(
             Represents polynomials in H.
         )EOF")
-        .def(
-            py::init([](std::shared_ptr<Heisenberg>                        h,
-                        std::vector<std::pair<complex_type,
-                                              optional<real_type>>> const& ts,
-                        real_type const                                    c) {
-                // TODO(twesterhout): This function performs an ugly
-                // copy... I know it doesn't matter from the performance point
-                // of view, but it still bugs me.
-                std::vector<Polynomial::Term> terms;
-                terms.reserve(ts.size());
-                std::transform(std::begin(ts), std::end(ts),
-                               std::back_inserter(terms),
-                               [](auto const& t) -> Polynomial::Term {
-                                   return {t.first, t.second};
-                               });
-                return std::make_unique<Polynomial>(std::move(h),
-                                                    std::move(terms), c);
-            }),
-            py::arg("hamiltonian"), py::arg("terms"), py::arg("scale") = 1.0,
-            R"EOF(
-                 Given a Hamiltonian H and terms (cᵢ, εᵢ) (i ∈ {0, 1, ..., n-1})
+        .def(py::init([](std::shared_ptr<Heisenberg const> h,
+                         std::vector<complex_type> roots, bool normalising) {
+                 return std::make_shared<Polynomial>(
+                     std::move(h), std::move(roots), normalising);
+             }),
+             py::arg{"hamiltonian"}, py::arg{"roots"},
+             py::arg{"normalising"} = false,
+             R"EOF(
+                 Given a Hamiltonian H and roots {rᵢ} (i ∈ {0, 1, ..., n-1})
                  constructs the following polynomial
 
-                     P[εₙ₋₁](H - cₙ₋₁)...P[ε₂](H - c₂)P[ε₁](H - c₁)P[ε₀](H - c₀)
+                     (H - rₙ₋₁)...(H - r₂)(H - r₁)(H - r₀)
 
-                 Even though each cᵢ is complex, after expanding the brackets
+                 Even though each rᵢ is complex, after expanding the brackets
                  __all coefficients should be real__.
-
-                 P[ε] means a projection from a state ∑aᵢ|σᵢ⟩ to a state ∑bᵢ|σᵢ⟩
-                 where bᵢ = aᵢ if aᵢ > ε and bᵢ = 0 otherwise.
-            )EOF")
-        .def_property_readonly(
-            "size", [](Polynomial const& self) { return self.size(); },
-            R"EOF(
-                Returns the number of different spin configurations in the current
-                state. This attribute is only useful after applying the polynomial
-                to a state |σ⟩.
-            )EOF")
-        .def("__len__", [](Polynomial const& self) { return self.size(); },
-             R"EOF(Same as ``size``.)EOF")
-        .def("__call__", &Polynomial::operator(), py::arg{"coeff"},
-             py::arg{"spin"},
-             R"EOF(
-
              )EOF")
-        .def("vectors",
-             [](Polynomial const& p) {
-                 auto const spins = p.vectors();
-                 return unpack_to_tensor(std::begin(spins), std::end(spins));
-             },
-             py::return_value_policy::move)
-        .def("coefficients", [](Polynomial const& p) {
-            return torch::Tensor{p.coefficients()};
-        });
+        // .def_property_readonly(
+        //     "size", [](Polynomial const& self) { return self.size(); },
+        //     R"EOF(
+        //         Returns the number of different spin configurations in the current
+        //         state. This attribute is only useful after applying the polynomial
+        //         to a state |σ⟩.
+        //     )EOF")
+        // .def(
+        //     "__len__", [](Polynomial const& self) { return self.size(); },
+        //     R"EOF(Same as ``size``.)EOF")
+        .def(
+            "__call__",
+            [](Polynomial& self, complex_type coeff, SpinVector spin) {
+                return self(coeff, spin);
+            },
+            py::arg{"coeff"}, py::arg{"spin"},
+            py::return_value_policy::reference_internal,
+            R"EOF(
+
+            )EOF")
+        .def(
+            "__call__",
+            [](Polynomial& self, QuantumState const& state) {
+                return self(state);
+            },
+            py::arg{"state"}, py::return_value_policy::reference_internal,
+            R"EOF(
+
+            )EOF");
+    // .def(
+    //     "vectors",
+    //     [](Polynomial const& p) {
+    //         auto const spins = p.vectors();
+    //         return unpack_to_tensor(std::begin(spins), std::end(spins));
+    //     },
+    //     py::return_value_policy::move)
+    // .def("coefficients", [](Polynomial const& p) {
+    //     return torch::Tensor{p.coefficients()};
+    // });
 }
 
 #if 0

@@ -119,6 +119,13 @@ is_shape_okay(std::tuple<int64_t, int64_t> const& shape,
     return shape == expected;
 }
 
+inline auto is_shape_okay(c10::IntArrayRef const         shape,
+                          std::initializer_list<int64_t> expected) noexcept
+    -> bool
+{
+    return shape == c10::IntArrayRef{expected};
+}
+
 auto make_wrong_dim_msg(int64_t dimension, int64_t expected) -> std::string;
 auto make_wrong_dim_msg(int64_t dimension, int64_t expected_1,
                         int64_t expected_2) -> std::string;
@@ -127,6 +134,15 @@ auto make_wrong_shape_msg(int64_t const shape, int64_t const expected)
 auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
                           std::tuple<int64_t, int64_t> const& expected)
     -> std::string;
+auto make_wrong_shape_msg(c10::IntArrayRef               shape,
+                          std::initializer_list<int64_t> expected)
+    -> std::string;
+
+
+inline auto check_shape(char const* function, char const* arg, torch::Tensor const& x, std::initializer_list<int64_t> expected) -> void
+{
+}
+
 } // namespace detail
 
 TCM_NAMESPACE_END
@@ -150,10 +166,38 @@ TCM_NAMESPACE_END
         std::domain_error,                                                     \
         ::TCM_NAMESPACE::detail::make_wrong_dim_msg(dimension, __VA_ARGS__))
 
-#define TCM_CHECK_SHAPE(...)                                                   \
-    TCM_CHECK(::TCM_NAMESPACE::detail::is_shape_okay(__VA_ARGS__),             \
-              std::domain_error,                                               \
-              ::TCM_NAMESPACE::detail::make_wrong_shape_msg(__VA_ARGS__))
+// #define TCM_CHECK_SHAPE(...)                                                   
+//     TCM_CHECK(::TCM_NAMESPACE::detail::is_shape_okay(__VA_ARGS__),             
+//               std::domain_error,                                               
+//               ::TCM_NAMESPACE::detail::make_wrong_shape_msg(__VA_ARGS__))
+
+#define TCM_CHECK_SHAPE(name, arg, ...)                                        \
+    do {                                                                       \
+        auto const _temp_shape_ = arg.sizes();                                 \
+        auto const _temp_expected_ =                                           \
+            std::initializer_list<int64_t>(__VA_ARGS__);                       \
+        TCM_CHECK(_temp_shape_.size() == _temp_expected_.size(),               \
+                  std::domain_error,                                           \
+                  ::fmt::format(                                               \
+                      "{} has wrong number of dimensions: {}; expected {}",    \
+                      name, _temp_shape_.size(), _temp_expected_.size()));     \
+        TCM_CHECK(std::equal(_temp_expected_.begin(), _temp_expected_.end(),   \
+                             _temp_shape_.begin(),                             \
+                             [](auto const _a894, auto const _b475) {          \
+                                 return _a894 == -1 || _a894 == _b475;         \
+                             }),                                               \
+                  std::domain_error,                                           \
+                  ::fmt::format("{} has wrong number shape: {}; expected {}",  \
+                                name, fmt::join(_temp_shape_, ", "),           \
+                                fmt::join(_temp_expected_, ", ")));            \
+    } while (false)
+
+#define TCM_CHECK_CONTIGUOUS(name, arg)                                        \
+    TCM_CHECK(arg.is_contiguous(), std::domain_error,                          \
+              ::fmt::format("expected {} to be contiguous, but it has "        \
+                            "sizes={} and strides={}",                         \
+                            name, fmt::join(arg.sizes(), ", "),                \
+                            fmt::join(arg.strides(), ", ")));
 
 #define TCM_CHECK_TYPE(type, expected)                                         \
     TCM_CHECK(type == expected, std::domain_error,                             \

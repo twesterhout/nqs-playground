@@ -88,6 +88,15 @@ auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
                        std::get<0>(shape), std::get<1>(shape),
                        std::get<0>(expected), std::get<1>(expected));
 }
+
+auto make_wrong_shape_msg(c10::IntArrayRef               shape,
+                          std::initializer_list<int64_t> expected)
+    -> std::string
+{
+    return fmt::format("wrong shape [{}]; expected [{}]",
+                       fmt::join(shape, ", "), fmt::join(expected, ", "));
+}
+
 } // namespace detail
 
 TCM_NAMESPACE_END

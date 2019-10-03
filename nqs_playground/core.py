@@ -31,6 +31,8 @@
 
 import os
 import sys
+import tempfile
+from typing import Optional
 
 import numpy as np
 import torch
@@ -334,22 +336,110 @@ def import_network(filename: str):
 
 
 def CombiningState(
-    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True
+    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True, use_log=False
 ) -> torch.nn.Module:
-    class CombiningState(torch.nn.Module):
-        def __init__(self, amplitude, sign):
-            super().__init__()
-            self.amplitude = amplitude
-            self.sign = sign
 
-        def forward(self, x):
-            y = self.amplitude.forward(x).squeeze()
-            y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
-                dtype=torch.float32
-            )
-            return y
+    if use_log:
+
+        class CombiningState(torch.nn.Module):
+            def __init__(self, amplitude, sign):
+                super().__init__()
+                self.amplitude = amplitude
+                self.sign = sign
+
+            def forward(self, x):
+                A = torch.log(self.amplitude.forward(x))
+                phase = 3.141592653589793 * torch.argmax(
+                    self.sign.forward(x), dim=1
+                ).to(dtype=torch.float32).view([-1, 1])
+                return torch.cat([A, phase], dim=1)
+
+    else:
+
+        class CombiningState(torch.nn.Module):
+            def __init__(self, amplitude, sign):
+                super().__init__()
+                self.amplitude = amplitude
+                self.sign = sign
+
+            def forward(self, x):
+                y = self.amplitude.forward(x).squeeze()
+                y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
+                    dtype=torch.float32
+                )
+                return y
 
     m = CombiningState(amplitude, sign)
     if use_jit:
         m = torch.jit.script(m)
     return m
+
+
+def check_type(name, var, cls):
+    if not isinstance(var, cls):
+        raise TypeError(
+            "{} has wrong type: {}; expected an instance of {}"
+            "".format(name, type(state), cls.__name__)
+        )
+
+
+def local_energy(
+    state: torch.jit.ScriptModule,
+    hamiltonian: _C.Heisenberg,
+    spins: np.ndarray,
+    log_values: Optional[np.ndarray] = None,
+    batch_size: int = 128,
+) -> np.ndarray:
+    r"""Computes local estimators ⟨σ|H|ψ⟩/⟨σ|ψ⟩ for all σ.
+
+    :param state: wavefunction ``ψ``. ``state`` should be a function
+        mapping ``R^{batch_size x in_features}`` to ``R^{batch_size x 2}``.
+        Columns of the output are interpreted as real and imaginary parts of
+        ``log(⟨σ|ψ⟩)``.
+    :param hamiltonian: Hamiltonian ``H``.
+    :param spins: spin configurations ``σ``. Should be a non-empty NumPy array
+        of py:class:`CompactSpin`.
+    :param log_values: pre-computed ``log(⟨σ|ψ⟩)``. Should be a NumPy array of
+        ``complex64``.
+    :param batch_size: batch size to use for forward propagation through
+        ``state``.
+
+    :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
+    """
+    with torch.no_grad():
+        system_size = len(_C.unsafe_get(spins, 0))
+        if log_values is None:
+            n = spins.shape[0]
+            i = 0
+            log_values = torch.empty(n, 2, dtype=torch.float32)
+            while i + batch_size <= n:
+                log_values[i : i + batch_size] = state.forward(
+                    _C.unpack(spins[i : i + batch_size])
+                )
+                i += batch_size
+            if i != n:  # Remaining part
+                log_values[i:] = state.forward(
+                    _C.unpack(spins[i:]).view(-1, system_size)
+                )
+            log_values = log_values.numpy().view(np.complex64)
+
+        # Since torch.jit.ScriptModules can't be directly passed to C++
+        # code as torch::jit::script::Modules, we first save ψ to a
+        # temporary file and then load it back in C++ code.
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            filename = f.name
+        try:
+            with torch.no_grad():
+                state.save(filename)
+                log_H_values = (
+                    _C.PolynomialState(
+                        _C.Polynomial(hamiltonian, [0.0]),
+                        filename,
+                        (batch_size, system_size),
+                    )(spins)
+                    .numpy()
+                    .view(np.complex64)
+                )
+        finally:
+            os.remove(filename)
+        return np.exp(log_H_values - log_values).squeeze(axis=1)
