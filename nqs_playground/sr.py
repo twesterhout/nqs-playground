@@ -228,18 +228,41 @@ class Runner:
 
         return compute
 
-    def monte_carlo(self):
-        with torch.no_grad():
+    def _sample_some(self, how: str):
+        assert how in {"exact", "full"}
+        if how == "exact":
+            spins, values = core.sample_exact()
+            return spins, values, None
+        elif how == "full":
             spins = _C.all_spins(self.number_spins, self.magnetisation)
-            inputs = _C.unpack(spins)
-            weights = self.amplitude.forward(inputs)
-            weights -= torch.max(weights)
+            values = core._forward_with_batches(self.amplitude, spins, batch_size=512)
+            # self.amplitude(_C.unpack(spins)) 
+            weights = values - torch.max(values)
             weights = torch.exp(2 * weights)
             weights /= weights.sum()
+            # weights = core._log_amplitudes_to_probabilities(values)
+            return spins, values, weights
+        else:
+            raise ValueError(
+                "invalid sampling type: {}; expected one of 'exact', 'full'".format(how)
+            )
+
+    def monte_carlo(self):
+        with torch.no_grad():
+            spins, _, weights = self._sample_some("full")
+            # spins = _C.all_spins(self.number_spins, self.magnetisation)
+            # inputs = _C.unpack(spins)
+            # weights = self.amplitude.forward(inputs)
+            # weights -= torch.max(weights)
+            # weights = torch.exp(2 * weights)
+            # weights /= weights.sum()
             weights = weights.numpy().squeeze()
 
         local_energies = core.local_energy(
-            CombiningState(self.amplitude, self.phase), self.hamiltonian, spins
+            core.combine_amplitude_and_phase(self.amplitude, self.phase),
+            # CombiningState(self.amplitude, self.phase),
+            self.hamiltonian,
+            spins,
         )
         energy = np.dot(weights, local_energies)
         variance = np.dot(weights, np.abs(local_energies - energy) ** 2)
@@ -247,7 +270,7 @@ class Runner:
         self.tb_writer.add_scalar("SR/variance", variance, self._iteration)
 
         logarithmic_derivatives = logarithmic_derivative(
-            (self.amplitude, self.phase), inputs
+            (self.amplitude, self.phase), _C.unpack(spins)
         )
         # Centering
         logarithmic_derivatives -= (weights @ logarithmic_derivatives).reshape(1, -1)
@@ -323,9 +346,9 @@ def main():
     config = Config(
         model=("example/1x10/amplitude_wip.py", "example/1x10/phase_wip.py"),
         hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/hamiltonian.txt",
-        epochs=50,
+        epochs=300,
         number_samples=1000,
-        number_chains=2,
+        number_chains=1,
         output="sr/run/1",
         exact="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/ground_state.pickle",
         optimiser="lambda p: torch.optim.SGD(p, lr=1e-2)",
@@ -334,7 +357,7 @@ def main():
     if True:
         # Running the simulation
         runner = Runner(config)
-        for i in range(1000):
+        for i in range(config.epochs):
             runner.step()
 
 
