@@ -528,13 +528,37 @@ def _log_amplitudes_to_probabilities(values: torch.Tensor) -> torch.Tensor:
     return prob
 
 
+def make_monte_carlo_options(config, number_spins: int) -> _C._Options:
+    if number_spins <= 0:
+        raise ValueError(
+            "invalid number spins: {}; expected a positive integer".format(number_spins)
+        )
+    sweep_size = config.sweep_size if config.sweep_size is not None else number_spins
+    number_discarded = (
+        config.number_discarded
+        if config.number_discarded is not None
+        else config.number_samples // 10
+    )
+    magnetisation = (
+        config.magnetisation if config.magnetisation is not None else number_spins % 2
+    )
+    return _C._Options(
+        number_spins=number_spins,
+        magnetisation=magnetisation,
+        number_chains=config.number_chains,
+        number_samples=config.number_samples,
+        sweep_size=sweep_size,
+        number_discarded=number_discarded,
+    )
+
+
 def sample_exact(
     state: torch.jit.ScriptModule, options: _C._Options, batch_size: int = 256
 ) -> Tuple[np.ndarray, torch.Tensor]:
     spins = _C.all_spins(options.number_spins, options.magnetisation)
     num_samples = options.number_samples * options.number_chains
-    with torch.no_grad(), torch.jit.optimized_execution():
+    with torch.no_grad(), torch.jit.optimized_execution(True):
         values = _forward_with_batches(state, spins, batch_size)
-        weights = _log_amplitudes_to_probabilities(values)
+        weights = _log_amplitudes_to_probabilities(values).squeeze(dim=1)
         indices = torch.multinomial(weights, num_samples=num_samples, replacement=True)
         return spins[indices.numpy()], values[indices]

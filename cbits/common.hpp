@@ -34,11 +34,8 @@
 #include <boost/align/is_aligned.hpp>
 #include <gsl/gsl-lite.hpp>
 #include <SG14/inplace_function.h>
-#include <torch/types.h>
-
-#if defined(TCM_DEBUG)
 #include <c10/core/CPUAllocator.h>
-#endif
+#include <torch/types.h>
 
 #include <immintrin.h>
 #include <algorithm>
@@ -108,7 +105,7 @@ auto make_tensor(Ints... dims) -> torch::Tensor
                                 .requires_grad(false));
     TCM_ASSERT(out.is_contiguous(), "it is assumed that tensors allocated "
                                     "using `torch::empty` are contiguous");
-    TCM_ASSERT(boost::alignment::is_aligned(64U, out.template data<T>()),
+    TCM_ASSERT(boost::alignment::is_aligned(64U, out.data_ptr()),
                "it is assumed that tensors allocated using `torch::empty` are "
                "aligned to 64-byte boundary");
     return out;

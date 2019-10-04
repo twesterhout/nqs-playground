@@ -70,7 +70,7 @@ auto SpinVector::numpy() const
 auto SpinVector::tensor() const -> torch::Tensor
 {
     auto out = detail::make_tensor<float>(size());
-    copy_to({out.data<float>(), size()});
+    copy_to({out.data_ptr<float>(), size()});
     return out;
 }
 
@@ -87,7 +87,7 @@ SpinVector::SpinVector(torch::Tensor const& spins)
     TCM_CHECK(spins.is_contiguous(), std::invalid_argument,
               "input tensor must be contiguous");
     TCM_CHECK_TYPE(spins.scalar_type(), torch::kFloat32);
-    auto buffer = gsl::span<float const>{spins.data<float>(),
+    auto buffer = gsl::span<float const>{spins.data_ptr<float>(),
                                          static_cast<size_t>(spins.size(0))};
     check_range(buffer);
     copy_from(buffer);
@@ -359,6 +359,7 @@ constexpr auto unchecked_factorial(unsigned const x) noexcept -> long double
 
 constexpr auto max_factorial() noexcept -> unsigned { return 170; }
 
+namespace {
 auto binomial_coefficient(unsigned const n, unsigned const k) -> uint64_t
 {
     TCM_CHECK(k <= n, std::domain_error,
@@ -383,6 +384,7 @@ auto binomial_coefficient(unsigned const n, unsigned const k) -> uint64_t
     // convert to nearest integer:
     return static_cast<uint64_t>(std::ceil(result - 0.5L));
 }
+} // namespace
 
 auto all_spins(unsigned n, optional<int> magnetisation)
     -> std::vector<SpinVector,

@@ -29,7 +29,9 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import argparse
 from collections import namedtuple
+import json
 import math
 import os
 import pickle
@@ -101,19 +103,6 @@ def logarithmic_derivative(
     return out.numpy().view(np.complex64).squeeze(axis=2)
 
 
-def CombiningState(amplitude, phase):
-    class CombiningState(torch.nn.Module):
-        def __init__(self, amplitude, phase):
-            super().__init__()
-            self.amplitude = amplitude
-            self.phase = phase
-
-        def forward(self, x):
-            return torch.cat([self.amplitude.forward(x), self.phase.forward(x)], dim=1)
-
-    return torch.jit.script(CombiningState(amplitude, phase))
-
-
 def energy_gradient(
     local_energies: np.ndarray,
     logarithmic_derivatives: np.ndarray,
@@ -176,6 +165,7 @@ class Runner:
         self.__load_model()
         self.__load_optimiser()
         self.__add_loggers()
+        self.__add_mc_options()
         self.compute_overlap = self.__load_exact()
         self._iteration = 0
 
@@ -206,6 +196,10 @@ class Runner:
 
     def __add_loggers(self):
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
+        self.tb_writer.add_graph(self.amplitude, torch.rand(32, self.number_spins))
+
+    def __add_mc_options(self):
+        self.mc_options = core.make_monte_carlo_options(self.config, self.number_spins)
 
     def __load_exact(self):
         if self.config.exact is None:
@@ -228,19 +222,16 @@ class Runner:
 
         return compute
 
+
     def _sample_some(self, how: str):
         assert how in {"exact", "full"}
         if how == "exact":
-            spins, values = core.sample_exact()
+            spins, values = core.sample_exact(self.amplitude, self.mc_options)
             return spins, values, None
         elif how == "full":
             spins = _C.all_spins(self.number_spins, self.magnetisation)
             values = core._forward_with_batches(self.amplitude, spins, batch_size=512)
-            # self.amplitude(_C.unpack(spins)) 
-            weights = values - torch.max(values)
-            weights = torch.exp(2 * weights)
-            weights /= weights.sum()
-            # weights = core._log_amplitudes_to_probabilities(values)
+            weights = core._log_amplitudes_to_probabilities(values)
             return spins, values, weights
         else:
             raise ValueError(
@@ -256,7 +247,8 @@ class Runner:
             # weights -= torch.max(weights)
             # weights = torch.exp(2 * weights)
             # weights /= weights.sum()
-            weights = weights.numpy().squeeze()
+            if weights is not None:
+                weights = weights.numpy().squeeze()
 
         local_energies = core.local_energy(
             core.combine_amplitude_and_phase(self.amplitude, self.phase),
@@ -264,16 +256,25 @@ class Runner:
             self.hamiltonian,
             spins,
         )
-        energy = np.dot(weights, local_energies)
-        variance = np.dot(weights, np.abs(local_energies - energy) ** 2)
-        self.tb_writer.add_scalar("SR/energy", energy.real, self._iteration)
+        if weights is not None:
+            energy = np.dot(weights, local_energies)
+            variance = np.dot(weights, np.abs(local_energies - energy) ** 2)
+        else:
+            energy = np.mean(local_energies)
+            variance = np.var(local_energies)
+        self.tb_writer.add_scalar("SR/energy_real", energy.real, self._iteration)
+        self.tb_writer.add_scalar("SR/energy_imag", energy.imag, self._iteration)
         self.tb_writer.add_scalar("SR/variance", variance, self._iteration)
 
         logarithmic_derivatives = logarithmic_derivative(
             (self.amplitude, self.phase), _C.unpack(spins)
         )
         # Centering
-        logarithmic_derivatives -= (weights @ logarithmic_derivatives).reshape(1, -1)
+        if weights is not None:
+            mean_derivative = (weights @ logarithmic_derivatives).reshape(1, -1)
+        else:
+            mean_derivative = np.mean(logarithmic_derivatives, axis=0).reshape(1, -1)
+        logarithmic_derivatives -= mean_derivative
 
         force = energy_gradient(local_energies, logarithmic_derivatives, weights)
         self.tb_writer.add_scalar("SR/grad", np.linalg.norm(force), self._iteration)
@@ -343,22 +344,28 @@ Config = namedtuple(
 
 
 def main():
-    config = Config(
-        model=("example/1x10/amplitude_wip.py", "example/1x10/phase_wip.py"),
-        hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/hamiltonian.txt",
-        epochs=300,
-        number_samples=1000,
-        number_chains=1,
-        output="sr/run/1",
-        exact="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/ground_state.pickle",
-        optimiser="lambda p: torch.optim.SGD(p, lr=1e-2)",
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "config_file", type=argparse.FileType(mode="r"), help="path to JSON config file"
     )
+    args = parser.parse_args()
+    config = json.load(args.config_file)
+    config = Config(**config)
 
-    if True:
-        # Running the simulation
-        runner = Runner(config)
-        for i in range(config.epochs):
-            runner.step()
+    runner = Runner(config)
+    for i in range(config.epochs):
+        runner.step()
+
+    # config = Config(
+    #     model=("example/1x10/sr/amplitude_wip.py", "example/1x10/sr/phase_wip.py"),
+    #     hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/hamiltonian.txt",
+    #     epochs=300,
+    #     number_samples=400,
+    #     number_chains=1,
+    #     output="sr/run/5",
+    #     exact="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/ground_state.pickle",
+    #     optimiser="lambda p: torch.optim.SGD(p, lr=1e-2)",
+    # )
 
 
 if __name__ == "__main__":
