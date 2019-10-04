@@ -1,20 +1,20 @@
-# nqs-playground
 PyTorch-based implementation of SR and SWO for NQS.
 
 
-### Getting started
+Getting started
+---------------
 
 The suggested way to manage dependencies is by using ``conda``. To compile
 the C++ library we need
 
-  * ``cmake`` (>=3.13)
-  * ``g++-7`` (or newer); one can try using ``clang``, but it will most
-    likely cause all kinds of weird errors because PyTorch binaries are
-    compiled with ``g++-4.9``, and one needs to stay binary compatible
-    with it.
-  * Intel SVML
-  * Intel MKL
-  * PyTorch 1.2 (or newer)
+* ``cmake`` (>=3.13)
+* ``g++-7`` (or newer); one can try using ``clang``, but it will most
+  likely cause all kinds of weird errors because PyTorch binaries are
+  compiled with ``g++-4.9``, and one needs to stay binary compatible
+  with it.
+* Intel SVML
+* Intel MKL
+* PyTorch 1.2 (or newer)
 
 The only system requirement is ``g++-7``, the rest can be installed using
 ``conda``. There is an ``environment.yml`` file which specifies the

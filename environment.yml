@@ -15,7 +15,7 @@ dependencies:
   - clang  # (optional)
   - clangxx # (optional)
   - clang-tools # (optional)
-  # icc_rt gives use access to Intel SVML
+  # icc_rt gives us access to Intel SVML
   - icc_rt
   - cmake
   # MPI
