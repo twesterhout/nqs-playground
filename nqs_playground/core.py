@@ -32,7 +32,7 @@
 import os
 import sys
 import tempfile
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -335,52 +335,138 @@ def import_network(filename: str):
     return module.Net
 
 
-def CombiningState(
-    amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True, use_log=False
+def combine_amplitude_and_sign(
+    *modules, apply_log: bool = False, out_dim: int = 1, use_jit: bool = True
 ) -> torch.nn.Module:
+    r"""
+    """
+    if out_dim != 1 and out_dim != 2:
+        raise ValueError("invalid out_dim: {}; expected either 1 or 2".format(out_dim))
 
-    if use_log:
+    class CombiningState(torch.nn.Module):
+        __constants__ = ["apply_log", "out_dim"]
 
-        class CombiningState(torch.nn.Module):
-            def __init__(self, amplitude, sign):
-                super().__init__()
-                self.amplitude = amplitude
-                self.sign = sign
+        def __init__(self, amplitude, phase):
+            super().__init__()
+            self.apply_log = apply_log
+            self.out_dim = out_dim
+            self.amplitude = amplitude
+            self.phase = phase
 
-            def forward(self, x):
-                A = torch.log(self.amplitude.forward(x))
-                phase = 3.141592653589793 * torch.argmax(
-                    self.sign.forward(x), dim=1
-                ).to(dtype=torch.float32).view([-1, 1])
-                return torch.cat([A, phase], dim=1)
-
-    else:
-
-        class CombiningState(torch.nn.Module):
-            def __init__(self, amplitude, sign):
-                super().__init__()
-                self.amplitude = amplitude
-                self.sign = sign
-
-            def forward(self, x):
-                y = self.amplitude.forward(x).squeeze()
-                y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
-                    dtype=torch.float32
+        def forward(self, x):
+            a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
+            if self.out_dim == 1:
+                b = (
+                    (1 - 2 * torch.argmax(self.phase(x), dim=1))
+                    .to(torch.float32)
+                    .view([-1, 1])
                 )
-                return y
+                a *= b
+                return a
+            else:
+                b = 3.141592653589793 * torch.argmax(self.phase(x), dim=1).to(
+                    torch.float32
+                ).view([-1, 1])
+                return torch.cat([a, b], dim=1)
 
-    m = CombiningState(amplitude, sign)
+    m = CombiningState(*modules)
     if use_jit:
         m = torch.jit.script(m)
     return m
 
 
-def check_type(name, var, cls):
-    if not isinstance(var, cls):
-        raise TypeError(
-            "{} has wrong type: {}; expected an instance of {}"
-            "".format(name, type(state), cls.__name__)
-        )
+def combine_amplitude_and_phase(
+    *modules, apply_log: bool = False, use_jit: bool = True
+) -> torch.nn.Module:
+    r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
+    and phase into a single module representing the logarithm of the
+    wavefunction.
+
+    :param modules: a tuple of two modules: ``(amplitude, phase)``. Both
+        modules have ``(batch_size, in_features)`` as input shape and
+        ``(batch_size, 1)`` as output shape.
+    :param apply_log: if ``True``, logarithm is applied to the output of
+        ``amplitude`` module.
+    :param use_jit: if ``True``, the returned module is a
+        ``torch.jit.ScriptModule``.
+    """
+
+    class CombiningState(torch.nn.Module):
+        __constants__ = ["apply_log"]
+
+        def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
+            super().__init__()
+            self.apply_log = apply_log
+            self.amplitude = amplitude
+            self.phase = phase
+
+        def forward(self, x: torch.Tensor):
+            a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
+            b = self.phase(x)
+            return torch.cat([a, b], dim=1)
+
+    m = CombiningState(*modules)
+    if use_jit:
+        m = torch.jit.script(m)
+    return m
+
+
+# def CombiningState(
+#     amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True, use_log=False
+# ) -> torch.nn.Module:
+#
+#     if use_log:
+#
+#         class CombiningState(torch.nn.Module):
+#             def __init__(self, amplitude, sign):
+#                 super().__init__()
+#                 self.amplitude = amplitude
+#                 self.sign = sign
+#
+#             def forward(self, x):
+#                 A = torch.log(self.amplitude.forward(x))
+#                 phase = 3.141592653589793 * torch.argmax(
+#                     self.sign.forward(x), dim=1
+#                 ).to(dtype=torch.float32).view([-1, 1])
+#                 return torch.cat([A, phase], dim=1)
+#
+#     else:
+#
+#         class CombiningState(torch.nn.Module):
+#             def __init__(self, amplitude, sign):
+#                 super().__init__()
+#                 self.amplitude = amplitude
+#                 self.sign = sign
+#
+#             def forward(self, x):
+#                 y = self.amplitude.forward(x).squeeze()
+#                 y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
+#                     dtype=torch.float32
+#                 )
+#                 return y
+#
+#     m = CombiningState(amplitude, sign)
+#     if use_jit:
+#         m = torch.jit.script(m)
+#     return m
+
+
+def _forward_with_batches(state, input, batch_size):
+    n = input.shape[0]
+    if n == 0:
+        raise ValueError("input should not be empty")
+    system_size = len(_C.unsafe_get(input, 0))
+    i = 0
+    out = []
+    while i + batch_size <= n:
+        out.append(state(_C.unpack(input[i : i + batch_size])))
+        i += batch_size
+    if i != n:  # Remaining part
+        out.append(state(_C.unpack(input[i:]).view(-1, system_size)))
+    # r = torch.cat(out, dim=0)
+    # assert torch.all(r == state(_C.unpack(input)))
+    # return r
+    return torch.cat(out, dim=0)
 
 
 def local_energy(
@@ -407,39 +493,72 @@ def local_energy(
     :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
     """
     with torch.no_grad():
-        system_size = len(_C.unsafe_get(spins, 0))
-        if log_values is None:
-            n = spins.shape[0]
-            i = 0
-            log_values = torch.empty(n, 2, dtype=torch.float32)
-            while i + batch_size <= n:
-                log_values[i : i + batch_size] = state.forward(
-                    _C.unpack(spins[i : i + batch_size])
-                )
-                i += batch_size
-            if i != n:  # Remaining part
-                log_values[i:] = state.forward(
-                    _C.unpack(spins[i:]).view(-1, system_size)
-                )
-            log_values = log_values.numpy().view(np.complex64)
+        with torch.jit.optimized_execution(True):
+            if log_values is None:
+                log_values = _forward_with_batches(state, spins, batch_size)
+                log_values = log_values.numpy().view(np.complex64)
 
-        # Since torch.jit.ScriptModules can't be directly passed to C++
-        # code as torch::jit::script::Modules, we first save ψ to a
-        # temporary file and then load it back in C++ code.
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            filename = f.name
-        try:
-            with torch.no_grad():
+            # Since torch.jit.ScriptModules can't be directly passed to C++
+            # code as torch::jit::script::Modules, we first save ψ to a
+            # temporary file and then load it back in C++ code.
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                filename = f.name
+            try:
                 state.save(filename)
                 log_H_values = (
                     _C.PolynomialState(
                         _C.Polynomial(hamiltonian, [0.0]),
                         filename,
-                        (batch_size, system_size),
+                        (batch_size, len(_C.unsafe_get(spins, 0))),
                     )(spins)
                     .numpy()
                     .view(np.complex64)
                 )
-        finally:
-            os.remove(filename)
-        return np.exp(log_H_values - log_values).squeeze(axis=1)
+            finally:
+                os.remove(filename)
+            return np.exp(log_H_values - log_values).squeeze(axis=1)
+
+
+@torch.jit.script
+def _log_amplitudes_to_probabilities(values: torch.Tensor) -> torch.Tensor:
+    prob = values - torch.max(values)
+    prob *= 2
+    prob = torch.exp_(prob)
+    prob /= torch.sum(prob)
+    return prob
+
+
+def make_monte_carlo_options(config, number_spins: int) -> _C._Options:
+    if number_spins <= 0:
+        raise ValueError(
+            "invalid number spins: {}; expected a positive integer".format(number_spins)
+        )
+    sweep_size = config.sweep_size if config.sweep_size is not None else number_spins
+    number_discarded = (
+        config.number_discarded
+        if config.number_discarded is not None
+        else config.number_samples // 10
+    )
+    magnetisation = (
+        config.magnetisation if config.magnetisation is not None else number_spins % 2
+    )
+    return _C._Options(
+        number_spins=number_spins,
+        magnetisation=magnetisation,
+        number_chains=config.number_chains,
+        number_samples=config.number_samples,
+        sweep_size=sweep_size,
+        number_discarded=number_discarded,
+    )
+
+
+def sample_exact(
+    state: torch.jit.ScriptModule, options: _C._Options, batch_size: int = 256
+) -> Tuple[np.ndarray, torch.Tensor]:
+    spins = _C.all_spins(options.number_spins, options.magnetisation)
+    num_samples = options.number_samples * options.number_chains
+    with torch.no_grad(), torch.jit.optimized_execution(True):
+        values = _forward_with_batches(state, spins, batch_size)
+        weights = _log_amplitudes_to_probabilities(values).squeeze(dim=1)
+        indices = torch.multinomial(weights, num_samples=num_samples, replacement=True)
+        return spins[indices.numpy()], values[indices]

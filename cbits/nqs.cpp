@@ -46,7 +46,7 @@ auto bind_polynomial_state(py::module m) -> void
         }))
         .def("__call__", [](PolynomialStateV2&                          self,
                             py::array_t<SpinVector, py::array::c_style> spins) {
-            return self({spins.data(0), spins.shape(0)});
+            return self({spins.data(0), static_cast<size_t>(spins.shape(0))});
         });
 }
 } // namespace

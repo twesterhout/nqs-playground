@@ -930,7 +930,7 @@ auto unpack_to_tensor(RandomAccessIterator first, RandomAccessIterator last,
 
     auto const tail =
         std::min(((16UL - rest_16) + number_spins - 1) / number_spins, size);
-    auto* data = dst.data<float>();
+    auto* data = dst.data_ptr<float>();
     auto  iter = first;
     for (auto i = size_t{0}; i < size - tail;
          ++i, ++iter, data += number_spins) {
