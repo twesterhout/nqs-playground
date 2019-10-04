@@ -1,0 +1,49 @@
+name: tcm-test
+channels:
+  - defaults
+  - conda-forge
+  - pytorch-nightly
+  - intel
+dependencies:
+  - python=3.7
+  - pip
+  # Compilers (gcc is basically useless, because
+  # it ships with an extremely old libc)
+  - gcc_linux-64 # (optional)
+  - gxx_linux-64 # (optional)
+  - gfortran_linux-64 # (optional)
+  - clang  # (optional)
+  - clangxx # (optional)
+  - clang-tools # (optional)
+  # icc_rt gives use access to Intel SVML
+  - icc_rt
+  - cmake
+  # MPI
+  - mpich
+  # Intel MKL
+  - mkl
+  - mkl-include
+  - mkl-service
+  - mkl_fft
+  - mkl_random
+  # Python packages
+  - black # (optional) but highly recommended since all
+          # Python code in the project is formatted using Black
+  - numpy
+  - scipy
+  - numba
+  - tqdm
+  - pytest
+  - ignite
+  # Pandoc
+  - pandoc # (optional)
+  - tmux # (optional)
+  # Using nightly before pytorch-cpu gets updated to 1.2
+  - pytorch=1.3.*
+  - cpuonly # You may want to remove this if you have CUDA
+  - pip:
+    # If this doesn't work, run the following __after__ conda
+    # completes the installation:
+    #    python3 -m pip install --force-reinstall --no-cache-dir mpi4py 
+    - mpi4py
+    - neovim # (optional)
