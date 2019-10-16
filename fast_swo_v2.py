@@ -435,7 +435,7 @@ class Runner(object):
         x = _C.all_spins(self.mc_options.number_spins, self.mc_options.magnetisation)
         dataset = _core.make_spin_dataloader(x, y, batch_size=2048)
         evaluator = create_supervised_evaluator(
-            _core.CombiningState(self.amplitude, self.sign),
+            _core.combine_amplitude_and_sign(self.amplitude, self.sign),
             metrics={"overlap": OverlapMetric()},
         )
 
@@ -453,7 +453,9 @@ class Runner(object):
         )
 
         with torch.no_grad():
-            state = _core.CombiningState(self.amplitude, self.sign, use_log=True)
+            state = _core.combine_amplitude_and_phase(
+                self.amplitude, self.sign, apply_log=True, use_classifier=True
+            )
             values = apply_polynomial(self.polynomial, spins, state)
             values = safe_real_exp(values)
 

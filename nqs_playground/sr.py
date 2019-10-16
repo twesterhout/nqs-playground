@@ -240,7 +240,7 @@ class Runner:
 
     def monte_carlo(self):
         with torch.no_grad():
-            spins, _, weights = self._sample_some("full")
+            spins, _, weights = self._sample_some("exact")
             # spins = _C.all_spins(self.number_spins, self.magnetisation)
             # inputs = _C.unpack(spins)
             # weights = self.amplitude.forward(inputs)
