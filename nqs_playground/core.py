@@ -376,7 +376,7 @@ def combine_amplitude_and_sign(
 
 
 def combine_amplitude_and_phase(
-    *modules, apply_log: bool = False, use_jit: bool = True
+    *modules, apply_log: bool = False, use_jit: bool = True, use_classifier: bool = True
 ) -> torch.nn.Module:
     r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
     and phase into a single module representing the logarithm of the
@@ -390,20 +390,47 @@ def combine_amplitude_and_phase(
     :param use_jit: if ``True``, the returned module is a
         ``torch.jit.ScriptModule``.
     """
+    if use_classifier:
 
-    class CombiningState(torch.nn.Module):
-        __constants__ = ["apply_log"]
+        class CombiningState(torch.nn.Module):
+            __constants__ = ["apply_log"]
 
-        def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
-            super().__init__()
-            self.apply_log = apply_log
-            self.amplitude = amplitude
-            self.phase = phase
+            def __init__(self, amplitude: torch.nn.Module, sign: torch.nn.Module):
+                super().__init__()
+                self.apply_log = apply_log
+                self.amplitude = amplitude
+                self.sign = sign
 
-        def forward(self, x: torch.Tensor):
-            a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
-            b = self.phase(x)
-            return torch.cat([a, b], dim=1)
+            def forward(self, x):
+                a = (
+                    torch.log(self.amplitude(x))
+                    if self.apply_log
+                    else self.amplitude(x)
+                )
+                b = 3.141592653589793 * torch.argmax(self.sign.forward(x), dim=1).to(
+                    dtype=torch.float32
+                ).view([-1, 1])
+                return torch.cat([a, b], dim=1)
+
+    else:
+
+        class CombiningState(torch.nn.Module):
+            __constants__ = ["apply_log"]
+
+            def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
+                super().__init__()
+                self.apply_log = apply_log
+                self.amplitude = amplitude
+                self.phase = phase
+
+            def forward(self, x: torch.Tensor):
+                a = (
+                    torch.log(self.amplitude(x))
+                    if self.apply_log
+                    else self.amplitude(x)
+                )
+                b = self.phase(x)
+                return torch.cat([a, b], dim=1)
 
     m = CombiningState(*modules)
     if use_jit:
