@@ -4,6 +4,7 @@ channels:
   - conda-forge
   - pytorch-nightly
   - intel
+  - weinbe58 # for QuSpin only
 dependencies:
   - python=3.7
   - pip
@@ -35,6 +36,10 @@ dependencies:
   - tqdm
   - pytest
   - ignite
+  - tensorboard
+  - quspin # (optional)
+  - python-igraph # (optional)
+  - matplotlib # (optional)
   # Pandoc
   - pandoc # (optional)
   - tmux # (optional)
