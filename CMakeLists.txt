@@ -250,6 +250,15 @@ endif()
 # OpenMP
 find_package(OpenMP REQUIRED)
 
+# Taskflow
+if(NOT TARGET Taskflow)
+    execute_process(COMMAND git submodule update --init -- external/cpp-taskflow
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    add_library(Taskflow INTERFACE)
+    target_include_directories(Taskflow
+        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-taskflow)
+endif()
+
 # Sleef
 if(FALSE)
 ExternalProject_Add(Sleef_build
@@ -281,6 +290,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               Boost::boost
               SG14
               vectorclass
+              Taskflow
               OpenMP::OpenMP_CXX
 )
 
@@ -297,6 +307,9 @@ pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
     cbits/polynomial_state.cpp
     cbits/random.cpp
     cbits/spin.cpp
+    cbits/spin_basis.cpp
+    cbits/pool.cpp
+    cbits/trim.cpp
 )
 nqs_cbits_add_low_level_flags(_C_nqs)
 target_compile_definitions(_C_nqs PUBLIC
