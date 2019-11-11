@@ -158,4 +158,11 @@ using ForwardT =
                              /*capacity=*/32, /*alignment=*/8>;
 static_assert(sizeof(ForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
 
+namespace v2 {
+template <class S>
+using ForwardT =
+    stdext::inplace_function<auto(gsl::span<S const>)->torch::Tensor,
+                             /*capacity=*/32, /*alignment=*/8>;
+} // namespace v2
+
 TCM_NAMESPACE_END

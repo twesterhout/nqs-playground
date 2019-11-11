@@ -40,3 +40,5 @@
 #include "polynomial_state.hpp"
 #include "random.hpp"
 #include "spin.hpp"
+#include "spin_basis.hpp"
+#include "quantum_state.hpp"

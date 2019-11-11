@@ -27,7 +27,11 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "nqs.hpp"
+#include "trim.hpp"
+#include <pybind11/functional.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
 
 namespace py = pybind11;
@@ -49,6 +53,380 @@ auto bind_polynomial_state(py::module m) -> void
             return self({spins.data(0), static_cast<size_t>(spins.shape(0))});
         });
 }
+
+template <class T>
+auto span_to_numpy(gsl::span<T> xs, py::object base) -> py::array
+{
+    using type = std::remove_const_t<T>;
+    auto a     = py::array_t<type>{xs.size(), xs.data(), base};
+    if (std::is_const<T>::value) {
+        // NOTE: Yes, it's not nice to use pybind11::detail, but currently,
+        // there's no other way...
+        pybind11::detail::array_proxy(a.ptr())->flags &=
+            ~pybind11::detail::npy_api::NPY_ARRAY_WRITEABLE_;
+    }
+    return a;
+}
+
+template <class T, class Allocator>
+auto vector_to_numpy(std::vector<T, Allocator>&& xs) -> py::array
+{
+    using V         = std::vector<T, Allocator>;
+    auto const data = xs.data();
+    auto const size = xs.size();
+    auto       base = py::capsule{new V{std::move(xs)},
+                            [](void* p) { delete static_cast<V*>(p); }};
+    return py::array_t<T>{size, data, std::move(base)};
+}
+
+auto bind_spin_basis(py::module m) -> void
+{
+    using namespace tcm;
+    m = m.def_submodule("v2");
+    std::vector<std::string> keep_alive;
+
+#define DOC(str) trim(keep_alive, str)
+
+    py::class_<Symmetry>(m, "Symmetry", DOC(R"EOF(
+        A symmetry operator with optimised ``__call__`` member function. It
+        stores three things: a Benes network to permute bits, periodicity of
+        the permutation, and the symmetry sector.
+        )EOF"))
+        .def(py::init(
+                 [](std::pair<std::array<uint64_t, 6>, std::array<uint64_t, 6>>
+                             network,
+                    unsigned sector, unsigned periodicity) {
+                     return Symmetry{
+                         {network.first, network.second}, sector, periodicity};
+                 }),
+             DOC(R"EOF(
+             Initialises the symmetry given a Benes network, symmetry sector, and
+             periodicity of the operator.
+
+             :param network: a Benes network for permuting 64-bit integers. It
+                is given as a pair of lists of masks. *Validity of the network is
+                not checked!*
+             :param sector: symmetry sector. It must be in ``[0, periodicity)``.
+                Eigenvalue of the operator is then ``exp(-2πi * sector/periodicity)``.
+             :param periodicity: a positive integer specifying the periodicity
+                of the operator.
+             )EOF"),
+             py::arg{"network"}, py::arg{"sector"}, py::arg{"periodicity"})
+        .def_property_readonly("sector", &Symmetry::sector)
+        .def_property_readonly("periodicity", &Symmetry::periodicity)
+        .def_property_readonly("eigenvalue", &Symmetry::eigenvalue)
+        .def(
+            "__call__",
+            [](Symmetry const& self, uint64_t const x) { return self(x); },
+            DOC(R"EOF(
+            Permutes bits of ``x`` according to the underlying permutation.
+            )EOF"),
+            py::arg{"x"});
+
+    py::class_<SpinBasis, std::shared_ptr<SpinBasis>>(m, "SpinBasis")
+        .def(py::init<std::vector<Symmetry>, unsigned,
+                      std::optional<unsigned>>(),
+             DOC(R"EOF(
+             Initialises the basis without constructing the internal cache.
+             Memory usage thus does not increase with system size (only with
+             number of symmetries, but this is negligible).
+
+             :param symmetries: a list of symmetries. It must be either empty or
+                form a group. This is unchecked, but bad stuff will happen is
+                this requirement is not fulfilled.
+             :param number_spins: number of particles in the system.
+             :param hamming_weight: Hamming weight of states, i.e. number of
+                 spin ups. Specifying it is equivalent to restricting the
+                 Hilbert space to some magnetisation sector.
+             )EOF"),
+             py::arg{"symmetries"}, py::arg{"number_spins"},
+             py::arg{"hamming_weight"})
+        .def("build", &SpinBasis::build, DOC(R"EOF(
+             Constructs a list of representative vectors. After this operation,
+             methods such as ``index``, ``number_states``, and ``states`` can be
+             used.
+             )EOF"))
+        .def_property_readonly(
+            "states",
+            [](py::object self) {
+                return span_to_numpy(self.cast<SpinBasis const&>().states(),
+                                     self);
+            },
+            DOC(R"EOF(
+            Array of representative states. This property is available only
+            after a call to ``build()``.
+            )EOF"))
+        .def_property_readonly("number_spins", &SpinBasis::number_spins,
+                               DOC(R"EOF(
+            Number of particles in the system.
+            )EOF"))
+        .def_property_readonly("number_states", &SpinBasis::number_states,
+                               DOC(R"EOF(
+            Number of states in the basis. This property is available only
+            after a call to ``build()``.
+            )EOF"))
+        .def("index", &SpinBasis::index, DOC(R"EOF(
+             Given a representative state ``x``, returns its index in the array
+             of representatives (i.e. ``self.states``).
+             )EOF"),
+             py::arg{"x"})
+        .def("normalisation", &SpinBasis::normalisation, DOC(R"EOF(
+             Given a representative state ``x``, returns its "norm".
+             )EOF"),
+             py::arg{"x"})
+        .def("representative", &SpinBasis::representative, DOC(R"EOF(
+             Given a state ``x``, returns its representative.
+             )EOF"))
+        .def("full_info", &SpinBasis::full_info, DOC(R"EOF(
+             Given a state ``x``, returns a tuple ``(r, λ, N)`` where ``r`` is
+             the representative of ``x``, ``N`` is the "norm" of ``r``, and λ is
+             the eigenvalue of a group element ``g`` such that ``gr == x``.
+             )EOF"))
+        .def(
+            "unpack",
+            [](SpinBasis const&                                   self,
+               py::array_t<SpinBasis::StateT, py::array::c_style> states) {
+                auto const* shape = states.shape();
+                TCM_CHECK(
+                    states.ndim() == 1, std::invalid_argument,
+                    fmt::format("states has invalid shape: [{}]; expected a "
+                                "one-dimensional array",
+                                fmt::join(shape, shape + states.ndim(), ", ")));
+                auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
+                    *shape, self.number_spins());
+                auto const in = gsl::span<SpinBasis::StateT const>{
+                    static_cast<SpinBasis::StateT const*>(states.data()),
+                    static_cast<size_t>(*shape)};
+                self.unpack(in.begin(), in.end(), out,
+                            [](auto x) { return x; });
+                return out;
+            },
+            DOC(R"EOF(
+            Given a 1D array of states, returns a 2D tensor of float32 where
+            each bit is replaced by a float (0 becomes -1.0 and 1 becomes 1.0).
+
+            This operation is uses SIMD intrinsics under the hood and is
+            relatively efficient. It is thus okay to call it on every batch
+            before propagating it through a neural network.
+            )EOF"),
+            py::arg{"states"});
+
+    py::class_<v2::Heisenberg, std::shared_ptr<v2::Heisenberg>>(m, "Heisenberg")
+        .def(py::init<v2::Heisenberg::spec_type,
+                      std::shared_ptr<SpinBasis const>>())
+        .def_property_readonly("edges", &v2::Heisenberg::edges)
+        .def_property_readonly("basis", &v2::Heisenberg::basis)
+        .def("__call__",
+             [](v2::Heisenberg const& self, SpinBasis::StateT const x) {
+                 auto [buffer, size] = self(x);
+                 return std::vector<decltype(buffer)::element_type>(
+                     buffer.get(), buffer.get() + size);
+             })
+        .def("__call__",
+             [](v2::Heisenberg const&                                 self,
+                py::array_t<std::complex<double>, py::array::c_style> x,
+                py::array_t<std::complex<double>, py::array::c_style> y) {
+                 self(
+                     gsl::span<std::complex<double> const>{
+                         x.data(), static_cast<size_t>(x.shape(0))},
+                     gsl::span<std::complex<double>>{
+                         y.mutable_data(), static_cast<size_t>(y.shape(0))});
+             });
+
+    py::class_<v2::QuantumState>(m, "ExplicitState",
+                                 R"EOF(
+            Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a table {(σᵢ, cᵢ)}.
+        )EOF")
+        .def("__getitem__",
+             [](v2::QuantumState const&               self,
+                v2::QuantumState::key_type const& spin) {
+                 auto i = self.find(spin);
+                 if (i != self.end()) { return i->second; }
+                 throw py::key_error{};
+             })
+        .def("__setitem__",
+             [](v2::QuantumState& self, v2::QuantumState::key_type const& spin,
+                complex_type const& value) {
+                 TCM_CHECK(
+                     std::isfinite(value.real()) && std::isfinite(value.imag()),
+                     std::runtime_error,
+                     fmt::format(
+                         "invalid value {} + {}j; expected a finite (i.e. "
+                         "either normal, subnormal or zero) complex float",
+                         value.real(), value.imag()));
+                 auto i = self.find(spin);
+                 if (i != self.end()) { i->second = value; }
+                 throw py::key_error{};
+             })
+        .def(
+            "__len__", [](v2::QuantumState const& self) { return self.size(); },
+            R"EOF(Returns number of elements in |ψ⟩.)EOF")
+        .def(
+            "keys", [](v2::QuantumState const& self) { return vector_to_numpy(keys(self)); },
+            R"EOF(Returns basis vectors {|σᵢ⟩} as a ``numpy.ndarray``.)EOF")
+        .def(
+            "values",
+            [](v2::QuantumState const& self, bool only_real) {
+                return values(self, only_real);
+            },
+            pybind11::arg{"only_real"} = false,
+            R"EOF(
+                Returns coefficients {cᵢ} or {Re[cᵢ]} (depending on the value
+                of ``only_real``) as a ``torch.Tensor``.
+            )EOF");
+
+    py::class_<v2::Polynomial, std::shared_ptr<v2::Polynomial>>(m, "Polynomial")
+        .def(py::init([](std::shared_ptr<v2::Heisenberg const> h,
+                         std::vector<complex_type> roots, bool normalising) {
+                 return std::make_shared<v2::Polynomial>(
+                     std::move(h), std::move(roots), normalising);
+             }),
+             py::arg{"hamiltonian"}, py::arg{"roots"},
+             py::arg{"normalising"} = false, DOC(R"EOF(
+             Given a Hamiltonian H and roots {rᵢ} (i ∈ {0, 1, ..., n-1})
+             constructs the following polynomial
+
+                 P = (H - rₙ₋₁)...(H - r₂)(H - r₁)(H - r₀)
+
+             :param hamiltonian: Hamiltonian H.
+             :param roots: a list of roots {rᵢ}.
+             :param normalising: if True, scaling coefficients will be between
+                brackets to ensure that the norm of P is around 1.
+             )EOF"))
+        .def_property_readonly("hamiltonian", &v2::Polynomial::hamiltonian)
+        .def(
+            "__call__",
+            [](v2::Polynomial& self, complex_type coeff,
+               SpinBasis::StateT spin) { return self(coeff, spin); },
+            py::arg{"coeff"}, py::arg{"spin"},
+            py::return_value_policy::reference_internal)
+        .def(
+            "__call__",
+            [](v2::Polynomial& self, v2::QuantumState const& state) {
+                return self(state);
+            },
+            py::arg{"state"}, py::return_value_policy::reference_internal);
+
+    py::class_<v2::PolynomialState>(m, "PolynomialState")
+        .def(py::init([](std::shared_ptr<v2::Polynomial> polynomial,
+                         torch::jit::script::Method      forward,
+                         unsigned const                  internal_batch_size) {
+            struct Function {
+                using StateT = v2::PolynomialState::StateT;
+                torch::jit::script::Method _method;
+                torch::Tensor              _buffer;
+                SpinBasis const*           _basis;
+
+                auto operator()(gsl::span<StateT const> spins) -> torch::Tensor
+                {
+                    TCM_CHECK(!spins.empty(), std::invalid_argument,
+                              "empty batches are not supported");
+                    auto const batch_size = static_cast<int64_t>(spins.size());
+                    auto const system_size =
+                        static_cast<int64_t>(_basis->number_spins());
+                    if (!_buffer.defined()) {
+                        _buffer = ::TCM_NAMESPACE::detail::make_tensor<float>(
+                            batch_size, system_size);
+                    }
+                    _buffer.resize_({batch_size, system_size});
+                    _basis->unpack(spins.begin(), spins.end(), _buffer,
+                                  [](auto x) { return x; });
+                    auto       output = _method({_buffer}).toTensor();
+                    auto const shape  = output.sizes();
+                    TCM_CHECK((shape.size() == 2 && shape[0] == batch_size
+                               && shape[1] == 2),
+                              std::runtime_error,
+                              fmt::format("output tensor has invalid "
+                                          "shape: [{}]; expected [{}, 2]",
+                                          fmt::join(shape, ", "), batch_size));
+                    return output;
+                }
+            };
+
+            auto* basis = polynomial->hamiltonian()->basis().get();
+            return std::make_unique<v2::PolynomialState>(
+                std::move(polynomial), Function{std::move(forward), {}, basis},
+                internal_batch_size);
+        }))
+        .def(py::init(
+            [](std::shared_ptr<v2::Polynomial> polynomial,
+               std::function<torch::Tensor(std::vector<SpinBasis::StateT>)>
+                              forward,
+               unsigned const internal_batch_size) {
+                auto f = std::make_shared<decltype(forward)>(forward);
+                return std::make_unique<v2::PolynomialState>(
+                    std::move(polynomial),
+                    [f](auto spins) {
+                        return (*f)(std::vector<SpinBasis::StateT>{
+                            spins.begin(), spins.end()});
+                    },
+                    internal_batch_size);
+            }))
+        .def("__call__",
+             [](v2::PolynomialState&                               self,
+                py::array_t<SpinBasis::StateT, py::array::c_style> states) {
+                 TCM_CHECK(
+                     states.ndim() == 1, std::invalid_argument,
+                     fmt::format("states has invalid shape: [{}]; expected a "
+                                 "one-dimensional array",
+                                 fmt::join(states.shape(),
+                                           states.shape() + states.ndim(),
+                                           ", ")));
+                 auto xs = gsl::span<SpinBasis::StateT const>{
+                     states.data(), static_cast<size_t>(states.shape(0))};
+                 return self(xs);
+             });
+
+    m.def("get_representative",
+          [](std::vector<Symmetry> const& symmetries, uint64_t const x) {
+              return tcm::detail::find_representative(symmetries.begin(),
+                                                      symmetries.end(), x);
+          });
+
+    m.def("get_info", [](std::vector<Symmetry> const& symmetries,
+                         uint64_t const               x) {
+        std::vector<std::pair<uint64_t, double>> workspace(symmetries.size());
+        return tcm::detail::get_info(symmetries.begin(), symmetries.end(), x);
+    });
+
+#if 0
+    m.def("generate_states", [](std::vector<Symmetry> const& symmetries,
+                                unsigned                     number_spins,
+                                std::optional<unsigned>      hamming_weight) {
+        return vector_to_numpy(
+            tcm::detail::generate_states(symmetries.begin(), symmetries.end(),
+                                         number_spins, hamming_weight));
+    });
+#endif
+
+    m.def("generate_ranges",
+          [](std::vector<Symmetry::UInt> const& states, unsigned number_spins) {
+              return tcm::detail::generate_ranges<4>(
+                  states.begin(), states.end(), number_spins);
+          });
+
+    m.def("test_script", [](torch::jit::script::Module const& module) {
+        py::print("Yes!");
+    });
+
+    m.def("test_method", [](torch::jit::script::Method const& module) {
+        py::print("Yes!");
+    });
+
+    m.def("test_load_script", [](std::string const& module) {
+        return torch::jit::load(module);
+    });
+
+    m.def("generate_states_parallel",
+          [](std::vector<Symmetry> const& symmetries, unsigned number_spins,
+             std::optional<unsigned> hamming_weight) {
+              return vector_to_numpy(
+                  ::TCM_NAMESPACE::detail::generate_states_parallel(
+                      symmetries, number_spins, std::move(hamming_weight)));
+          });
+
+#undef DOC
+}
 } // namespace
 
 
@@ -66,6 +444,7 @@ PYBIND11_MODULE(_C_nqs, m)
     using namespace tcm;
 
     bind_spin(m.ptr());
+    bind_spin_basis(m);
     bind_heisenberg(m);
     bind_explicit_state(m);
     bind_polynomial(m);

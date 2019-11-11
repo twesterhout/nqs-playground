@@ -166,6 +166,7 @@ auto max_real(gsl::span<std::complex<float> const> xs) -> float
     auto const expected = [xs]() {
         auto it =
             std::max_element(xs.begin(), xs.end(), [](auto a, auto b) {
+                TCM_ASSERT(!std::isnan(a.real()) && !std::isnan(b.real()), "");
                 return a.real() < b.real();
             });
         return it != xs.end() ? it->real()

@@ -187,8 +187,8 @@ TCM_NAMESPACE_END
                                  return _a894 == -1 || _a894 == _b475;         \
                              }),                                               \
                   std::domain_error,                                           \
-                  ::fmt::format("{} has wrong number shape: {}; expected {}",  \
-                                name, fmt::join(_temp_shape_, ", "),           \
+                  ::fmt::format("{} has wrong shape: {}; expected {}", name,   \
+                                fmt::join(_temp_shape_, ", "),                 \
                                 fmt::join(_temp_expected_, ", ")));            \
     } while (false)
 
