@@ -52,3 +52,4 @@ dependencies:
     #    python3 -m pip install --force-reinstall --no-cache-dir mpi4py 
     - mpi4py
     - neovim # (optional)
+    - py-spy

@@ -162,15 +162,11 @@ class SpinDataset(torch.utils.data.Dataset):
     :param bool unpack: if ``True``, ``spins`` will be unpacked into Torch tensors. 
     """
 
-    def __init__(self, spins, values, unpack=False):
+    def __init__(self, spins, values, unpack=None):
         if spins.shape[0] != values.shape[0]:
             raise ValueError(
                 "spins and values must have the same size of the first dimension, but "
                 "spins.shape={} != values.shape={}".format(spins.shape, values.shape)
-            )
-        if not isinstance(unpack, bool):
-            raise ValueError(
-                "unpack should be a boolean, but got unpack={}".format(unpack)
             )
         self.spins = spins
         self.values = values
@@ -180,9 +176,64 @@ class SpinDataset(torch.utils.data.Dataset):
         return self.spins.shape[0]
 
     def __getitem__(self, index: torch.Tensor):
-        if self.unpack:
-            return _C.unpack(self.spins[index.numpy()]), self.values[index]
+        if self.unpack is not None:
+            return self.unpack(self.spins, index.numpy()), self.values[index]
         return self.spins[index.numpy()], self.values[index]
+
+
+class IterableSpinDataset(torch.utils.data.IterableDataset):
+    r"""Dataset wrapping spin configurations and corresponding values.
+
+    Each sample will be retrieved by indexing along the first dimension.
+
+    .. note:: This class is very similar to :py:class:`torch.utils.data.TensorDataset`
+              except that ``spins`` is a NumPy array of structured type and is
+              thus incompatible with :py:class:`torch.utils.data.TensorDataset`.
+
+    :param spins: a NumPy array of :py:class:`CompactSpin`.
+    :param values: a NumPy array or a Torch tensor.
+    :param bool unpack: if ``True``, ``spins`` will be unpacked into Torch tensors. 
+    """
+
+    def __init__(self, spins, values, batch_size, drop_last=False, unpack=None):
+        if spins.shape[0] != values.shape[0]:
+            raise ValueError(
+                "spins and values must have the same size along the first dimension, but"
+                " spins.shape={} != values.shape={}".format(spins.shape, values.shape)
+            )
+        if batch_size <= 0:
+            raise ValueError(
+                "invalid batch_size: {}; expected a positive integer".format(batch_size)
+            )
+        self.spins = spins
+        self.values = values
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.unpack = unpack
+
+    def __len__(self) -> int:
+        return self.spins.shape[0]
+
+    def __iter__(self):
+        if torch.utils.data.get_worker_info() is not None:
+            raise ValueError(
+                "{} does not play well with parallel data loading"
+                "".format(self.__class__.__name__)
+            )
+
+        i = 0
+        n = self.spins.shape[0]
+        while i + self.batch_size <= n:
+            xs = self.spins[i : i + self.batch_size]
+            if self.unpack is not None:
+                xs = self.unpack(xs)
+            yield xs, self.values[i : i + self.batch_size]
+            i += self.batch_size
+        if i < n and not self.drop_last:
+            xs = self.spins[i:]
+            if self.unpack is not None:
+                xs = self.unpack(xs)
+            yield xs, self.values[i:]
 
 
 class BatchedRandomSampler(torch.utils.data.Sampler):
@@ -245,20 +296,35 @@ class BatchedRandomSampler(torch.utils.data.Sampler):
 
 
 def make_spin_dataloader(
-    spins, values, batch_size: int, drop_last: bool = False, unpack: bool = True
+    spins,
+    values,
+    batch_size: int,
+    drop_last: bool = False,
+    unpack: bool = _C.unpack,
+    shuffle: bool = True,
 ):
     r"""Creates a new dataloader from packed spin configurations and corresponding
     values.
     """
-    dataset = SpinDataset(spins, values, unpack)
-    sampler = BatchedRandomSampler(len(dataset), batch_size, drop_last)
-    # This is a bit of a hack. We want to use our custom batch sampler, but don't
-    # want PyTorch to use auto_collate. So we tell PyTorch that our sampler is
-    # a plain sampler (i.e. not batch_sampler), but set batch_size to 1 to
-    # disable automatic batching
-    return torch.utils.data.DataLoader(
-        dataset, batch_size=1, shuffle=False, sampler=sampler, collate_fn=lambda x: x[0]
-    )
+    if shuffle:
+        dataset = SpinDataset(spins, values, unpack)
+        sampler = BatchedRandomSampler(len(dataset), batch_size, drop_last)
+        # This is a bit of a hack. We want to use our custom batch sampler, but don't
+        # want PyTorch to use auto_collate. So we tell PyTorch that our sampler is
+        # a plain sampler (i.e. not batch_sampler), but set batch_size to 1 to
+        # disable automatic batching
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            sampler=sampler,
+            collate_fn=lambda x: x[0],
+        )
+    else:
+        dataset = IterableSpinDataset(spins, values, batch_size, drop_last, unpack)
+        return torch.utils.data.DataLoader(
+            dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x[0]
+        )
 
 
 def random_split(dataset, k, replacement=False, weights=None):
@@ -302,7 +368,16 @@ def random_split(dataset, k, replacement=False, weights=None):
                 indices = torch.randperm(n)[:k]
         else:
             # Sampling with specified weights
-            indices = torch.multinomial(weights, num_samples=k, replacement=replacement)
+            if len(weights) <= (1 << 24):
+                indices = torch.multinomial(
+                    weights, num_samples=k, replacement=replacement
+                )
+            else:
+                weights = weights.to(torch.float64)
+                weights /= torch.sum(weights)
+                indices = np.random.choice(
+                    len(weights), size=k, replace=replacement, p=weights
+                )
 
         remaining_indices = np.setdiff1d(
             np.arange(n), indices, assume_unique=not replacement

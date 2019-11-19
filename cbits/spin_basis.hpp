@@ -231,6 +231,14 @@ struct Symmetry {
         auto const arg = -2.0 * M_PI * phase();
         return std::complex<double>{std::cos(arg), std::sin(arg)};
     }
+
+    constexpr auto _state_as_tuple() const noexcept
+        -> std::tuple<typename detail::BenesNetwork<UInt>::MasksT,
+                      typename detail::BenesNetwork<UInt>::MasksT, unsigned,
+                      unsigned>
+    {
+        return {_permute.fwd, _permute.bwd, _sector, _periodicity};
+    }
 }; // }}}
 
 namespace detail {
@@ -445,11 +453,54 @@ auto generate_states(Iterator first, Sentinel last, unsigned number_spins,
 
 auto global_executor() noexcept -> tf::Executor&;
 
+// }}}
+
+
+// BasisCache {{{
+struct BasisCache {
+    // TODO: write a proper allocator which will determine the page size at
+    // runtime...
+    template <class T>
+    using BufferT = std::vector<T, boost::alignment::aligned_allocator<
+                                       T, std::max<size_t>(4096, alignof(T))>>;
+
+  public:
+    using StatesT = BufferT<Symmetry::UInt>;
+    using RangesT = BufferT<std::pair<uint64_t, uint64_t>>;
+
+  private:
+    static constexpr auto bits = 16U;
+
+    StatesT _states;
+    RangesT _ranges;
+
+  public:
+    inline BasisCache(gsl::span<Symmetry const> symmetries,
+                      unsigned                  number_spins,
+                      std::optional<unsigned>   hamming_weight);
+
+    inline BasisCache(StatesT&& states, RangesT&& ranges);
+
+    BasisCache(BasisCache const&)     = default;
+    BasisCache(BasisCache&&) noexcept = default;
+    BasisCache& operator=(BasisCache const&) = default;
+    BasisCache& operator=(BasisCache&&) noexcept = default;
+
+    inline auto states() const noexcept -> gsl::span<Symmetry::UInt const>;
+    inline auto number_states() const noexcept -> uint64_t;
+    inline auto index(Symmetry::UInt x, unsigned number_spins) const
+        -> uint64_t;
+
+    constexpr auto _get_state() const noexcept
+        -> std::tuple<StatesT const&, RangesT const&>;
+};
+// }}}
+
+// generate_states {{{
 auto generate_states_parallel(gsl::span<Symmetry const>     symmetries,
                               unsigned const                number_spins,
                               std::optional<unsigned> const hamming_weight)
-    -> std::vector<Symmetry::UInt>;
-
+    -> BasisCache::StatesT;
 // }}}
 
 // generate_ranges {{{
@@ -458,13 +509,13 @@ template <
     class = std::enable_if_t<is_iterator_for<Iterator, Symmetry::UInt>()
                              && is_iterator_for<Sentinel, Symmetry::UInt>()>>
 auto generate_ranges(Iterator first, Sentinel last, unsigned number_spins)
-    -> std::vector<std::pair<uint64_t, uint64_t>>
+    -> BasisCache::RangesT
 {
     static_assert(0 < Bits && Bits <= 16U, TCM_STATIC_ASSERT_BUG_MESSAGE);
-    constexpr auto size  = 1U << Bits;
-    constexpr auto empty = std::make_pair(~uint64_t{0}, uint64_t{0});
-    auto const     shift = number_spins > Bits ? number_spins - Bits : 0U;
-    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    constexpr auto      size  = 1U << Bits;
+    constexpr auto      empty = std::make_pair(~uint64_t{0}, uint64_t{0});
+    auto const          shift = number_spins > Bits ? number_spins - Bits : 0U;
+    BasisCache::RangesT ranges;
     ranges.reserve(size);
 
     auto const begin = first;
@@ -485,31 +536,6 @@ auto generate_ranges(Iterator first, Sentinel last, unsigned number_spins)
 }
 // }}}
 
-// BasisCache {{{
-struct BasisCache {
-  private:
-    static constexpr auto bits = 16U;
-
-    std::vector<Symmetry::UInt>                _states;
-    std::vector<std::pair<uint64_t, uint64_t>> _ranges;
-
-  public:
-    inline BasisCache(gsl::span<Symmetry const> symmetries,
-                      unsigned                  number_spins,
-                      std::optional<unsigned>   hamming_weight);
-
-    BasisCache(BasisCache const&)     = default;
-    BasisCache(BasisCache&&) noexcept = default;
-    BasisCache& operator=(BasisCache const&) = default;
-    BasisCache& operator=(BasisCache&&) noexcept = default;
-
-    inline auto states() const noexcept -> gsl::span<Symmetry::UInt const>;
-    inline auto number_states() const noexcept -> uint64_t;
-    inline auto index(Symmetry::UInt const x, unsigned const number_spins) const
-        -> uint64_t;
-};
-// }}}
-
 // BasisCache IMPLEMENTATION {{{
 BasisCache::BasisCache(gsl::span<Symmetry const> symmetries,
                        unsigned const            number_spins,
@@ -518,6 +544,10 @@ BasisCache::BasisCache(gsl::span<Symmetry const> symmetries,
                                        std::move(hamming_weight))}
     , _ranges{
           generate_ranges<bits>(_states.cbegin(), _states.cend(), number_spins)}
+{}
+
+BasisCache::BasisCache(StatesT&& states, RangesT&& ranges)
+    : _states{std::move(states)}, _ranges{std::move(ranges)}
 {}
 
 auto BasisCache::states() const noexcept -> gsl::span<Symmetry::UInt const>
@@ -545,6 +575,12 @@ auto BasisCache::index(Symmetry::UInt const x,
         fmt::format("invalid state: {}; expected a basis representative", x));
     return static_cast<uint64_t>(i - begin(_states));
 }
+
+constexpr auto BasisCache::_get_state() const noexcept
+    -> std::tuple<StatesT const&, RangesT const&>
+{
+    return {_states, _ranges};
+}
 // }}}
 
 } // namespace detail
@@ -563,7 +599,8 @@ class SpinBasis : public std::enable_shared_from_this<SpinBasis> {
 
   public:
     inline SpinBasis(std::vector<Symmetry> symmetries, unsigned number_spins,
-                     std::optional<unsigned> hamming_weight);
+                     std::optional<unsigned>           hamming_weight,
+                     std::optional<detail::BasisCache> cache = std::nullopt);
 
     inline auto representative(StateT x) const noexcept -> StateT;
     inline auto normalisation(StateT x) const -> StateT;
@@ -575,25 +612,20 @@ class SpinBasis : public std::enable_shared_from_this<SpinBasis> {
     inline auto    states() const -> gsl::span<StateT const>;
     inline auto    build() -> void;
 
-    template <class Iterator, class Sentinel, class Projection>
-    TCM_NOINLINE auto unpack(Iterator first, Sentinel last, torch::Tensor dst,
-                             Projection proj) const -> void;
-
-  private:
-    TCM_FORCEINLINE static auto _unpack(uint8_t const bits) noexcept
-        -> vcl::Vec8f;
-
-    template <bool Unsafe>
-    TCM_FORCEINLINE auto _unpack(StateT x, float* out) const TCM_NOEXCEPT;
+    constexpr auto _get_state() const noexcept
+        -> std::tuple<std::vector<Symmetry> const&, unsigned,
+                      std::optional<unsigned>,
+                      std::optional<detail::BasisCache> const&>;
 }; // }}}
 
 // SpinBasis IMPLEMENTATION {{{
 SpinBasis::SpinBasis(std::vector<Symmetry> symmetries, unsigned number_spins,
-                     std::optional<unsigned> hamming_weight)
+                     std::optional<unsigned>           hamming_weight,
+                     std::optional<detail::BasisCache> cache)
     : _symmetries{std::move(symmetries)}
     , _number_spins{number_spins}
     , _hamming_weight{std::move(hamming_weight)}
-    , _cache{std::nullopt}
+    , _cache{std::move(cache)}
 {
     TCM_CHECK(0 < _number_spins && _number_spins <= 64, std::invalid_argument,
               fmt::format("invalid number_spins: {}; expected a "
@@ -666,64 +698,91 @@ auto SpinBasis::states() const -> gsl::span<StateT const>
     return _cache->states();
 }
 
-auto SpinBasis::_unpack(uint8_t const bits) noexcept -> vcl::Vec8f
-{
-    auto const one = vcl::Vec8f{1.0f}; // 1.0f == 0x3f800000
-    auto const two = vcl::Vec8f{2.0f};
-    // Adding 0x3f800000 to select ensures that we're working with valid
-    // floats rather than denormals
-    auto const select = vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{
-        0x3f800000 + (1 << 0), 0x3f800000 + (1 << 1), 0x3f800000 + (1 << 2),
-        0x3f800000 + (1 << 3), 0x3f800000 + (1 << 4), 0x3f800000 + (1 << 5),
-        0x3f800000 + (1 << 6), 0x3f800000 + (1 << 7)})};
-    auto       broadcasted =
-        vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{static_cast<int>(bits)})};
-    broadcasted |= one;
-    broadcasted &= select;
-    broadcasted = broadcasted == select;
-    broadcasted &= two;
-    broadcasted -= one;
-    return broadcasted;
-}
 
-template <bool Unsafe>
-auto SpinBasis::_unpack(StateT x, float* out) const TCM_NOEXCEPT
+constexpr auto SpinBasis::_get_state() const noexcept
+    -> std::tuple<std::vector<Symmetry> const&, unsigned,
+                  std::optional<unsigned>,
+                  std::optional<detail::BasisCache> const&>
 {
-    auto const chunks = number_spins() / 8U;
-    auto const rest   = number_spins() % 8U;
-    auto const y      = x; // Only for testing
-    for (auto i = 0U; i < chunks; ++i, out += 8, x >>= 8U) {
-        _unpack(static_cast<uint8_t>(x & 0xFF)).store(out);
-    }
-    if (rest != 0) {
-        auto const t = _unpack(static_cast<uint8_t>(x & 0xFF));
-        if constexpr (Unsafe) { t.store(out); }
-        else {
-            t.store_partial(static_cast<int>(rest), out);
+    return {_symmetries, _number_spins, _hamming_weight, _cache};
+}
+// }}}
+
+namespace v2 {
+
+// unpack {{{
+namespace detail {
+    struct _IdentityProjection {
+        template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
+        {
+            return std::forward<T>(x);
         }
-        out += rest;
+    };
+
+    TCM_FORCEINLINE auto _unpack(uint8_t const bits) noexcept -> vcl::Vec8f
+    {
+        auto const one = vcl::Vec8f{1.0f}; // 1.0f == 0x3f800000
+        auto const two = vcl::Vec8f{2.0f};
+        // Adding 0x3f800000 to select ensures that we're working with valid
+        // floats rather than denormals
+        auto const select = vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{
+            0x3f800000 + (1 << 0), 0x3f800000 + (1 << 1), 0x3f800000 + (1 << 2),
+            0x3f800000 + (1 << 3), 0x3f800000 + (1 << 4), 0x3f800000 + (1 << 5),
+            0x3f800000 + (1 << 6), 0x3f800000 + (1 << 7)})};
+        auto       broadcasted =
+            vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{static_cast<int>(bits)})};
+        broadcasted |= one;
+        broadcasted &= select;
+        broadcasted = broadcasted == select;
+        broadcasted &= two;
+        broadcasted -= one;
+        return broadcasted;
     }
 
-    TCM_ASSERT(
-        ([y, out, this]() {
-            auto* p = out - static_cast<ptrdiff_t>(number_spins());
-            for (auto i = 0U; i < number_spins(); ++i) {
-                if (!((p[i] == 1.0f && ((y >> i) & 0x01) == 0x01)
-                      || (p[i] == -1.0f && ((y >> i) & 0x01) == 0x00))) {
-                    return false;
-                }
+    template <bool Unsafe>
+    TCM_FORCEINLINE auto _unpack(SpinBasis::StateT x,
+                                 unsigned const    number_spins,
+                                 float*            out) TCM_NOEXCEPT -> float*
+    {
+        auto const chunks = number_spins / 8U;
+        auto const rest   = number_spins % 8U;
+        auto const y      = x; // Only for testing
+        for (auto i = 0U; i < chunks; ++i, out += 8, x >>= 8U) {
+            _unpack(static_cast<uint8_t>(x & 0xFF)).store(out);
+        }
+        if (rest != 0) {
+            auto const t = _unpack(static_cast<uint8_t>(x & 0xFF));
+            if constexpr (Unsafe) { t.store(out); }
+            else {
+                t.store_partial(static_cast<int>(rest), out);
             }
-            return true;
-        }()),
-        noexcept_format("{} vs [{}]", y,
-                        fmt::join(out - static_cast<ptrdiff_t>(number_spins()),
-                                  out, ", ")));
-    return out;
-}
+            out += rest;
+        }
 
-template <class Iterator, class Sentinel, class Projection>
-auto SpinBasis::unpack(Iterator first, Sentinel last, torch::Tensor dst,
-                       Projection proj) const -> void
+        TCM_ASSERT(
+            ([y, number_spins, out]() {
+                auto* p = out - static_cast<ptrdiff_t>(number_spins);
+                for (auto i = 0U; i < number_spins; ++i) {
+                    if (!((p[i] == 1.0f && ((y >> i) & 0x01) == 0x01)
+                          || (p[i] == -1.0f && ((y >> i) & 0x01) == 0x00))) {
+                        return false;
+                    }
+                }
+                return true;
+            }()),
+            noexcept_format(
+                "{} vs [{}]", y,
+                fmt::join(out - static_cast<ptrdiff_t>(number_spins), out,
+                          ", ")));
+        return out;
+    }
+} // namespace detail
+
+template <class Iterator, class Sentinel,
+          class Projection = detail::_IdentityProjection>
+TCM_NOINLINE auto unpack(Iterator first, Sentinel last,
+                         unsigned const number_spins, torch::Tensor dst,
+                         Projection proj = Projection{}) -> void
 {
     if (first == last) { return; }
     auto const size = static_cast<size_t>(std::distance(first, last));
@@ -733,27 +792,33 @@ auto SpinBasis::unpack(Iterator first, Sentinel last, torch::Tensor dst,
                noexcept_format("sizes don't match: size={}, dst.size(0)={}",
                                size, dst.size(0)));
     TCM_ASSERT(
-        number_spins() == static_cast<size_t>(dst.size(1)),
+        number_spins == static_cast<size_t>(dst.size(1)),
         noexcept_format("sizes don't match: number_spins={}, dst.size(1)={}",
-                        number_spins(), dst.size(1)));
+                        number_spins, dst.size(1)));
     TCM_ASSERT(dst.is_contiguous(), "Output tensor must be contiguous");
 
-    auto const rest = number_spins() % 8;
+    auto const rest = number_spins % 8;
     auto const tail = std::min<size_t>(
-        ((8U - rest) + number_spins() - 1U) / number_spins(), size);
+        ((8U - rest) + number_spins - 1U) / number_spins, size);
     auto* data = dst.data_ptr<float>();
     for (auto i = size_t{0}; i < size - tail; ++i, ++first) {
-        data = _unpack</*Unsafe=*/true>(proj(*first), data);
+        data =
+            detail::_unpack</*Unsafe=*/true>(proj(*first), number_spins, data);
     }
     for (auto i = size - tail; i < size; ++i, ++first) {
-        data = _unpack</*Unsafe=*/false>(proj(*first), data);
+        data =
+            detail::_unpack</*Unsafe=*/false>(proj(*first), number_spins, data);
     }
 }
 // }}}
 
-namespace v2 {
+template <class T, class = void> struct is_complex : std::false_type {};
+template <class T>
+struct is_complex<std::complex<T>,
+                  std::enable_if_t<std::is_floating_point<T>::value>>
+    : std::true_type {};
 
-
+template <class T> inline constexpr bool is_complex_v = is_complex<T>::value;
 
 #if 1
 class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
@@ -782,6 +847,7 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
                          ///< It is used to detect errors when one tries to
                          ///< apply the hamiltonian to a spin configuration
                          ///< which is too short.
+    bool         _is_real;
     mutable Pool _pool;
 
   public:
@@ -805,6 +871,8 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         TCM_ASSERT(!_edges.empty(), "_max_index is not defined");
         return _max_index;
     }
+
+    constexpr auto is_real() const noexcept -> bool { return _is_real; }
 
     /// Returns a *reference* to graph edges.
     /*constexpr*/ auto edges() const noexcept -> gsl::span<edge_type const>
@@ -862,14 +930,20 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         callback(spin, coeff);
     }
 
-    auto operator()(gsl::span<complex_type const> x,
-                    gsl::span<complex_type>       y) const -> void
+    template <class T, class = std::enable_if_t<
+                           std::is_floating_point_v<T> || is_complex_v<T>>>
+    auto operator()(gsl::span<T const> x, gsl::span<T> y) const -> void
     {
         TCM_CHECK(x.size() == y.size() && y.size() == _basis->number_states(),
                   std::invalid_argument,
                   fmt::format(
                       "vectors have invalid sizes: {0}, {1}; expected {2}, {2}",
                       x.size(), y.size(), _basis->number_spins()));
+        if constexpr (!is_complex<T>::value) {
+            TCM_CHECK(_is_real, std::runtime_error,
+                      "cannot apply a complex-valued Hamiltonian to a "
+                      "real-valued vector");
+        }
         auto&      executor = ::TCM_NAMESPACE::detail::global_executor();
         auto const states   = _basis->states();
         auto const chunk_size =
@@ -877,17 +951,24 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
 
         struct alignas(64) Task {
             Heisenberg const&     self;
-            complex_type const*   x_p;
-            complex_type*         y_p;
+            T const*              x_p;
+            T*                    y_p;
             Symmetry::UInt const* states_p;
 
             auto operator()(uint64_t const j) const -> void
             {
-                auto acc = complex_type{0, 0};
-                self(states_p[j], [&acc, this](auto const spin,
-                                               auto const coeff) {
-                    acc += std::conj(coeff) * x_p[self._basis->index(spin)];
-                });
+                auto acc = T{0};
+                self(states_p[j],
+                     [&acc, this](auto const spin, auto const coeff) {
+                         if constexpr (is_complex<T>::value) {
+                             acc += static_cast<T>(std::conj(coeff))
+                                    * x_p[self._basis->index(spin)];
+                         }
+                         else {
+                             acc += static_cast<T>(coeff.real())
+                                    * x_p[self._basis->index(spin)];
+                         }
+                     });
                 y_p[j] = acc;
             }
         } task{*this, x.data(), y.data(), states.data()};

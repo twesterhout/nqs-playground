@@ -251,7 +251,7 @@ class Runner:
                 weights = weights.numpy().squeeze()
 
         local_energies = core.local_energy(
-            core.combine_amplitude_and_phase(self.amplitude, self.phase),
+            core.combine_amplitude_and_phase(self.amplitude, self.phase, use_classifier=False),
             # CombiningState(self.amplitude, self.phase),
             self.hamiltonian,
             spins,

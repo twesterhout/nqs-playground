@@ -54,18 +54,65 @@ auto bind_polynomial_state(py::module m) -> void
         });
 }
 
+template <class T, int Flags>
+decltype(auto) to_const(py::array_t<T, Flags>& array)
+{
+    // NOTE: Yes, it's not nice to use pybind11::detail, but currently,
+    // there's no other way...
+    pybind11::detail::array_proxy(array.ptr())->flags &=
+        ~pybind11::detail::npy_api::NPY_ARRAY_WRITEABLE_;
+    return array;
+}
+
 template <class T>
 auto span_to_numpy(gsl::span<T> xs, py::object base) -> py::array
 {
     using type = std::remove_const_t<T>;
     auto a     = py::array_t<type>{xs.size(), xs.data(), base};
-    if (std::is_const<T>::value) {
-        // NOTE: Yes, it's not nice to use pybind11::detail, but currently,
-        // there's no other way...
-        pybind11::detail::array_proxy(a.ptr())->flags &=
-            ~pybind11::detail::npy_api::NPY_ARRAY_WRITEABLE_;
-    }
+    if (std::is_const<T>::value) { to_const(a); }
     return a;
+}
+
+auto states_to_numpy(
+    typename ::TCM_NAMESPACE::detail::BasisCache::StatesT const& states,
+    py::object base) -> py::array
+{
+    using ::TCM_NAMESPACE::detail::BasisCache;
+    return span_to_numpy(gsl::span{states.data(), states.size()}, base);
+}
+
+auto states_from_numpy(py::array array)
+{
+    return array.cast<typename ::TCM_NAMESPACE::detail::BasisCache::StatesT>();
+}
+
+auto ranges_to_numpy(
+    typename ::TCM_NAMESPACE::detail::BasisCache::RangesT const& ranges,
+    py::object base) -> py::array
+{
+    auto a =
+        py::array_t<uint64_t>{{static_cast<int64_t>(ranges.size()), 2L},
+                              reinterpret_cast<uint64_t const*>(ranges.data()),
+                              base};
+    to_const(a);
+    return a;
+}
+
+auto ranges_from_numpy(py::array array)
+{
+    TCM_CHECK(
+        array.ndim() == 2 && array.shape(1) == 2, std::invalid_argument,
+        fmt::format(
+            "array has invalid shape: [{}]; expected a 2D array with 2 columns",
+            fmt::join(array.shape(), array.shape() + array.ndim(), ", ")));
+    typename ::TCM_NAMESPACE::detail::BasisCache::RangesT ranges;
+    ranges.reserve(static_cast<size_t>(array.shape(0)));
+    auto const* p =
+        static_cast<std::pair<uint64_t, uint64_t> const*>(array.data());
+    for (auto i = int64_t{0}; i < array.shape(0); ++i, ++p) {
+        ranges.push_back(*p);
+    }
+    return ranges;
 }
 
 template <class T, class Allocator>
@@ -121,7 +168,15 @@ auto bind_spin_basis(py::module m) -> void
             DOC(R"EOF(
             Permutes bits of ``x`` according to the underlying permutation.
             )EOF"),
-            py::arg{"x"});
+            py::arg{"x"})
+        .def(py::pickle(
+            [](Symmetry const& self) { return self._state_as_tuple(); },
+            [](decltype(std::declval<Symmetry const&>()._state_as_tuple())
+                   const& state) {
+                return Symmetry{{std::get<0>(state), std::get<1>(state)},
+                                std::get<2>(state),
+                                std::get<3>(state)};
+            }));
 
     py::class_<SpinBasis, std::shared_ptr<SpinBasis>>(m, "SpinBasis")
         .def(py::init<std::vector<Symmetry>, unsigned,
@@ -182,26 +237,66 @@ auto bind_spin_basis(py::module m) -> void
              the representative of ``x``, ``N`` is the "norm" of ``r``, and λ is
              the eigenvalue of a group element ``g`` such that ``gr == x``.
              )EOF"))
-        .def(
-            "unpack",
-            [](SpinBasis const&                                   self,
-               py::array_t<SpinBasis::StateT, py::array::c_style> states) {
-                auto const* shape = states.shape();
-                TCM_CHECK(
-                    states.ndim() == 1, std::invalid_argument,
-                    fmt::format("states has invalid shape: [{}]; expected a "
-                                "one-dimensional array",
-                                fmt::join(shape, shape + states.ndim(), ", ")));
-                auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
-                    *shape, self.number_spins());
-                auto const in = gsl::span<SpinBasis::StateT const>{
-                    static_cast<SpinBasis::StateT const*>(states.data()),
-                    static_cast<size_t>(*shape)};
-                self.unpack(in.begin(), in.end(), out,
-                            [](auto x) { return x; });
-                return out;
+        .def(py::pickle(
+            [](py::object _self) {
+                auto const& self = _self.cast<SpinBasis const&>();
+                auto const& [symmetries, number_spins, hamming_weight, cache] =
+                    self._get_state();
+                auto cache_state = py::none();
+                if (cache.has_value()) {
+                    auto const& [states, ranges] = cache->_get_state();
+                    cache_state =
+                        py::make_tuple(states_to_numpy(states, _self),
+                                       ranges_to_numpy(ranges, _self));
+                }
+                return py::make_tuple(symmetries, number_spins, hamming_weight,
+                                      cache_state);
             },
-            DOC(R"EOF(
+            [](py::tuple state) {
+                TCM_CHECK(state.size() == 4, std::runtime_error,
+                          fmt::format("state has wrong length: {}; expected a "
+                                      "state of length 4",
+                                      state.size()));
+                auto symmetries     = state[0].cast<std::vector<Symmetry>>();
+                auto number_spins   = state[1].cast<unsigned>();
+                auto hamming_weight = state[2].cast<std::optional<unsigned>>();
+                using ::TCM_NAMESPACE::detail::BasisCache;
+                auto cache = std::optional<BasisCache>{std::nullopt};
+                if (!state[3].is_none()) {
+                    auto cache_state = py::tuple{state[3]};
+                    auto states = states_from_numpy(py::array{cache_state[0]});
+                    auto ranges = ranges_from_numpy(py::array{cache_state[1]});
+                    cache.emplace(std::move(states), std::move(ranges));
+                }
+                return std::make_shared<SpinBasis>(
+                    std::move(symmetries), number_spins,
+                    std::move(hamming_weight), std::move(cache));
+            }));
+
+    m.def(
+        "unpack",
+        [](py::array_t<SpinBasis::StateT, py::array::c_style> states,
+           unsigned const                                     number_spins) {
+            TCM_CHECK(0 < number_spins && number_spins <= 64,
+                      std::invalid_argument,
+                      fmt::format("invalid number_spins: {}; expected a "
+                                  "positive integer smaller than 64",
+                                  number_spins));
+            auto const* shape = states.shape();
+            TCM_CHECK(
+                states.ndim() == 1, std::invalid_argument,
+                fmt::format("states has invalid shape: [{}]; expected a "
+                            "one-dimensional array",
+                            fmt::join(shape, shape + states.ndim(), ", ")));
+            auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
+                *shape, number_spins);
+            auto const in = gsl::span<SpinBasis::StateT const>{
+                static_cast<SpinBasis::StateT const*>(states.data()),
+                static_cast<size_t>(*shape)};
+            v2::unpack(in.begin(), in.end(), number_spins, out);
+            return out;
+        },
+        DOC(R"EOF(
             Given a 1D array of states, returns a 2D tensor of float32 where
             each bit is replaced by a float (0 becomes -1.0 and 1 becomes 1.0).
 
@@ -209,13 +304,66 @@ auto bind_spin_basis(py::module m) -> void
             relatively efficient. It is thus okay to call it on every batch
             before propagating it through a neural network.
             )EOF"),
-            py::arg{"states"});
+        py::arg{"states"}, py::arg{"number_spins"});
+
+    m.def(
+        "unpack",
+        [](py::array_t<SpinBasis::StateT, py::array::c_style> states,
+           py::array_t<int64_t, py::array::c_style>           indices,
+           unsigned const                                     number_spins) {
+            TCM_CHECK(0 < number_spins && number_spins <= 64,
+                      std::invalid_argument,
+                      fmt::format("invalid number_spins: {}; expected a "
+                                  "positive integer smaller than 64",
+                                  number_spins));
+            auto const* states_shape = states.shape();
+            TCM_CHECK(
+                states.ndim() == 1, std::invalid_argument,
+                fmt::format("states has invalid shape: [{}]; expected a "
+                            "one-dimensional array",
+                            fmt::join(states_shape,
+                                      states_shape + states.ndim(), ", ")));
+            auto const* indices_shape = indices.shape();
+            TCM_CHECK(
+                indices.ndim() == 1, std::invalid_argument,
+                fmt::format("indices has invalid shape: [{}]; expected a "
+                            "one-dimensional array",
+                            fmt::join(indices_shape,
+                                      indices_shape + indices.ndim(), ", ")));
+            auto const in = gsl::span<int64_t const>{
+                static_cast<int64_t const*>(indices.data()),
+                static_cast<size_t>(indices_shape[0])};
+            auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
+                indices_shape[0], number_spins);
+            auto const projection =
+                [p = static_cast<SpinBasis::StateT const*>(states.data()),
+                 n = states_shape[0]](auto const index) {
+                    TCM_CHECK(
+                        0 <= index && index <= n, std::out_of_range,
+                        fmt::format("indices contains an index which is out of "
+                                    "range: {}; expected an index in [{}, {})",
+                                    index, 0, n));
+                    return p[index];
+                };
+            v2::unpack(in.begin(), in.end(), number_spins, out, projection);
+            return out;
+        },
+        DOC(R"EOF(
+            Given a 1D array of states, returns a 2D tensor of float32 where
+            each bit is replaced by a float (0 becomes -1.0 and 1 becomes 1.0).
+
+            This operation is uses SIMD intrinsics under the hood and is
+            relatively efficient. It is thus okay to call it on every batch
+            before propagating it through a neural network.
+            )EOF"),
+        py::arg{"states"}, py::arg{"indices"}, py::arg{"number_spins"});
 
     py::class_<v2::Heisenberg, std::shared_ptr<v2::Heisenberg>>(m, "Heisenberg")
         .def(py::init<v2::Heisenberg::spec_type,
                       std::shared_ptr<SpinBasis const>>())
         .def_property_readonly("edges", &v2::Heisenberg::edges)
         .def_property_readonly("basis", &v2::Heisenberg::basis)
+        .def_property_readonly("is_real", &v2::Heisenberg::is_real)
         .def("__call__",
              [](v2::Heisenberg const& self, SpinBasis::StateT const x) {
                  auto [buffer, size] = self(x);
@@ -231,14 +379,31 @@ auto bind_spin_basis(py::module m) -> void
                          x.data(), static_cast<size_t>(x.shape(0))},
                      gsl::span<std::complex<double>>{
                          y.mutable_data(), static_cast<size_t>(y.shape(0))});
-             });
+             })
+        .def("__call__",
+             [](v2::Heisenberg const&                   self,
+                py::array_t<double, py::array::c_style> x,
+                py::array_t<double, py::array::c_style> y) {
+                 self(gsl::span<double const>{x.data(),
+                                              static_cast<size_t>(x.shape(0))},
+                      gsl::span<double>{y.mutable_data(),
+                                        static_cast<size_t>(y.shape(0))});
+             })
+        .def("__call__", [](v2::Heisenberg const&                  self,
+                            py::array_t<float, py::array::c_style> x,
+                            py::array_t<float, py::array::c_style> y) {
+            self(gsl::span<float const>{x.data(),
+                                        static_cast<size_t>(x.shape(0))},
+                 gsl::span<float>{y.mutable_data(),
+                                  static_cast<size_t>(y.shape(0))});
+        });
 
     py::class_<v2::QuantumState>(m, "ExplicitState",
                                  R"EOF(
             Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a table {(σᵢ, cᵢ)}.
         )EOF")
         .def("__getitem__",
-             [](v2::QuantumState const&               self,
+             [](v2::QuantumState const&           self,
                 v2::QuantumState::key_type const& spin) {
                  auto i = self.find(spin);
                  if (i != self.end()) { return i->second; }
@@ -262,7 +427,10 @@ auto bind_spin_basis(py::module m) -> void
             "__len__", [](v2::QuantumState const& self) { return self.size(); },
             R"EOF(Returns number of elements in |ψ⟩.)EOF")
         .def(
-            "keys", [](v2::QuantumState const& self) { return vector_to_numpy(keys(self)); },
+            "keys",
+            [](v2::QuantumState const& self) {
+                return vector_to_numpy(keys(self));
+            },
             R"EOF(Returns basis vectors {|σᵢ⟩} as a ``numpy.ndarray``.)EOF")
         .def(
             "values",
@@ -329,8 +497,8 @@ auto bind_spin_basis(py::module m) -> void
                             batch_size, system_size);
                     }
                     _buffer.resize_({batch_size, system_size});
-                    _basis->unpack(spins.begin(), spins.end(), _buffer,
-                                  [](auto x) { return x; });
+                    v2::unpack(spins.begin(), spins.end(),
+                               _basis->number_spins(), _buffer);
                     auto       output = _method({_buffer}).toTensor();
                     auto const shape  = output.sizes();
                     TCM_CHECK((shape.size() == 2 && shape[0] == batch_size

@@ -128,7 +128,7 @@ auto split_into_tasks(Symmetry::UInt current, Symmetry::UInt const bound,
 auto generate_states_parallel(gsl::span<Symmetry const>     symmetries,
                               unsigned const                number_spins,
                               std::optional<unsigned> const hamming_weight)
-    -> std::vector<Symmetry::UInt>
+    -> BasisCache::StatesT
 {
     TCM_CHECK(0 < number_spins && number_spins <= 64, std::invalid_argument,
               fmt::format("invalid number of spins: {}; expected a "
@@ -183,12 +183,10 @@ auto generate_states_parallel(gsl::span<Symmetry const>     symmetries,
     states.reverse();
     executor.run(taskflow).wait();
 
-    auto r = std::move(states.front());
-    states.pop_front();
-    r.reserve(r.size()
-              + std::accumulate(
-                  std::begin(states), std::end(states), size_t{0},
-                  [](auto acc, auto const& x) { return acc + x.size(); }));
+    auto r = BasisCache::StatesT{};
+    r.reserve(std::accumulate(
+        std::begin(states), std::end(states), size_t{0},
+        [](auto acc, auto const& x) { return acc + x.size(); }));
     std::for_each(std::begin(states), std::end(states), [&r](auto& x) {
         r.insert(std::end(r), std::begin(x), std::end(x));
     });
@@ -221,11 +219,11 @@ static auto find_max_index(Iter begin, Iter end) -> unsigned
 }
 } // namespace
 
-
 Heisenberg::Heisenberg(spec_type edges, std::shared_ptr<SpinBasis const> basis)
     : _edges{std::move(edges)}
     , _basis{std::move(basis)}
     , _max_index{std::numeric_limits<unsigned>::max()}
+    , _is_real{true}
     , _pool{sizeof(buffer_type::element_type) * _edges.size(), 32U}
 {
     TCM_CHECK(_basis != nullptr, std::invalid_argument,
@@ -238,6 +236,7 @@ Heisenberg::Heisenberg(spec_type edges, std::shared_ptr<SpinBasis const> basis)
             fmt::format("invalid coupling: {} + {}j; expected a normal (i.e. "
                         "neither zero, subnormal, infinite or NaN) float",
                         coupling.real(), coupling.imag()));
+        if (coupling.imag() != 0) { _is_real = false; }
     }
     if (!_edges.empty()) {
         _max_index = find_max_index(std::begin(_edges), std::end(_edges));
