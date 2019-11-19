@@ -1,20 +1,57 @@
-import cmath
-import warnings
+# Copyright Tom Westerhout (c) 2019
+#
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above
+#       copyright notice, this list of conditions and the following
+#       disclaimer in the documentation and/or other materials provided
+#       with the distribution.
+#
+#     * Neither the name of Tom Westerhout nor the names of other
+#       contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+r"""This module defines routines for constructing symmetry operators and
+building symmetry groups. It will work properly only if the group
+representation is one-dimensional representation.
+"""
+
+__all__ = ["Symmetry", "make_group", "diagonalise"]
+
+from cmath import exp
+from cmath import pi as π
 from fractions import Fraction
+from typing import List
 
 import numpy as np
 
 from ._benes import make_perm_fn
 from .core import _C
 
-__all__ = ["Symmetry", "make_group", "diagonalise"]
-
 
 class Symmetry:
     r"""Class representing symmetry operators which are permutations.
     """
 
-    def __init__(self, permutation, sector):
+    def __init__(self, permutation: List[int], sector: int):
         r"""Constructs a symmetry from a permutation.
 
         :param permutation: a list of integers specifying the permutation.
@@ -38,7 +75,7 @@ class Symmetry:
         self._network = None
 
     @staticmethod
-    def _compute_periodicity(p) -> int:
+    def _compute_periodicity(p: np.ndarray) -> int:
         r"""Given a permutation ``p``, computes its periodicity, i.e. the
         smallest positive integer ``n`` such that ``p^n == id``.
         """
@@ -48,39 +85,41 @@ class Symmetry:
         while not np.array_equal(x, identity):
             count += 1
             x = x[p]
-        if count == 1:
-            warnings.warn("`permutation` is an identity mapping")
+        # if count == 1:
+        #     warnings.warn("`permutation` is an identity mapping")
         return count
 
     @property
-    def sector(self):
+    def sector(self) -> int:
         r"""Returns the sector to which we restricted the Hilbert space.
         """
         return self._sector
 
     @property
-    def periodicity(self):
+    def periodicity(self) -> int:
         r"""Returns the periodicity of the symmetry T, i.e. the smallest
         positive integer ``n`` such that ``T^n == id``.
         """
         return self._periodicity
 
     @property
-    def phase(self):
+    def phase(self) -> Fraction:
         return Fraction(self._sector, self._periodicity)
 
     @property
-    def eigenvalue(self):
+    def eigenvalue(self) -> complex:
         r"""Returns the eigenvalue of this operator corresponding to the ground
         state.
         """
-        return cmath.exp(-2j * cmath.pi * self.sector / self.periodicity)
+        return exp(-2j * π * self.sector / self.periodicity)
 
     @property
-    def permutation(self):
+    def permutation(self) -> np.ndarray:
+        r"""Returns the permutation map."""
         return self._map
 
     def to_cxx(self):
+        r"""Returns the C++ equivalent of this symmetry operator."""
         if self._network is None:
             self._network = make_perm_fn(self._map)
         return _C.v2.Symmetry(
@@ -88,7 +127,7 @@ class Symmetry:
         )
 
     def __mul__(self, other):
-        # print(self, "*", other, end=" ")
+        r"""Group operation."""
         if len(self._map) != len(other._map):
             raise ValueError("symmetries are defined on different spaces")
         x = Fraction(self.sector, self.periodicity) + Fraction(
@@ -99,7 +138,6 @@ class Symmetry:
             other._map[self._map],
             sector=(x.numerator % x.denominator) * (periodicity // x.denominator),
         )
-        # print("=", r)
         return r
 
     def __eq__(self, other):
@@ -129,7 +167,7 @@ class Symmetry:
         )
 
 
-def make_cyclic_group(symmetry):
+def _make_cyclic_group(symmetry):
     group = []
     g = Symmetry(np.arange(len(symmetry.permutation)), sector=0)
     for i in range(symmetry.periodicity):
@@ -138,8 +176,9 @@ def make_cyclic_group(symmetry):
     return group
 
 
-def make_group(symmetries):
-    group = set(sum((make_cyclic_group(t) for t in symmetries), []))
+def make_group(symmetries: List[Symmetry]):
+    r"""Given a list of symmetries, extends this list into a group."""
+    group = set(sum((_make_cyclic_group(t) for t in symmetries), []))
     while True:
         extra = []
         for x in group:

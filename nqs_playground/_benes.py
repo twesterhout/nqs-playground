@@ -36,10 +36,10 @@ p constructs a Benes network to efficiently shuffle bits in an integer
 according to p. ``BenesNetwork`` is a class representing such networks.
 """
 
+__all__ = ["BenesNetwork", "make_perm_fn", "test_benes"]
+
 from math import ceil, log2
 from typing import Iterable, List, Tuple
-
-__all__ = ["BenesNetwork", "make_perm_fn", "test_benes"]
 
 
 def _btfly_step(x: int, m: int, d: int) -> int:
