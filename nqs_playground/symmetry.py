@@ -4,7 +4,7 @@ from fractions import Fraction
 
 import numpy as np
 
-from . import benes
+from ._benes import make_perm_fn
 from .core import _C
 
 __all__ = ["Symmetry", "make_group", "diagonalise"]
@@ -82,7 +82,7 @@ class Symmetry:
 
     def to_cxx(self):
         if self._network is None:
-            self._network = benes.make_perm_fn(self._map)
+            self._network = make_perm_fn(self._map)
         return _C.v2.Symmetry(
             [self._network.left, self._network.right], self.sector, self.periodicity
         )

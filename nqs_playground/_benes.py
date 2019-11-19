@@ -1,24 +1,65 @@
-from collections import namedtuple
-import math
+# Copyright Tom Westerhout (c) 2019
+#
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above
+#       copyright notice, this list of conditions and the following
+#       disclaimer in the documentation and/or other materials provided
+#       with the distribution.
+#
+#     * Neither the name of Tom Westerhout nor the names of other
+#       contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+r"""Implementation of Benes network for bit permutation.
+
+This module contains a ``make_perm_fn`` function which given a permutation
+p constructs a Benes network to efficiently shuffle bits in an integer
+according to p. ``BenesNetwork`` is a class representing such networks.
+"""
+
+from math import ceil, log2
 from typing import Iterable, List, Tuple
 
-__all__ = ["BenesNetwork", "make_perm_fn"]
+__all__ = ["BenesNetwork", "make_perm_fn", "test_benes"]
 
 
-def _btfly_step(x, m, d):
-    print(x, m, d, end=" ")
+def _btfly_step(x: int, m: int, d: int) -> int:
+    r"""Performs the so called butterfly operation on ``x`` swapping pairs of
+    bits distance ``d`` from each other according to mask ``m``.
+    """
     y = (x ^ (x >> d)) & m
-    x = x ^ y ^ (y << d)
-    print(x)
-    return x
+    return x ^ y ^ (y << d)
 
 
 class BenesNetwork:
-    def __init__(self, left, right):
+    r"""Class representing Benes networks."""
+
+    def __init__(self, left: List[int], right: List[int]):
         self.left = left
         self.right = right
 
-    def __call__(self, x):
+    def __call__(self, x: int) -> int:
+        r"""Applies the permutation to x."""
+        x = int(x)
         for i, m in enumerate(self.left):
             x = _btfly_step(x, m, 1 << i)
         for i, m in enumerate(self.right[::-1]):
@@ -27,6 +68,10 @@ class BenesNetwork:
 
 
 class _BenesBuilder:
+    r"""A builder class for Benes networks. This is not a real class. All its
+    methods are static, so it acts more like a namespace.
+    """
+
     @staticmethod
     def is_pow_of_2(x: int) -> bool:
         r"""Returns whether an integer is a power of 2."""
@@ -38,7 +83,7 @@ class _BenesBuilder:
         is already a power of 2, then ``x`` itself is returned.
         """
         assert x > 0
-        return 1 << math.ceil(math.log2(x))
+        return 1 << ceil(log2(x))
 
     @staticmethod
     def pairs(n: int, d: int) -> Iterable[Tuple[int, int]]:
@@ -129,7 +174,7 @@ class _BenesBuilder:
     def make(tgt: List[int]) -> BenesNetwork:
         src = list(range(len(tgt)))
         left, right = [], []
-        for i in range(int(math.log2(len(tgt)))):
+        for i in range(int(log2(len(tgt)))):
             d = 1 << i
             fwd, bwd = _BenesBuilder.solve_stage(src, tgt, d)
             left.append(_BenesBuilder.make_mask(src, fwd, d))
@@ -139,41 +184,42 @@ class _BenesBuilder:
         return BenesNetwork(left, right)
 
 
-def make_perm_fn(p, backend: str = "python"):
+def make_perm_fn(p: List[int], bits=None):
     n = len(p)
-    if not _BenesBuilder.is_pow_of_2(n):
-        return make_perm_fn(
-            list(p) + list(range(n, _BenesBuilder.round_up_pow_2(n))), backend=backend
-        )
     if set(p) != set(range(n)):
         raise ValueError(
             "invalid p: {0}; must be a bijection {{0..{1}}}->{{0..{1}}}"
             "".format(p, n - 1)
         )
-    if backend not in {"python"}:
-        raise ValueError("invalid backend: {}; must be 'python'".format(mode))
+    if bits is not None:
+        if not _BenesBuilder.is_pow_of_2(bits) or bits < n:
+            raise ValueError(
+                "invalid bits: {}; bits must be a positive power of 2 not smaller "
+                "than {}".format(bits, _BenesBuilder.round_up_pow_2(n))
+            )
+    else:
+        bits = _BenesBuilder.round_up_pow_2(n)
+    if n < bits:
+        p = list(p) + list(range(n, bits))
     return _BenesBuilder.make(p)
 
 
-def make_perm_fn_simple(p: List[int]):
-    n = len(p)
-
-    def fn(x):
-        assert 0 <= x and x < (1 << n)
-        s = "{1:0{0}b}".format(n, x)[::-1]
-        s = "".join(s[i] for i in p)
-        return int(s[::-1], base=2)
-
-    return fn
-
-
-def test_benes(n):
+def test_benes(n, bits=None):
     import numpy as np
+
+    def make_perm_fn_simple(p: List[int]):
+        def fn(x):
+            assert 0 <= x and x < (1 << len(p))
+            s = "{1:0{0}b}".format(len(p), x)[::-1]
+            s = "".join(s[i] for i in p)
+            return int(s[::-1], base=2)
+
+        return fn
 
     p = np.arange(n)
     for i in range(100):
         np.random.shuffle(p)
-        benes = make_perm_fn(p)
+        benes = make_perm_fn(p, bits)
         simple = make_perm_fn_simple(p)
         if n <= 8:
             for x in range(1 << n):
