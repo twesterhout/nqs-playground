@@ -383,7 +383,7 @@ class OverlapMetric(ignite.metrics.metric.Metric):
             quotient = predicted / expected
             self._dot += torch.sum(qoutient).item()
             self._norm_predicted += torch.norm(quotient).item() ** 2
-            self._norm_expected = 1
+            self._norm_expected += expected.size(0)
 
     def compute(self):
         if self._norm_predicted == 0 or self._norm_expected == 0:
@@ -434,7 +434,7 @@ def create_amplitude_evaluator(model, device, non_blocking, weighted=True):
         return x, y
 
     return create_supervised_evaluator(
-        model, metrics={"overlap": OverlapMetric()}, prepare_batch=prepare_batch
+        model, metrics={"overlap": OverlapMetric(weighted)}, prepare_batch=prepare_batch
     )
 
 
