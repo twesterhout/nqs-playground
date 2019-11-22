@@ -47,21 +47,74 @@ if(UNIX AND CMAKE_GENERATOR STREQUAL "Ninja")
 endif()
 
 find_package(Python COMPONENTS Interpreter REQUIRED)
+
 list(APPEND CMAKE_PREFIX_PATH
     "$ENV{CONDA_PREFIX}/lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages/torch")
 message(STATUS "${CMAKE_PREFIX_PATH}")
-find_package(Torch REQUIRED)
+
+
+# add_library(Torch INTERFACE)
+# set(TORCH_PREFIX "$ENV{CONDA_PREFIX}/lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages/torch")
+# target_include_directories(Torch SYSTEM INTERFACE ${TORCH_PREFIX})
+# target_compile_options()
+
+# Torch
+if(TRUE)
+    add_library(Torch INTERFACE)
+    execute_process(COMMAND
+        "${CMAKE_CURRENT_SOURCE_DIR}/get_torch_build_info.sh"
+            "${Python_EXECUTABLE}" "include"
+        RESULT_VARIABLE _SUCCESS
+        OUTPUT_VARIABLE _VALUE
+        ERROR_VARIABLE _ERROR_VALUE
+	OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _SUCCESS MATCHES 0)
+        message(FATAL_ERROR
+            "Could not find PyTorch include directories:\n${_ERROR_VALUE}")
+        return()
+    endif()
+    target_include_directories(Torch SYSTEM INTERFACE ${_VALUE})
+    execute_process(COMMAND
+        "${CMAKE_CURRENT_SOURCE_DIR}/get_torch_build_info.sh"
+            "${Python_EXECUTABLE}" "lib"
+        RESULT_VARIABLE _SUCCESS
+        OUTPUT_VARIABLE _VALUE
+        ERROR_VARIABLE _ERROR_VALUE
+	OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _SUCCESS MATCHES 0)
+        message(FATAL_ERROR
+            "Could not find PyTorch include directories:\n${_ERROR_VALUE}")
+        return()
+    endif()
+    target_link_libraries(Torch INTERFACE ${_VALUE})
+    execute_process(COMMAND
+        "${CMAKE_CURRENT_SOURCE_DIR}/get_torch_build_info.sh"
+            "${Python_EXECUTABLE}" "abi"
+        RESULT_VARIABLE _SUCCESS
+        OUTPUT_VARIABLE _VALUE
+        ERROR_VARIABLE _ERROR_VALUE
+	OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _SUCCESS MATCHES 0)
+        message(FATAL_ERROR
+            "Could not find PyTorch include directories:\n${_ERROR_VALUE}")
+        return()
+    endif()
+    target_compile_definitions(Torch INTERFACE _GLIBCXX_USE_CXX11_ABI=${_VALUE})
+    add_library(torch ALIAS Torch)
+endif()
 
 function(nqs_cbits_add_low_level_flags MY_TARGET)
     # Since Torch might've been compiled with old ABI
-    foreach(prop COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
+    foreach(prop # COMPILE_DEFINITIONS
+    		 INTERFACE_COMPILE_DEFINITIONS)
         get_property(s TARGET torch PROPERTY ${prop} SET)
         if(s)
             get_property(v TARGET torch PROPERTY ${prop})
             target_compile_definitions(${MY_TARGET} PUBLIC ${v})
         endif()
     endforeach()
-    foreach(prop COMPILE_OPTIONS INTERFACE_COMPILE_OPTIONS)
+    foreach(prop # COMPILE_OPTIONS
+                 INTERFACE_COMPILE_OPTIONS)
         get_property(s TARGET torch PROPERTY ${prop} SET)
         if(s)
             get_property(v TARGET torch PROPERTY ${prop})
@@ -187,6 +240,7 @@ if(NOT TARGET Boost::boost)
                                                            libs/container
                                                            libs/core
                                                            libs/detail
+                                                           libs/integer
                                                            libs/move
                                                            libs/pool
                                                            libs/static_assert
@@ -201,6 +255,7 @@ if(NOT TARGET Boost::boost)
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/container/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/integer/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/move/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
@@ -209,35 +264,6 @@ if(NOT TARGET Boost::boost)
     add_library(Boost::boost ALIAS Boost)
 endif()
 
-# Torch
-if(FALSE)
-    add_library(Torch INTERFACE)
-    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-    execute_process(COMMAND "${Python3_EXECUTABLE}" "-c"
-        "from torch.utils.cpp_extension import include_paths;
-    print(';'.join(include_paths()), end='')"
-        RESULT_VARIABLE _PYTHON_SUCCESS
-        OUTPUT_VARIABLE _PYTHON_VALUE
-        ERROR_VARIABLE _PYTHON_ERROR_VALUE)
-    if(NOT _PYTHON_SUCCESS MATCHES 0)
-        message(FATAL_ERROR
-            "Could not find PyTorch include directories:\n${_PYTHON_ERROR_VALUE}")
-        return()
-    endif()
-    target_include_directories(Torch SYSTEM INTERFACE ${_PYTHON_VALUE})
-    execute_process(COMMAND "${Python3_EXECUTABLE}" "-c"
-        "from torch.utils.cpp_extension import library_paths;
-    print(';'.join(library_paths()), end='')"
-        RESULT_VARIABLE _PYTHON_SUCCESS
-        OUTPUT_VARIABLE _PYTHON_VALUE
-        ERROR_VARIABLE _PYTHON_ERROR_VALUE)
-    if(NOT _PYTHON_SUCCESS MATCHES 0)
-        message(FATAL_ERROR
-            "Could not find PyTorch library paths:\n${_PYTHON_ERROR_VALUE}")
-        return()
-    endif()
-    target_link_libraries(Torch INTERFACE ${_PYTHON_VALUE})
-endif()
 
 # Pybind11
 if(TRUE)
