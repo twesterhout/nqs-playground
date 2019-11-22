@@ -1,10 +1,8 @@
 ### 24-site one-dimensional chain with periodic boundary conditions
 
   * `hamiltonian.txt` Hamiltonian specification;
-  * `ground_state.pickle` a tuple `(spins, values)` where `spins` is a
-  `numpy.ndarray` of `nqs_playground.core.CompactSpin` and `values` is a
-  `numpy.ndarray` of `numpy.float32`.
+  * `basis.pickle` is the symmetrized basis;
+  * `ground_state.npy` is the ground state is the symmetrized basis. It is a
+  one-dimensional array of real numbers.
 
 Ground state energy is around `-42.68005806614902`.
-
-p.s.: `ground_state.pickle` is not pushed to GitHub since its size exceeds 50MB.
