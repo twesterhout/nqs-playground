@@ -120,34 +120,6 @@ class SetToEval(object):
             self._module.train()
 
 
-def SetNumThreads(object):
-    """
-    Temporary changes the number of threads used by PyTorch.
-
-    This is useful when we, for example, want to run multiple different neural
-    networks in parallel rather than use multiple threads within a single
-    network.
-    """
-
-    def __init__(self, num_threads: int):
-        if not isinstance(num_threads, int) or num_threads <= 0:
-            raise ValueError(
-                "num_threads should be a positive integer, but got {}"
-                "".format(num_threads)
-            )
-        self._new = num_threads
-        self._old = torch.get_num_threads()
-
-    def __enter__(self):
-        if self._new != self._old:
-            torch.set_num_threads(self._new)
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self._new != self._old:
-            torch.set_num_threads(self._old)
-
-
 class SamplingOptions:
     r"""Options for Monte Carlo sampling spin configurations."""
 
@@ -200,9 +172,12 @@ class SpinDataset(torch.utils.data.Dataset):
               except that ``spins`` is a NumPy array of structured type and is
               thus incompatible with :py:class:`torch.utils.data.TensorDataset`.
 
-    :param spins: a NumPy array of :py:class:`CompactSpin`.
+    :param spins: a NumPy array of compact spin configurations or a torch.Tensor
+        of unpacked spin configurations.
     :param values: a NumPy array or a Torch tensor.
-    :param bool unpack: if ``True``, ``spins`` will be unpacked into Torch tensors. 
+    :param unpack: if given, must be a function which receives a chunk of
+        ``spins`` and NumPy array of indices and returns a torch.Tensor with
+        unpacked spin configurations.
     """
 
     def __init__(self, spins, values, unpack=None):
@@ -456,10 +431,13 @@ def import_network(filename: str):
 def combine_amplitude_and_sign(
     *modules, apply_log: bool = False, out_dim: int = 1, use_jit: bool = True
 ) -> torch.nn.Module:
-    r"""
+    r"""Combines two torch.nn.Modules representing amplitudes and signs of the
+    wavefunction coefficients into one model.
     """
     if out_dim != 1 and out_dim != 2:
         raise ValueError("invalid out_dim: {}; expected either 1 or 2".format(out_dim))
+    if out_dim == 1 and apply_log:
+        raise ValueError("apply_log is incompatible with out_dim=1")
 
     class CombiningState(torch.nn.Module):
         __constants__ = ["apply_log", "out_dim"]
@@ -494,7 +472,7 @@ def combine_amplitude_and_sign(
 
 
 def combine_amplitude_and_phase(
-    *modules, apply_log: bool = False, use_jit: bool = True, use_classifier: bool = True
+    *modules, apply_log: bool = False, use_jit: bool = True
 ) -> torch.nn.Module:
     r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
     and phase into a single module representing the logarithm of the
@@ -508,92 +486,25 @@ def combine_amplitude_and_phase(
     :param use_jit: if ``True``, the returned module is a
         ``torch.jit.ScriptModule``.
     """
-    if use_classifier:
 
-        class CombiningState(torch.nn.Module):
-            __constants__ = ["apply_log"]
+    class CombiningState(torch.nn.Module):
+        __constants__ = ["apply_log"]
 
-            def __init__(self, amplitude: torch.nn.Module, sign: torch.nn.Module):
-                super().__init__()
-                self.apply_log = apply_log
-                self.amplitude = amplitude
-                self.sign = sign
+        def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
+            super().__init__()
+            self.apply_log = apply_log
+            self.amplitude = amplitude
+            self.phase = phase
 
-            def forward(self, x):
-                a = (
-                    torch.log(self.amplitude(x))
-                    if self.apply_log
-                    else self.amplitude(x)
-                )
-                b = 3.141592653589793 * torch.argmax(self.sign.forward(x), dim=1).to(
-                    dtype=torch.float32
-                ).view([-1, 1])
-                return torch.cat([a, b], dim=1)
-
-    else:
-
-        class CombiningState(torch.nn.Module):
-            __constants__ = ["apply_log"]
-
-            def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
-                super().__init__()
-                self.apply_log = apply_log
-                self.amplitude = amplitude
-                self.phase = phase
-
-            def forward(self, x: torch.Tensor):
-                a = (
-                    torch.log(self.amplitude(x))
-                    if self.apply_log
-                    else self.amplitude(x)
-                )
-                b = self.phase(x)
-                return torch.cat([a, b], dim=1)
+        def forward(self, x: torch.Tensor):
+            a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
+            b = self.phase(x)
+            return torch.cat([a, b], dim=1)
 
     m = CombiningState(*modules)
     if use_jit:
         m = torch.jit.script(m)
     return m
-
-
-# def CombiningState(
-#     amplitude: torch.nn.Module, sign: torch.nn.Module, use_jit=True, use_log=False
-# ) -> torch.nn.Module:
-#
-#     if use_log:
-#
-#         class CombiningState(torch.nn.Module):
-#             def __init__(self, amplitude, sign):
-#                 super().__init__()
-#                 self.amplitude = amplitude
-#                 self.sign = sign
-#
-#             def forward(self, x):
-#                 A = torch.log(self.amplitude.forward(x))
-#                 phase = 3.141592653589793 * torch.argmax(
-#                     self.sign.forward(x), dim=1
-#                 ).to(dtype=torch.float32).view([-1, 1])
-#                 return torch.cat([A, phase], dim=1)
-#
-#     else:
-#
-#         class CombiningState(torch.nn.Module):
-#             def __init__(self, amplitude, sign):
-#                 super().__init__()
-#                 self.amplitude = amplitude
-#                 self.sign = sign
-#
-#             def forward(self, x):
-#                 y = self.amplitude.forward(x).squeeze()
-#                 y *= (1 - 2 * torch.argmax(self.sign.forward(x), dim=1)).to(
-#                     dtype=torch.float32
-#                 )
-#                 return y
-#
-#     m = CombiningState(amplitude, sign)
-#     if use_jit:
-#         m = torch.jit.script(m)
-#     return m
 
 
 def _forward_with_batches(state, input, batch_size):

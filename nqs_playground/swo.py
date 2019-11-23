@@ -21,7 +21,7 @@ from tqdm import tqdm
 from ._C_nqs import v2 as _C  # Makes _C.v2 look like _C
 from . import core
 from .core import SamplingOptions
-from .v2.supervised import subtract
+from .supervised import subtract
 
 TrainingOptions = namedtuple(
     "TrainingOptions",

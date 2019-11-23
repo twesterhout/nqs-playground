@@ -1,9 +1,8 @@
 import glob
 from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CppExtension
 
 setup(name='nqs_playground',
-      version='0.1',
+      version='0.0.1',
       description='PyTorch-based implementation of SR and SWO for NQS',
       classifiers=[
           'Development Status :: 2 - Pre-Alpha',
@@ -13,20 +12,20 @@ setup(name='nqs_playground',
           'Programming Language :: Python :: 3 :: Only',
           'Topic :: Scientific/Engineering :: Physics',
       ],
-      url='http://github.com/twesterhout/nqs_playground',
+      url='http://github.com/twesterhout/nqs-playground',
       author='Tom Westerhout',
       author_email='t.westerhout@student.ru.nl',
       license='BSD3',
       packages=['nqs_playground'],
-      data_files=glob.glob('nqs_playground/_C_nqs.*'),
+      package_data={'nqs_playground': ['_C_nqs.*']},
       install_requires=[
-          'numpy',
-          'scipy',
-          'torch>=1.2',
-          'numba',
-          'tqdm',
-          'pytest',
-          'pytorch-ignite',
-          'mpi4py',
+          # 'numpy',
+          # 'scipy',
+          # 'torch>=1.2',
+          # 'numba',
+          # 'tqdm',
+          # 'pytest',
+          # 'pytorch-ignite',
+          # 'mpi4py',
       ],
       zip_safe=False)
