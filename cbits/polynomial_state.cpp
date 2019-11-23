@@ -29,7 +29,7 @@
 #include "polynomial_state.hpp"
 
 #include <boost/align/is_aligned.hpp>
-#include <mkl_cblas.h>
+// #include <mkl_cblas.h>
 #include <torch/extension.h>
 #include <vectorclass/version2/vectorclass.h>
 
@@ -182,10 +182,12 @@ auto dotu(gsl::span<std::complex<float> const> xs,
           gsl::span<std::complex<float> const> ys) TCM_NOEXCEPT
     -> std::complex<float>
 {
+    using std::begin, std::end;
     TCM_ASSERT(xs.size() == ys.size(), "dimensions don't match");
-    std::complex<float> r;
-    cblas_cdotu_sub(xs.size(), xs.data(), 1, ys.data(), 1, &r);
-    return r;
+    return std::inner_product(begin(xs), end(xs), begin(ys), std::complex{0.0f});
+    // std::complex<float> r;
+    // cblas_cdotu_sub(xs.size(), xs.data(), 1, ys.data(), 1, &r);
+    // return r;
 }
 
 /// Computes xs <- exp(xs - k)

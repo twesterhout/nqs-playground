@@ -608,6 +608,8 @@ class SpinBasis : public std::enable_shared_from_this<SpinBasis> {
         -> std::tuple<StateT, std::complex<double>, double>;
     inline auto    index(StateT const x) const -> uint64_t;
     constexpr auto number_spins() const noexcept -> unsigned;
+    constexpr auto hamming_weight() const noexcept -> std::optional<unsigned>;
+    inline auto    is_real() const noexcept -> bool;
     inline auto    number_states() const -> uint64_t;
     inline auto    states() const -> gsl::span<StateT const>;
     inline auto    build() -> void;
@@ -682,6 +684,20 @@ constexpr auto SpinBasis::number_spins() const noexcept -> unsigned
     return _number_spins;
 }
 
+constexpr auto SpinBasis::hamming_weight() const noexcept
+    -> std::optional<unsigned>
+{
+    return _hamming_weight;
+}
+
+auto SpinBasis::is_real() const noexcept -> bool
+{
+    using std::begin, std::end;
+    return std::all_of(begin(_symmetries), end(_symmetries), [](auto const& s) {
+        return s.sector() == 0 || s.periodicity() == 2 * s.sector();
+    });
+}
+
 auto SpinBasis::number_states() const -> uint64_t
 {
     TCM_CHECK(_cache.has_value(), std::runtime_error,
@@ -709,6 +725,59 @@ constexpr auto SpinBasis::_get_state() const noexcept
 // }}}
 
 namespace v2 {
+
+template <class T, class = void> struct is_complex : std::false_type {};
+template <class T>
+struct is_complex<std::complex<T>,
+                  std::enable_if_t<std::is_floating_point<T>::value>>
+    : std::true_type {};
+
+template <class T> inline constexpr bool is_complex_v = is_complex<T>::value;
+
+
+#if 1
+// expand_basis {{{
+template <class T>
+auto expand_states(SpinBasis const& basis, gsl::span<T const> src,
+                   gsl::span<SpinBasis::StateT const> states, gsl::span<T> dst)
+    -> void
+{
+    TCM_CHECK(
+        basis.number_states() == src.size(), std::invalid_argument,
+        fmt::format("src has wrong size: {}; expected a 1D array of length {}",
+                    src.size(), basis.number_states()));
+    TCM_CHECK(states.size() == dst.size(), std::invalid_argument,
+              fmt::format("states and dst have different sizes: {} != {}",
+                          states.size(), dst.size()));
+    TCM_CHECK(basis.is_real(), std::runtime_error,
+              fmt::format("cannot expand the state into a real vector, because "
+                          "some symmetries have complex eigenvalues"));
+
+    auto&      executor = ::TCM_NAMESPACE::detail::global_executor();
+    auto const chunk_size =
+        std::max(2000UL, states.size() / (20UL * executor.num_workers()));
+    tf::Taskflow taskflow;
+    taskflow.parallel_for(
+        size_t{0}, dst.size(), size_t{1},
+        [&basis, src_p = src.data(), states_p = states.data(),
+         dst_p = dst.data()](auto const i) {
+            auto const [spin, eigenvalue, norm] = basis.full_info(states_p[i]);
+            if constexpr (is_complex_v<T>) {
+                dst_p[i] = static_cast<T>(eigenvalue / norm)
+                           * src_p[basis.index(spin)];
+            }
+            else {
+                dst_p[i] = static_cast<T>(norm / eigenvalue.real())
+                           * src_p[basis.index(spin)];
+            }
+        },
+        chunk_size);
+    executor.run(taskflow).wait();
+}
+// }}}
+#endif
+
+
 
 // unpack {{{
 namespace detail {
@@ -811,14 +880,6 @@ TCM_NOINLINE auto unpack(Iterator first, Sentinel last,
     }
 }
 // }}}
-
-template <class T, class = void> struct is_complex : std::false_type {};
-template <class T>
-struct is_complex<std::complex<T>,
-                  std::enable_if_t<std::is_floating_point<T>::value>>
-    : std::true_type {};
-
-template <class T> inline constexpr bool is_complex_v = is_complex<T>::value;
 
 #if 1
 class Heisenberg : public std::enable_shared_from_this<Heisenberg> {

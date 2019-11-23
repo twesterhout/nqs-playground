@@ -34,6 +34,40 @@
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+namespace pybind11 {
+namespace detail {
+    template <class T> struct type_caster<gsl::span<T>> {
+      public:
+        /**
+         * This macro establishes the name 'inty' in
+         * function signatures and declares a local variable
+         * 'value' of type inty
+         */
+        PYBIND11_TYPE_CASTER(gsl::span<T>, _("numpy.ndarray[")
+                                               + npy_format_descriptor<T>::name
+                                               + _("]"));
+
+        /**
+         * Conversion part 1 (Python->C++): convert a PyObject into a inty
+         * instance or return false upon failure. The second argument
+         * indicates whether implicit conversions should be applied.
+         */
+        bool load(handle src, bool)
+        {
+            using ArrayT = array_t<std::remove_const_t<T>, array::c_style>;
+            if (!ArrayT::check_(src))
+                return false;
+            auto array = ArrayT::ensure(src);
+            if (!array || array.ndim() != 1) return false;
+            auto size = static_cast<size_t>(array.shape()[0]);
+            value     = gsl::span<T>{
+                std::is_const_v<T> ? array.data() : array.mutable_data(), size};
+            return true;
+        }
+    };
+} // namespace detail
+} // namespace pybind11
+
 namespace py = pybind11;
 
 namespace {
@@ -271,7 +305,14 @@ auto bind_spin_basis(py::module m) -> void
                 return std::make_shared<SpinBasis>(
                     std::move(symmetries), number_spins,
                     std::move(hamming_weight), std::move(cache));
-            }));
+            }))
+        .def("expand", [](SpinBasis const& self, gsl::span<float const> xs,
+                          gsl::span<SpinBasis::StateT const> states) {
+            py::array_t<float> ys{states.size()};
+            ::TCM_NAMESPACE::v2::expand_states<float>(
+                self, xs, states, {ys.mutable_data(), states.size()});
+            return ys;
+        });
 
     m.def(
         "unpack",
@@ -361,7 +402,7 @@ auto bind_spin_basis(py::module m) -> void
     py::class_<v2::Heisenberg, std::shared_ptr<v2::Heisenberg>>(m, "Heisenberg")
         .def(py::init<v2::Heisenberg::spec_type,
                       std::shared_ptr<SpinBasis const>>())
-        .def_property_readonly("edges", &v2::Heisenberg::edges)
+        // .def_property_readonly("edges", &v2::Heisenberg::edges)
         .def_property_readonly("basis", &v2::Heisenberg::basis)
         .def_property_readonly("is_real", &v2::Heisenberg::is_real)
         .def("__call__",
