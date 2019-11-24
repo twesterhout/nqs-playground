@@ -5,7 +5,6 @@ import math
 import os
 import pickle
 import shutil
-import sys
 from typing import Tuple
 
 import numpy as np
@@ -164,6 +163,7 @@ def load_model(config) -> torch.nn.Module:
         m = m(config.number_spins)
     if config.use_jit and not isinstance(m, torch.jit.ScriptModule):
         m = torch.jit.script(m)
+    m.to(device=config.device)
     return m
 
 
@@ -410,6 +410,8 @@ def create_sign_evaluator(model, device, non_blocking):
             "accuracy": mk_accuracy_metric(False),
             "weighted_accuracy": mk_accuracy_metric(True),
         },
+        device=device,
+        non_blocking=non_blocking,
     )
 
 
@@ -423,7 +425,11 @@ def create_amplitude_evaluator(model, device, non_blocking, weighted=True):
         return x, y
 
     return create_supervised_evaluator(
-        model, metrics={"overlap": OverlapMetric(weighted)}, prepare_batch=prepare_batch
+        model,
+        metrics={"overlap": OverlapMetric(weighted)},
+        device=device,
+        non_blocking=non_blocking,
+        prepare_batch=prepare_batch,
     )
 
 
@@ -574,39 +580,6 @@ def main():
     shutil.copy2(config.model, config.output)
     run(config)
 
-    # target = "amplitude"
-    # if target == "sign":
-    #     config = Config(
-    #         dataset="dataset_1000.pickle",
-    #         model="test_model.py",
-    #         output="ignite/sign/1",
-    #         target="sign",
-    #         train_fraction=0.05,
-    #         val_fraction=0.05,
-    #         train_batch_size=16,
-    #         patience=100,
-    #         max_epochs=500,
-    #         sampling="quadratic",
-    #         replacement=True,
-    #     )
-    # else:
-    #     config = Config(
-    #         dataset="dataset_1000.pickle",
-    #         model="amplitude.py",
-    #         output="ignite/amplitude/23",
-    #         target="amplitude",
-    #         optimiser="lambda m: torch.optim.RMSprop(m.parameters(), lr=1e-3, weight_decay=1e-4)",
-    #         train_fraction=0.05,
-    #         val_fraction=0.05,
-    #         train_batch_size=32,
-    #         patience=100,
-    #         max_epochs=500,
-    #         sampling="quadratic",
-    #         replacement=True,
-    #     )
-    # run(config)
-
 
 if __name__ == "__main__":
-    # cProfile.run("main()")
     main()
