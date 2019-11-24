@@ -79,7 +79,7 @@ endfunction()
 
 # Stores the last line of _STRING into _RESULT
 function(get_last_line _STRING _RESULT)
-    string(REGEX REPLACE "^\\(.+\\n\\)?\\(.*\\)" "\\2" _VALUE "${_STRING}")
+    string(REGEX REPLACE "^(.*)\n" "" _VALUE "${_STRING}")
     set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
 endfunction()
 
