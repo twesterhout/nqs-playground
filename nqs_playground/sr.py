@@ -45,8 +45,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ._C_nqs import v2 as _C
 from . import core, hamiltonian
+from .core import forward_with_batches
 from .supervised import eliminate_phase
-from .swo import sample_some, forward_with_batches
+from .swo import sample_some
 
 # SR requires one to run a whole lot of backward operations on independent
 # inputs. We parallelise this using PyTorches interop thread-pool. The
@@ -298,8 +299,8 @@ class Runner:
                 torch.exp_(A)
                 A /= torch.norm(A)
                 overlap = torch.sqrt(
-                    torch.abs(torch.dot(A * torch.cos(φ), self.ground_state))
-                    + torch.abs(torch.dot(A * torch.sin(φ), self.ground_state))
+                    torch.dot(A * torch.cos(φ), self.ground_state) ** 2
+                    + torch.dot(A * torch.sin(φ), self.ground_state) ** 2
                 ).item()
                 return overlap
 

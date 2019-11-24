@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 from ._C_nqs import v2 as _C  # Makes _C.v2 look like _C
 from . import core
-from .core import SamplingOptions
+from .core import SamplingOptions, forward_with_batches
 from .supervised import subtract
 
 TrainingOptions = namedtuple(
@@ -102,28 +102,6 @@ Config = namedtuple(
     ],
     defaults=[None, None, None],
 )
-
-
-def forward_with_batches(f, xs, batch_size: int) -> torch.Tensor:
-    r"""Applies ``f`` to all ``xs`` propagating no more than ``batch_size``
-    samples at a time. ``xs`` is split into batches along the first dimension
-    (i.e. dim=0). ``f`` must return a torch.Tensor.
-    """
-    n = xs.shape[0]
-    if n == 0:
-        raise ValueError("invalid xs: {}; input should not be empty".format(xs))
-    if batch_size <= 0:
-        raise ValueError(
-            "invalid batch_size: {}; expected a positive integer".format(batch_size)
-        )
-    i = 0
-    out = []
-    while i + batch_size <= n:
-        out.append(f(xs[i : i + batch_size]))
-        i += batch_size
-    if i != n:  # Remaining part
-        out.append(f(xs[i:]))
-    return torch.cat(out, dim=0)
 
 
 def sample_some(
