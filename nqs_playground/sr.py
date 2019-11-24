@@ -31,21 +31,27 @@
 
 import argparse
 from collections import namedtuple
+from contextlib import contextmanager
 import json
 import math
 import os
 import pickle
-import sys
-import tempfile
+from psutil import cpu_count
 from typing import Dict, List, Tuple, Optional, Union
 
 import numpy as np
-import scipy
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from ._C_nqs import v2 as _C
 from . import core, hamiltonian
-from .core import _C
+from .supervised import eliminate_phase
+from .swo import sample_some, forward_with_batches
+
+# SR requires one to run a whole lot of backward operations on independent
+# inputs. We parallelise this using PyTorches interop thread-pool. The
+# following value is determined emprically. Feel free to modify it.
+torch.set_num_interop_threads(cpu_count() // 2)
 
 
 def num_parameters(module: torch.nn.Module) -> int:
@@ -54,29 +60,72 @@ def num_parameters(module: torch.nn.Module) -> int:
     return sum(map(torch.numel, module.parameters()))
 
 
-def jacobian(module: torch.nn.Module, inputs: torch.Tensor, out=None) -> torch.Tensor:
+# def jacobian(module: torch.nn.Module, inputs: torch.Tensor, out=None) -> torch.Tensor:
+#     r"""Given a ``torch.nn.Module`` and a ``torch.Tensor`` of inputs, computes
+#     the Jacobian ∂module(inputs)/∂W where W are module's parameters.
+#
+#     It is assumed that if ``inputs`` has shape ``(batch_size, in_features)``,
+#     then ``module(inputs)`` has shape ``(batch_size, 1)``.
+#     """
+#     parameters = list(module.parameters())
+#     shape = (inputs.size(0), num_parameters(module))
+#     if out is None:
+#         out = torch.zeros(*shape)
+#     else:
+#         assert out.size() == shape
+#     for i, xs in enumerate(inputs):
+#         dws = torch.autograd.grad(
+#             module(xs.view(1, -1)),
+#             parameters,
+#             retain_graph=True,
+#             create_graph=False,
+#             allow_unused=True,
+#         )
+#         torch.cat([dw.reshape(-1) for dw in dws], out=out[i])
+#     return out
+
+
+def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tensor:
     r"""Given a ``torch.nn.Module`` and a ``torch.Tensor`` of inputs, computes
     the Jacobian ∂module(inputs)/∂W where W are module's parameters.
 
     It is assumed that if ``inputs`` has shape ``(batch_size, in_features)``,
     then ``module(inputs)`` has shape ``(batch_size, 1)``.
     """
+
+    @contextmanager
+    def num_threads(n):
+        old = torch.get_num_threads()
+        torch.set_num_threads(n)
+        yield
+        torch.set_num_threads(old)
+
     parameters = list(module.parameters())
-    shape = (inputs.size(0), num_parameters(module))
-    if out is None:
-        out = torch.zeros(*shape)
-    else:
-        assert out.size() == shape
-    for i, xs in enumerate(inputs):
-        dws = torch.autograd.grad(
-            module(xs.view(1, -1)),
-            parameters,
-            retain_graph=True,
-            create_graph=False,
-            allow_unused=True,
-        )
-        torch.cat([dw.reshape(-1) for dw in dws], out=out[i])
-    return out
+    forward = module._c._get_method("forward")
+
+    @torch.jit.script
+    def task(xs: torch.Tensor, parameters: List[torch.Tensor]):
+        out = []
+        for i in range(xs.size(0)):
+            dws = torch.autograd.grad(
+                [forward(xs[i])],
+                parameters,
+                keep_graph=True,
+                create_graph=False,
+                allow_unused=True,
+            )
+            out.append(torch.cat([dw.reshape([-1]) for dw in dws]).view([1, -1]))
+        return torch.cat(out, dim=0)
+
+    @torch.jit.script
+    def go(inputs: torch.Tensor, parameters: List[torch.Tensor]):
+        futures = [
+            torch.jit._fork(task, xs, parameters) for xs in torch.split(inputs, 64)
+        ]
+        return torch.cat([torch.jit._wait(f) for f in futures], dim=0)
+
+    with num_threads(cpu_count() // torch.get_num_interop_threads()):
+        return go(inputs, parameters)
 
 
 def logarithmic_derivative(
@@ -98,9 +147,9 @@ def logarithmic_derivative(
     middle = num_parameters(amplitude)
     n = middle + num_parameters(phase)
     out = torch.zeros([inputs.size(0), n, 2], dtype=torch.float32)
-    jacobian(amplitude, inputs, out[:, :middle, 0])
-    jacobian(phase, inputs, out[:, middle:, 1])
-    return out.numpy().view(np.complex64).squeeze(axis=2)
+    out[:, :middle, 0] = jacobian(amplitude, inputs)
+    out[:, middle:, 1] = jacobian(phase, inputs)
+    return out.detach().numpy().view(np.complex64).squeeze(axis=2)
 
 
 def energy_gradient(
@@ -123,15 +172,17 @@ def energy_gradient(
     if weights is not None:
         assert np.isclose(np.sum(weights), 1.0)
         local_energies = weights * local_energies
-        local_energies = local_energies.conj()
+        np.conj(local_energies, out=local_energies)
         local_energies = local_energies.reshape(1, -1)
         gradient = local_energies @ logarithmic_derivatives
     else:
         local_energies = local_energies.conj()
         local_energies = local_energies.reshape(1, -1)
         gradient = local_energies @ logarithmic_derivatives
-        gradient /= logarithmic_derivatives.shape[0]
-    return np.ascontiguousarray(2.0 * gradient.real.squeeze())
+        assert gradient.real.dtype == np.float32
+    return torch.from_numpy(
+        (2.0 / logarithmic_derivatives.shape[0]) * gradient.real.squeeze()
+    ).contiguous()
 
 
 def covariance_matrix(
@@ -147,15 +198,22 @@ def covariance_matrix(
         {σ} come from Monte Carlo sampling and are distributed according to
         ``|⟨σ|ψ⟩|²/‖ψ‖₂``.
     """
+    assert weights is None
     if weights is not None:
         assert np.isclose(np.sum(weights), 1.0)
         matrix = (
             weights.reshape(-1, 1) * logarithmic_derivatives
         ).T.conj() @ logarithmic_derivatives
     else:
-        matrix = logarithmic_derivatives.T.conj() @ logarithmic_derivatives
-        matrix /= logarithmic_derivatives.shape[0]
-    return np.ascontiguousarray(matrix.real)
+        with torch.no_grad():
+            real = torch.from_numpy(logarithmic_derivatives.real).contiguous()
+            imag = torch.from_numpy(logarithmic_derivatives.imag).contiguous()
+            matrix = torch.mm(real.t(), real)
+            scale = 1.0 / logarithmic_derivatives.shape[0]
+            torch.addmm(scale, matrix, scale, imag.t(), imag, out=matrix)
+            # matrix = logarithmic_derivatives.T.conj() @ logarithmic_derivatives
+            # matrix /= logarithmic_derivatives.shape[0]
+    return matrix  # np.ascontiguousarray(matrix.real)
 
 
 class Runner:
@@ -165,15 +223,18 @@ class Runner:
         self.__load_model()
         self.__load_optimiser()
         self.__add_loggers()
-        self.__add_mc_options()
+        self.__add_sampling_options()
         self.compute_overlap = self.__load_exact()
         self._iteration = 0
 
     def __load_hamiltonian(self):
         self.hamiltonian = hamiltonian.read_hamiltonian(self.config.hamiltonian)
-        self.number_spins = self.hamiltonian.number_spins
-        self.magnetisation = self.number_spins % 2
-        self.hamiltonian = self.hamiltonian.to_cxx()
+        number_spins = self.hamiltonian.number_spins
+        self.basis = _C.SpinBasis(
+            [], number_spins=number_spins, hamming_weight=number_spins // 2
+        )
+        self.basis.build()
+        self.hamiltonian = _C.Heisenberg(self.hamiltonian._specs, self.basis)
 
     def __load_model(self):
         if not isinstance(self.config.model, (tuple, list)):
@@ -183,7 +244,7 @@ class Runner:
             )
 
         def load(name):
-            return torch.jit.script(core.import_network(name)(self.number_spins))
+            return torch.jit.script(core.import_network(name)(self.basis.number_spins))
 
         amplitude_file, phase_file = self.config.model
         self.amplitude = load(amplitude_file)
@@ -196,63 +257,71 @@ class Runner:
 
     def __add_loggers(self):
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
-        self.tb_writer.add_graph(self.amplitude, torch.rand(32, self.number_spins))
 
-    def __add_mc_options(self):
-        self.mc_options = core.make_monte_carlo_options(self.config, self.number_spins)
+    def __add_sampling_options(self):
+        self.sampling_options = core.SamplingOptions(
+            self.config.number_samples, self.config.number_chains
+        )
 
     def __load_exact(self):
         if self.config.exact is None:
             return None
-        x, y = core.with_file_like(self.config.exact, "rb", pickle.load)
-        x = _C.unpack(x)
-        y = torch.from_numpy(y).squeeze()
-        y /= np.linalg.norm(y)
+        if self.config.exact.endswith(".npy"):
+            # Ground state was saved using NumPy binary format
+            self.ground_state = eliminate_phase(np.load(self.config.exact).squeeze())
+        else:
+            r = core.with_file_like(self.config.exact, "rb", pickle.load)
+            if isinstance(r, torch.Tensor):
+                self.ground_state = r
+            elif isinstance(r, np.ndarray):
+                self.ground_state = eliminate_phase(r)
+            else:
+                _, self.ground_state = r
+                self.ground_state = eliminate_phase(r)
+        self.ground_state /= torch.norm(self.ground_state)
 
-        def compute():
-            with torch.no_grad():
-                A = self.amplitude.forward(x)
+        def compute(A=None, φ=None):
+            with torch.no_grad(), torch.jit.optimized_execution(True):
+                if A is None:
+                    A = forward_with_batches(
+                        lambda x: self.amplitude(_C.unpack(x, self.basis.number_spins)),
+                        self.basis.states,
+                        8192,
+                    ).squeeze()
+                if φ is None:
+                    φ = forward_with_batches(
+                        lambda x: self.phase(_C.unpack(x, self.basis.number_spins)),
+                        self.basis.states,
+                        8192,
+                    ).squeeze()
                 A -= torch.max(A) - 1.0
-                φ = self.phase.forward(x)
-                y_pred = np.exp(
-                    torch.cat([A, φ], dim=1).numpy().view(np.complex64).squeeze(axis=1)
-                )
-                y_pred /= np.linalg.norm(y_pred)
-                return abs(np.dot(y_pred.conj(), y))
+                torch.exp_(A)
+                A /= torch.norm(A)
+                overlap = torch.sqrt(
+                    torch.abs(torch.dot(A * torch.cos(φ), self.ground_state))
+                    + torch.abs(torch.dot(A * torch.sin(φ), self.ground_state))
+                ).item()
+                return overlap
 
         return compute
 
-
-    def _sample_some(self, how: str):
-        assert how in {"exact", "full"}
-        if how == "exact":
-            spins, values = core.sample_exact(self.amplitude, self.mc_options)
-            return spins, values, None
-        elif how == "full":
-            spins = _C.all_spins(self.number_spins, self.magnetisation)
-            values = core._forward_with_batches(self.amplitude, spins, batch_size=512)
-            weights = core._log_amplitudes_to_probabilities(values)
-            return spins, values, weights
-        else:
-            raise ValueError(
-                "invalid sampling type: {}; expected one of 'exact', 'full'".format(how)
-            )
-
     def monte_carlo(self):
         with torch.no_grad():
-            spins, _, weights = self._sample_some("exact")
+            spins, A, cache = sample_some(
+                self.amplitude, self.basis, self.sampling_options, mode="exact"
+            )
+            weights = None
             # spins = _C.all_spins(self.number_spins, self.magnetisation)
             # inputs = _C.unpack(spins)
             # weights = self.amplitude.forward(inputs)
             # weights -= torch.max(weights)
             # weights = torch.exp(2 * weights)
             # weights /= weights.sum()
-            if weights is not None:
-                weights = weights.numpy().squeeze()
+            # if weights is not None:
+            #     weights = weights.numpy().squeeze()
 
         local_energies = core.local_energy(
-            core.combine_amplitude_and_phase(self.amplitude, self.phase, use_classifier=False),
-            # CombiningState(self.amplitude, self.phase),
+            core.combine_amplitude_and_phase(self.amplitude, self.phase),
             self.hamiltonian,
             spins,
         )
@@ -265,9 +334,14 @@ class Runner:
         self.tb_writer.add_scalar("SR/energy_real", energy.real, self._iteration)
         self.tb_writer.add_scalar("SR/energy_imag", energy.imag, self._iteration)
         self.tb_writer.add_scalar("SR/variance", variance, self._iteration)
+        if self.compute_overlap is not None:
+            overlap = self.compute_overlap(A=cache["ys"])
+            self.tb_writer.add_scalar("SR/overlap", overlap, self._iteration)
 
+        # TODO: Fix this! Unpacking all the Monte Carlo data might not be a
+        # good idea...
         logarithmic_derivatives = logarithmic_derivative(
-            (self.amplitude, self.phase), _C.unpack(spins)
+            (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins)
         )
         # Centering
         if weights is not None:
@@ -282,18 +356,10 @@ class Runner:
         return force, S
 
     def solve(self, matrix, vector):
-        n = matrix.shape[0]
-        # diag = np.diag(matrix)
-        # diag = np.where(diag <= 0.0, 1.0, diag)
-        # diag = np.sqrt(diag)
-        #
-        # matrix = matrix / (diag.reshape(-1, 1) @ diag.reshape(1, -1))
-        # vector = vector / diag
-
-        matrix += 1e-2 * np.eye(matrix.shape[0])
-        x = scipy.linalg.solve(matrix, vector)
-        # x /= diag
-        return x
+        diag = matrix.diagonal()
+        diag += 1e-2
+        x, _ = torch.solve(vector.view([-1, 1]), matrix)
+        return x.squeeze()
 
     def set_gradient(self, grad):
         def run(m, i):
@@ -313,13 +379,17 @@ class Runner:
     def step(self):
         force, S = self.monte_carlo()
         delta = self.solve(S, force)
-        self.tb_writer.add_scalar("SR/delta", np.linalg.norm(delta), self._iteration)
-        self.set_gradient(torch.from_numpy(delta))
+        self.tb_writer.add_scalar("SR/delta", torch.norm(delta), self._iteration)
+        self.set_gradient(delta)
         self.optimiser.step()
-        if self.compute_overlap is not None:
-            self.tb_writer.add_scalar(
-                "SR/overlap", self.compute_overlap(), self._iteration
-            )
+        torch.save(
+            self.amplitude.state_dict(),
+            os.path.join(self.config.output, "amplitude_weights.pt"),
+        )
+        torch.save(
+            self.amplitude.state_dict(),
+            os.path.join(self.config.output, "sign_weights.pt"),
+        )
         self._iteration += 1
 
 
@@ -355,17 +425,6 @@ def main():
     runner = Runner(config)
     for i in range(config.epochs):
         runner.step()
-
-    # config = Config(
-    #     model=("example/1x10/sr/amplitude_wip.py", "example/1x10/sr/phase_wip.py"),
-    #     hamiltonian="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/hamiltonian.txt",
-    #     epochs=300,
-    #     number_samples=400,
-    #     number_chains=1,
-    #     output="sr/run/5",
-    #     exact="/vol/tcm01/westerhout_tom/nqs-playground/data/1x10/ground_state.pickle",
-    #     optimiser="lambda p: torch.optim.SGD(p, lr=1e-2)",
-    # )
 
 
 if __name__ == "__main__":

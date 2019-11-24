@@ -120,6 +120,28 @@ class SetToEval(object):
             self._module.train()
 
 
+def forward_with_batches(f, xs, batch_size: int) -> torch.Tensor:
+    r"""Applies ``f`` to all ``xs`` propagating no more than ``batch_size``
+    samples at a time. ``xs`` is split into batches along the first dimension
+    (i.e. dim=0). ``f`` must return a torch.Tensor.
+    """
+    n = xs.shape[0]
+    if n == 0:
+        raise ValueError("invalid xs: {}; input should not be empty".format(xs))
+    if batch_size <= 0:
+        raise ValueError(
+            "invalid batch_size: {}; expected a positive integer".format(batch_size)
+        )
+    i = 0
+    out = []
+    while i + batch_size <= n:
+        out.append(f(xs[i : i + batch_size]))
+        i += batch_size
+    if i != n:  # Remaining part
+        out.append(f(xs[i:]))
+    return torch.cat(out, dim=0)
+
+
 class SamplingOptions:
     r"""Options for Monte Carlo sampling spin configurations."""
 
@@ -527,7 +549,7 @@ def _forward_with_batches(state, input, batch_size):
 
 def local_energy(
     state: torch.jit.ScriptModule,
-    hamiltonian: _C.Heisenberg,
+    hamiltonian: _C.v2.Heisenberg,
     spins: np.ndarray,
     log_values: Optional[np.ndarray] = None,
     batch_size: int = 128,
@@ -540,7 +562,7 @@ def local_energy(
         ``log(⟨σ|ψ⟩)``.
     :param hamiltonian: Hamiltonian ``H``.
     :param spins: spin configurations ``σ``. Should be a non-empty NumPy array
-        of py:class:`CompactSpin`.
+        of compact spin configurations.
     :param log_values: pre-computed ``log(⟨σ|ψ⟩)``. Should be a NumPy array of
         ``complex64``.
     :param batch_size: batch size to use for forward propagation through
@@ -548,31 +570,38 @@ def local_energy(
 
     :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
     """
-    with torch.no_grad():
-        with torch.jit.optimized_execution(True):
-            if log_values is None:
-                log_values = _forward_with_batches(state, spins, batch_size)
-                log_values = log_values.numpy().view(np.complex64)
-
-            # Since torch.jit.ScriptModules can't be directly passed to C++
-            # code as torch::jit::script::Modules, we first save ψ to a
-            # temporary file and then load it back in C++ code.
-            with tempfile.NamedTemporaryFile(delete=False) as f:
-                filename = f.name
-            try:
-                state.save(filename)
-                log_H_values = (
-                    _C.PolynomialState(
-                        _C.Polynomial(hamiltonian, [0.0]),
-                        filename,
-                        (batch_size, len(_C.unsafe_get(spins, 0))),
-                    )(spins)
-                    .numpy()
-                    .view(np.complex64)
+    assert isinstance(state, torch.jit.ScriptModule)
+    assert isinstance(hamiltonian, _C.v2.Heisenberg)
+    if len(spins) == 0:
+        return numpy.array([], dtype=np.complex64)
+    with torch.no_grad(), torch.jit.optimized_execution(True):
+        if log_values is None:
+            number_spins = hamiltonian.basis.number_spins
+            log_values = forward_with_batches(
+                lambda x: state(_C.v2.unpack(x, number_spins)), spins, batch_size
+            )
+            if log_values.dim() != 2:
+                raise ValueError(
+                    "state should return the logarithm of the wavefunction, but"
+                    "output tensor has dimension {}; did you by accident forget"
+                    "to combine amplitude and phase networks?".format(log_values.dim())
                 )
-            finally:
-                os.remove(filename)
-            return np.exp(log_H_values - log_values).squeeze(axis=1)
+            log_values = log_values.numpy().view(np.complex64)
+
+        log_H_values = (
+            forward_with_batches(
+                _C.v2.PolynomialState(
+                    _C.v2.Polynomial(hamiltonian, [0.0]),
+                    state._c._get_method("forward"),
+                    batch_size,
+                ),
+                spins,
+                batch_size=batch_size // 4,
+            )
+            .numpy()
+            .view(np.complex64)
+        )
+        return np.exp(log_H_values - log_values).squeeze(axis=1)
 
 
 @torch.jit.script

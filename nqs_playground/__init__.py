@@ -3,6 +3,7 @@ import torch
 from . import _C_nqs as _C
 from . import core
 from . import hamiltonian
+from . import supervised
 from . import symmetry
 from . import swo
 from .hamiltonian import *
