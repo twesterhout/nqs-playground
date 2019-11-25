@@ -278,7 +278,7 @@ class Runner:
                 self.ground_state = eliminate_phase(r)
             else:
                 _, self.ground_state = r
-                self.ground_state = eliminate_phase(r)
+                self.ground_state = eliminate_phase(self.ground_state)
         self.ground_state /= torch.norm(self.ground_state)
 
         def compute(A=None, φ=None):
