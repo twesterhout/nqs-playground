@@ -18,9 +18,9 @@ from ignite.engine import Events, create_supervised_trainer, create_supervised_e
 
 from tqdm import tqdm
 
-from . import _C
-from . import core
-from .core import make_spin_dataloader, import_network
+from nqs_playground import _C
+from nqs_playground import core
+from nqs_playground.core import SpinDataset, import_network
 
 
 def eliminate_phase(zs):
@@ -117,26 +117,28 @@ def make_data_loaders(config):
         )
         val = subtract(val, train)
 
-        unpack = lambda batch, idx: _C.v2.unpack(batch, idx, config.number_spins)
-        train_loader = make_spin_dataloader(
-            *train, batch_size=config.train_batch_size, drop_last=True, unpack=unpack
+        train_loader = SpinDataset(
+            *train,
+            number_spins=config.number_spins,
+            batch_size=config.train_batch_size,
+            shuffle=True,
+            device=config.device
         )
-        unpack = lambda batch: _C.v2.unpack(batch, config.number_spins)
-        val_loader = make_spin_dataloader(
+        val_loader = SpinDataset(
             *val,
+            number_spins=config.number_spins,
             batch_size=config.val_batch_size,
-            drop_last=False,
-            unpack=unpack,
-            shuffle=False
+            shuffle=False,
+            device=config.device
         )
         if len(rest[0]) > 0:
             rest_loader, all_loader = [
-                make_spin_dataloader(
+                SpinDataset(
                     *t,
+                    number_spins=config.number_spins,
                     batch_size=config.val_batch_size,
-                    drop_last=False,
-                    unpack=unpack,
-                    shuffle=False
+                    shuffle=False,
+                    device=config.device
                 )
                 for t in (rest, dataset)
             ]
@@ -214,6 +216,7 @@ Config = collections.namedtuple(
         "val_batch_size",
         # Use jit
         "use_jit",
+        "device",
     ],
     defaults=[
         50,  # patience
@@ -224,6 +227,7 @@ Config = collections.namedtuple(
         10,  # log_interval
         8192,  # val_batch_size
         True,  # use_jit
+        "cpu",
     ],
 )
 
@@ -241,9 +245,9 @@ def create_sign_trainer(
 
     def prepare_batch(batch, device: str, non_blocking: bool):
         x, y = batch
-        if device:
-            x = x.to(device=device, non_blocking=non_blocking)
-            y = y.to(device=device, non_blocking=non_blocking)
+        # if device:
+        #     x = x.to(device=device, non_blocking=non_blocking)
+        #     y = y.to(device=device, non_blocking=non_blocking)
         # Convert coefficients to classes
         return x, (y < 0).to(torch.long)
 
@@ -270,9 +274,9 @@ def create_amplitude_trainer(
 
     def prepare_batch(batch, device, non_blocking):
         x, y = batch
-        if device:
-            x = x.to(device=device, non_blocking=non_blocking)
-            y = y.to(device=device, non_blocking=non_blocking)
+        # if device:
+        #     x = x.to(device=device, non_blocking=non_blocking)
+        #     y = y.to(device=device, non_blocking=non_blocking)
         # Convert coefficients to amplitudes
         return x, torch.abs(y)
 
@@ -418,11 +422,10 @@ def create_sign_evaluator(model, device, non_blocking):
 def create_amplitude_evaluator(model, device, non_blocking, weighted=True):
     def prepare_batch(batch, device, non_blocking):
         x, y = batch
-        if device:
-            x = x.to(device=device, non_blocking=non_blocking)
-            y = y.to(device=device, non_blocking=non_blocking)
-        y = torch.abs(y).view([-1, 1])
-        return x, y
+        # if device:
+        #     x = x.to(device=device, non_blocking=non_blocking)
+        #     y = y.to(device=device, non_blocking=non_blocking)
+        return x, torch.abs(y).view([-1, 1])
 
     return create_supervised_evaluator(
         model,

@@ -850,21 +850,23 @@ namespace detail {
 template <class Iterator, class Sentinel,
           class Projection = detail::_IdentityProjection>
 TCM_NOINLINE auto unpack(Iterator first, Sentinel last,
-                         unsigned const number_spins, torch::Tensor dst,
+                         unsigned const number_spins, torch::Tensor& dst,
                          Projection proj = Projection{}) -> void
 {
     if (first == last) { return; }
     auto const size = static_cast<size_t>(std::distance(first, last));
-    TCM_ASSERT(dst.dim() == 2,
-               noexcept_format("invalid dimension {}", dst.dim()));
-    TCM_ASSERT(size == static_cast<size_t>(dst.size(0)),
-               noexcept_format("sizes don't match: size={}, dst.size(0)={}",
-                               size, dst.size(0)));
-    TCM_ASSERT(
-        number_spins == static_cast<size_t>(dst.size(1)),
-        noexcept_format("sizes don't match: number_spins={}, dst.size(1)={}",
-                        number_spins, dst.size(1)));
-    TCM_ASSERT(dst.is_contiguous(), "Output tensor must be contiguous");
+    TCM_CHECK(dst.is_contiguous(), std::invalid_argument,
+              "output tensor must be contiguous");
+    auto dst_sizes = dst.sizes();
+    TCM_CHECK(dst_sizes.size() == 2, std::invalid_argument,
+              fmt::format("invalid dimension {}", dst_sizes.size()));
+    TCM_CHECK(
+        static_cast<size_t>(dst_sizes[0]) == size
+            && static_cast<size_t>(dst_sizes[1]) == number_spins,
+        std::invalid_argument,
+        fmt::format("output tensor has wrong shape: [{}]; expected [{}, {}]",
+                    fmt::join(dst_sizes.begin(), dst_sizes.end(), ", "), size,
+                    number_spins));
 
     auto const rest = number_spins % 8;
     auto const tail = std::min<size_t>(
@@ -950,8 +952,8 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         -> std::pair<buffer_type, size_t>;
 
     template <class Callback>
-    auto operator()(SpinBasis::StateT const spin, Callback&& callback) const
-        -> void
+    __attribute__((visibility("hidden"))) auto
+    operator()(SpinBasis::StateT const spin, Callback&& callback) const -> void
     {
         TCM_ASSERT(_edges.empty() || max_index() < _basis->number_spins(),
                    fmt::format("`spin` is too short {}; expected >{}",
@@ -993,7 +995,9 @@ class Heisenberg : public std::enable_shared_from_this<Heisenberg> {
 
     template <class T, class = std::enable_if_t<
                            std::is_floating_point_v<T> || is_complex_v<T>>>
-    auto operator()(gsl::span<T const> x, gsl::span<T> y) const -> void
+    __attribute__((visibility("hidden"))) auto operator()(gsl::span<T const> x,
+                                                          gsl::span<T> y) const
+        -> void
     {
         TCM_CHECK(x.size() == y.size() && y.size() == _basis->number_states(),
                   std::invalid_argument,

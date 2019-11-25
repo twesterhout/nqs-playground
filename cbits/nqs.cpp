@@ -317,7 +317,7 @@ auto bind_spin_basis(py::module m) -> void
     m.def(
         "unpack",
         [](py::array_t<SpinBasis::StateT, py::array::c_style> states,
-           unsigned const                                     number_spins) {
+           unsigned const number_spins, std::optional<torch::Tensor> out) {
             TCM_CHECK(0 < number_spins && number_spins <= 64,
                       std::invalid_argument,
                       fmt::format("invalid number_spins: {}; expected a "
@@ -329,13 +329,15 @@ auto bind_spin_basis(py::module m) -> void
                 fmt::format("states has invalid shape: [{}]; expected a "
                             "one-dimensional array",
                             fmt::join(shape, shape + states.ndim(), ", ")));
-            auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
-                *shape, number_spins);
+            if (!out.has_value()) {
+                out.emplace(::TCM_NAMESPACE::detail::make_tensor<float>(
+                    shape[0], number_spins));
+            }
             auto const in = gsl::span<SpinBasis::StateT const>{
                 static_cast<SpinBasis::StateT const*>(states.data()),
-                static_cast<size_t>(*shape)};
-            v2::unpack(in.begin(), in.end(), number_spins, out);
-            return out;
+                static_cast<size_t>(shape[0])};
+            v2::unpack(in.begin(), in.end(), number_spins, *out);
+            return *std::move(out);
         },
         DOC(R"EOF(
             Given a 1D array of states, returns a 2D tensor of float32 where
@@ -345,13 +347,14 @@ auto bind_spin_basis(py::module m) -> void
             relatively efficient. It is thus okay to call it on every batch
             before propagating it through a neural network.
             )EOF"),
-        py::arg{"states"}, py::arg{"number_spins"});
+        py::arg{"states"}, py::arg{"number_spins"},
+        py::arg{"out"} = py::none{}, py::call_guard<py::gil_scoped_release>());
 
     m.def(
         "unpack",
         [](py::array_t<SpinBasis::StateT, py::array::c_style> states,
            py::array_t<int64_t, py::array::c_style>           indices,
-           unsigned const                                     number_spins) {
+           unsigned const number_spins, std::optional<torch::Tensor> out) {
             TCM_CHECK(0 < number_spins && number_spins <= 64,
                       std::invalid_argument,
                       fmt::format("invalid number_spins: {}; expected a "
@@ -374,8 +377,10 @@ auto bind_spin_basis(py::module m) -> void
             auto const in = gsl::span<int64_t const>{
                 static_cast<int64_t const*>(indices.data()),
                 static_cast<size_t>(indices_shape[0])};
-            auto out = ::TCM_NAMESPACE::detail::make_tensor<float>(
-                indices_shape[0], number_spins);
+            if (!out.has_value()) {
+                out.emplace(::TCM_NAMESPACE::detail::make_tensor<float>(
+                    indices_shape[0], number_spins));
+            }
             auto const projection =
                 [p = static_cast<SpinBasis::StateT const*>(states.data()),
                  n = states_shape[0]](auto const index) {
@@ -386,8 +391,8 @@ auto bind_spin_basis(py::module m) -> void
                                     index, 0, n));
                     return p[index];
                 };
-            v2::unpack(in.begin(), in.end(), number_spins, out, projection);
-            return out;
+            v2::unpack(in.begin(), in.end(), number_spins, *out, projection);
+            return *std::move(out);
         },
         DOC(R"EOF(
             Given a 1D array of states, returns a 2D tensor of float32 where
@@ -397,7 +402,48 @@ auto bind_spin_basis(py::module m) -> void
             relatively efficient. It is thus okay to call it on every batch
             before propagating it through a neural network.
             )EOF"),
-        py::arg{"states"}, py::arg{"indices"}, py::arg{"number_spins"});
+        py::arg{"states"}, py::arg{"indices"}, py::arg{"number_spins"},
+        py::arg{"out"} = py::none{}, py::call_guard<py::gil_scoped_release>());
+
+    py::class_<SpinDataset>(m, "SpinDataset")
+        .def(py::init<torch::Tensor, torch::Tensor, size_t>(), py::arg{"spins"},
+             py::arg{"values"}, py::arg{"number_spins"})
+        .def("fetch",
+             [](SpinDataset const& self, int64_t const first,
+                int64_t const last, py::object device, bool const pin_memory) {
+                 return self.fetch(
+                     first, last,
+                     torch::python::detail::py_object_to_device(device),
+                     pin_memory);
+             })
+        .def("fetch", [](SpinDataset const&             self,
+                         gsl::span<int64_t const> const indices,
+                         py::object device, bool const pin_memory) {
+            return self.fetch(
+                indices, torch::python::detail::py_object_to_device(device),
+                pin_memory);
+        });
+
+    py::class_<ChunkLoader>(m, "ChunkLoader")
+        .def(py::init([](SpinDataset dataset, size_t chunk_size, bool shuffle,
+                         py::object device, bool pin_memory) {
+                 return std::make_unique<ChunkLoader>(
+                     std::move(dataset), chunk_size, shuffle,
+                     torch::python::detail::py_object_to_device(device),
+                     pin_memory);
+             }),
+             py::arg{"dataset"}, py::arg{"chunk_size"}, py::arg{"shuffle"},
+             py::arg{"device"}, py::arg{"pin_memory"})
+        .def("__iter__",
+             [](py::object self) {
+                 self.cast<ChunkLoader&>().reset();
+                 return self;
+             })
+        .def("__next__", [](ChunkLoader& self) {
+            auto batch = self.next();
+            if (batch.has_value()) { return *std::move(batch); }
+            throw py::stop_iteration{};
+        });
 
     py::class_<v2::Heisenberg, std::shared_ptr<v2::Heisenberg>>(m, "Heisenberg")
         .def(py::init<v2::Heisenberg::spec_type,

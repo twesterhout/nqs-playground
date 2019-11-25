@@ -29,6 +29,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import concurrent.futures
 import os
 import sys
 import tempfile
@@ -185,186 +186,97 @@ class SamplingOptions:
             self.number_discarded = self.number_samples // 10
 
 
-class SpinDataset(torch.utils.data.Dataset):
+class SpinDataset(torch.utils.data.IterableDataset):
     r"""Dataset wrapping spin configurations and corresponding values.
 
-    Each sample will be retrieved by indexing along the first dimension.
-
-    .. note:: This class is very similar to :py:class:`torch.utils.data.TensorDataset`
-              except that ``spins`` is a NumPy array of structured type and is
-              thus incompatible with :py:class:`torch.utils.data.TensorDataset`.
-
-    :param spins: a NumPy array of compact spin configurations or a torch.Tensor
-        of unpacked spin configurations.
-    :param values: a NumPy array or a Torch tensor.
-    :param unpack: if given, must be a function which receives a chunk of
-        ``spins`` and NumPy array of indices and returns a torch.Tensor with
-        unpacked spin configurations.
+    :param spins: either a ``numpy.ndarray`` of ``uint64`` or a
+        ``torch.Tensor`` of ``int64`` containing compact spin configurations.
+    :param values: a ``torch.Tensor``.
+    :param number_spins: number of spins in the system. This is used to unpack
+        spin configurations.
+    :param batch_size: batch size.
+    :param shuffle: whether to shuffle the samples.
+    :param device: device where the batches will be used.
     """
 
-    def __init__(self, spins, values, unpack=None):
-        if spins.shape[0] != values.shape[0]:
-            raise ValueError(
-                "spins and values must have the same size of the first dimension, but "
-                "spins.shape={} != values.shape={}".format(spins.shape, values.shape)
+    def __init__(
+        self, spins, values, number_spins, batch_size, shuffle=False, device=None
+    ):
+        if isinstance(spins, np.ndarray):
+            if spins.dtype != np.uint64:
+                raise TypeError(
+                    "spins must be a numpy.ndarray of uint64; got numpy.ndarray "
+                    "of {}".format(spins.dtype.name)
+                )
+            # Use int64 because PyTorch doesn't support uint64
+            self.spins = torch.from_numpy(spins.view(np.int64))
+        elif isinstance(spins, torch.Tensor):
+            if spins.dtype != torch.int64:
+                raise TypeError(
+                    "spins must be a torch.Tensor of int64; got torch.Tensor "
+                    "of {}".format(spins.dtype)
+                )
+            self.spins = spins
+        else:
+            raise TypeError(
+                "spins must be either a numpy.ndarray of uint64 or a "
+                "torch.Tensor of int64; got {}".format(type(spins))
             )
-        self.spins = spins
-        self.values = values
-        self.unpack = unpack
 
-    def __len__(self) -> int:
-        return self.spins.shape[0]
-
-    def __getitem__(self, index: torch.Tensor):
-        if self.unpack is not None:
-            return self.unpack(self.spins, index.numpy()), self.values[index]
-        return self.spins[index.numpy()], self.values[index]
-
-
-class IterableSpinDataset(torch.utils.data.IterableDataset):
-    r"""Dataset wrapping spin configurations and corresponding values.
-
-    Each sample will be retrieved by indexing along the first dimension.
-
-    .. note:: This class is very similar to :py:class:`torch.utils.data.TensorDataset`
-              except that ``spins`` is a NumPy array of structured type and is
-              thus incompatible with :py:class:`torch.utils.data.TensorDataset`.
-
-    :param spins: a NumPy array of :py:class:`CompactSpin`.
-    :param values: a NumPy array or a Torch tensor.
-    :param bool unpack: if ``True``, ``spins`` will be unpacked into Torch tensors. 
-    """
-
-    def __init__(self, spins, values, batch_size, drop_last=False, unpack=None):
-        if spins.shape[0] != values.shape[0]:
-            raise ValueError(
-                "spins and values must have the same size along the first dimension, but"
-                " spins.shape={} != values.shape={}".format(spins.shape, values.shape)
+        if isinstance(values, torch.Tensor):
+            self.values = values
+        else:
+            raise TypeError(
+                "values must be either a torch.Tensor; got {}".format(type(spins))
             )
+
+        if self.spins.size(0) != self.values.size(0):
+            raise ValueError(
+                "spins and values must have the same size along the first "
+                "dimension, but spins.shape={} != values.shape={}"
+                "".format(spins.size(), values.size())
+            )
+
+        if number_spins <= 0:
+            raise ValueError(
+                "invalid number_spins: {}; expected a positive integer"
+                "".format(number_spins)
+            )
+        self.number_spins = number_spins
+
         if batch_size <= 0:
             raise ValueError(
-                "invalid batch_size: {}; expected a positive integer".format(batch_size)
+                "invalid batch_size: {}; expected a positive integer"
+                "".format(batch_size)
             )
-        self.spins = spins
-        self.values = values
         self.batch_size = batch_size
-        self.drop_last = drop_last
-        self.unpack = unpack
+
+        if device is None:
+            device = self.values.device
+        elif isinstance(device, str):
+            device = torch.device(device)
+
+        self.device = device
+        if self.device.type == "cuda":
+            self.values = self.values.pin_memory()
+
+        self.dataset = _C.v2.ChunkLoader(
+            _C.v2.SpinDataset(self.spins, self.values, self.number_spins),
+            chunk_size=self.batch_size * max(81920 // self.batch_size, 1),
+            shuffle=shuffle,
+            device=self.device,
+            pin_memory=self.device.type == "cuda",
+        )
 
     def __len__(self) -> int:
         return self.spins.shape[0]
 
     def __iter__(self):
-        if torch.utils.data.get_worker_info() is not None:
-            raise ValueError(
-                "{} does not play well with parallel data loading"
-                "".format(self.__class__.__name__)
-            )
-
-        i = 0
-        n = self.spins.shape[0]
-        while i + self.batch_size <= n:
-            xs = self.spins[i : i + self.batch_size]
-            if self.unpack is not None:
-                xs = self.unpack(xs)
-            yield xs, self.values[i : i + self.batch_size]
-            i += self.batch_size
-        if i < n and not self.drop_last:
-            xs = self.spins[i:]
-            if self.unpack is not None:
-                xs = self.unpack(xs)
-            yield xs, self.values[i:]
-
-
-class BatchedRandomSampler(torch.utils.data.Sampler):
-    r"""Samples batches of elements randomly.
-
-    :param int num_samples: number of elements in the dataset
-    :param int batch_size: size of mini-batch
-    :param bool drop_last: if ``True``, the sampler will ignore the last batch
-        if its size would be less than ``batch_size``.
-
-    Example:
-        >>> list(BatchedRandomSampler(10, batch_size=3, drop_last=True))
-        [tensor([6, 8, 0]), tensor([2, 3, 1]), tensor([4, 7, 9])]
-        >>> list(BatchedRandomSampler(10, batch_size=3, drop_last=False))
-        [tensor([3, 4, 7]), tensor([0, 2, 8]), tensor([1, 5, 9]), tensor([6])]
-    """
-
-    def __init__(self, num_samples: int, batch_size: int, drop_last: bool):
-        self.num_samples = num_samples
-        self.batch_size = batch_size
-        self.drop_last = drop_last
-        self._indices = None
-
-        if not isinstance(num_samples, int) or num_samples <= 0:
-            raise ValueError(
-                "num_samples should be a positive integer, but got num_samples={}".format(
-                    num_samples
-                )
-            )
-        if not isinstance(batch_size, int) or batch_size <= 0:
-            raise ValueError(
-                "batch_size should be a positive integer, but got batch_size={}".format(
-                    batch_size
-                )
-            )
-        if not isinstance(drop_last, bool):
-            raise ValueError(
-                "drop_last should be a boolean, but got drop_last={}".format(drop_last)
-            )
-
-    def __iter__(self):
-        if self._indices is None:
-            self._indices = torch.randperm(self.num_samples)
-        else:
-            torch.randperm(self.num_samples, out=self._indices)
-        i = 0
-        while i + self.batch_size <= self.num_samples:
-            yield self._indices[i : i + self.batch_size]
-            i += self.batch_size
-        if i < self.num_samples and not self.drop_last:
-            yield self._indices[i:]
-
-    def __len__(self) -> int:
-        """
-        Returns the number of batches that will be produced by :py:func:`__iter__`.
-        """
-        if self.drop_last:
-            return self.num_samples // self.batch_size
-        return (self.num_samples + self.batch_size - 1) // self.batch_size
-
-
-def make_spin_dataloader(
-    spins,
-    values,
-    batch_size: int,
-    drop_last: bool = False,
-    unpack: bool = _C.unpack,
-    shuffle: bool = True,
-):
-    r"""Creates a new dataloader from packed spin configurations and corresponding
-    values.
-    """
-    if shuffle:
-        dataset = SpinDataset(spins, values, unpack)
-        sampler = BatchedRandomSampler(len(dataset), batch_size, drop_last)
-        # This is a bit of a hack. We want to use our custom batch sampler, but don't
-        # want PyTorch to use auto_collate. So we tell PyTorch that our sampler is
-        # a plain sampler (i.e. not batch_sampler), but set batch_size to 1 to
-        # disable automatic batching
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=False,
-            sampler=sampler,
-            collate_fn=lambda x: x[0],
-        )
-    else:
-        dataset = IterableSpinDataset(spins, values, batch_size, drop_last, unpack)
-        return torch.utils.data.DataLoader(
-            dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x[0]
-        )
+        for xs, ys in self.dataset:
+            for mini_batch in zip(
+                torch.split(xs, self.batch_size), torch.split(ys, self.batch_size)
+            ):
+                yield mini_batch
 
 
 def random_split(dataset, k, replacement=False, weights=None):

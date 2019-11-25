@@ -28,11 +28,340 @@
 
 #pragma once
 
-#include "monte_carlo.hpp"
+#include "errors.hpp"
+#include "spin_basis.hpp"
+#include "random.hpp"
+
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <vector>
 
 TCM_NAMESPACE_BEGIN
 
 // ------------------------------- [DataSet] ------------------------------- {{{
+class SpinDataset {
+    torch::Tensor _spins;
+    torch::Tensor _values;
+    size_t        _number_samples;
+    size_t        _number_spins;
+
+  public:
+    SpinDataset(torch::Tensor spins, torch::Tensor values,
+                size_t const number_spins)
+        : _spins{std::move(spins)}
+        , _values{std::move(values)}
+        , _number_samples{}
+        , _number_spins{number_spins}
+    {
+        TCM_ASSERT(_spins.defined(), "spins must be a valid tensor");
+        TCM_ASSERT(_values.defined(), "values must be a valid tensor");
+        TCM_CHECK(_spins.scalar_type() == torch::kInt64, std::invalid_argument,
+                  fmt::format("spins has wrong scalar type: {}; expected int64",
+                              _spins.scalar_type()));
+        TCM_CHECK(
+            _spins.dim() == 1, std::invalid_argument,
+            fmt::format("spins has wrong number of dimensions: {}; expected 1",
+                        _spins.dim()));
+        auto spins_shape  = _spins.sizes();
+        auto values_shape = _values.sizes();
+        TCM_CHECK(
+            spins_shape[0] == values_shape[0], std::invalid_argument,
+            fmt::format(
+                "spins and values have incompatible shapes: [{}] and [{}]; "
+                "sizes must match along the first dimensiton",
+                fmt::join(spins_shape.begin(), spins_shape.end(), ", "),
+                fmt::join(values_shape.begin(), values_shape.end(), ", ")));
+        _number_samples = static_cast<size_t>(spins_shape[0]);
+        TCM_CHECK(_spins.device().type() == torch::DeviceType::CPU,
+                  std::invalid_argument,
+                  fmt::format("spins tensor must reside on the CPU"));
+        TCM_CHECK(_values.device().type() == torch::DeviceType::CPU,
+                  std::invalid_argument,
+                  fmt::format("values tensor must reside on the CPU"));
+    }
+
+    SpinDataset(SpinDataset const&)     = default;
+    SpinDataset(SpinDataset&&) noexcept = default;
+    auto operator=(SpinDataset const&) -> SpinDataset& = default;
+    auto operator=(SpinDataset&&) noexcept -> SpinDataset& = default;
+
+    constexpr auto number_spins() const noexcept { return _number_spins; }
+    constexpr auto number_samples() const noexcept { return _number_samples; }
+
+    auto fetch(int64_t const first, int64_t const last,
+               torch::Device const device, bool const pin_memory) const
+        -> std::tuple<torch::Tensor, torch::Tensor>
+    {
+        TCM_CHECK(0 <= first && first <= last
+                      && last <= static_cast<int64_t>(number_samples()),
+                  std::invalid_argument,
+                  fmt::format("invalid range: [{}, {})", first, last));
+        if (first == last) { return {{}, {}}; };
+        auto ys = _values.slice(/*dim=*/0, /*start=*/first, /*end=*/last)
+                      .to(_values.options().device(device),
+                          /*non_blocking=*/true, /*copy=*/false);
+        auto xs = unpack(_spins.slice(/*dim=*/0, /*start=*/first, /*end=*/last),
+                         pin_memory);
+        xs      = xs.to(xs.options().device(device),
+                   /*non_blocking=*/true, /*copy=*/false);
+        return {std::move(xs), std::move(ys)};
+    }
+
+    auto fetch(gsl::span<int64_t const> indices, torch::Device const device,
+               bool const pin_memory) const
+        -> std::tuple<torch::Tensor, torch::Tensor>
+    {
+        if (indices.empty()) { return {{}, {}}; };
+        auto ys = _values.index({torch::from_blob(
+            const_cast<void*>(static_cast<void const*>(indices.data())),
+            {static_cast<int64_t>(indices.size())},
+            torch::TensorOptions{}.dtype(torch::kInt64))});
+        ys      = ys.to(ys.options().device(device),
+                   /*non_blocking=*/true, /*copy=*/false);
+        auto xs = unpack(_spins, indices, pin_memory);
+        xs      = xs.to(xs.options().device(device),
+                   /*non_blocking=*/true, /*copy=*/false);
+        return {std::move(xs), std::move(ys)};
+    }
+
+  private:
+    auto unpack(torch::Tensor const& spins, bool const pin_memory) const
+        -> torch::Tensor
+    {
+        TCM_ASSERT(spins.dim() == 1, "spins has wrong dimension");
+        return unpack(
+            gsl::span<SpinBasis::StateT const>{
+                static_cast<SpinBasis::StateT const*>(spins.data_ptr()),
+                static_cast<size_t>(spins.size(0))},
+            pin_memory);
+    }
+
+    auto unpack(gsl::span<SpinBasis::StateT const> spins,
+                bool const pin_memory) const -> torch::Tensor
+    {
+        using std::begin, std::end;
+        TCM_ASSERT(!spins.empty(), "spins must not be empty");
+        auto out = _allocate_spins_buffer(spins.size(), pin_memory);
+        v2::unpack(begin(spins), end(spins), number_spins(), out);
+        return out;
+    }
+
+    auto unpack(torch::Tensor const& spins, gsl::span<int64_t const> indices,
+                bool const pin_memory) const -> torch::Tensor
+    {
+        TCM_ASSERT(spins.dim() == 1, "spins has wrong dimension");
+        return unpack(
+            gsl::span<SpinBasis::StateT const>{
+                static_cast<SpinBasis::StateT const*>(spins.data_ptr()),
+                static_cast<size_t>(spins.size(0))},
+            indices, pin_memory);
+    }
+
+    auto unpack(gsl::span<SpinBasis::StateT const> spins,
+                gsl::span<int64_t const> indices, bool const pin_memory) const
+        -> torch::Tensor
+    {
+        using std::begin, std::end;
+        TCM_ASSERT(!indices.empty(), "spins must not be empty");
+        auto       out = _allocate_spins_buffer(indices.size(), pin_memory);
+        auto const projection = [p = spins.data(),
+                                 n = static_cast<int64_t>(spins.size())](
+                                    auto const index) {
+            TCM_CHECK(0 <= index && index <= n, std::out_of_range,
+                      fmt::format("indices contains an index which is out of "
+                                  "range: {}; expected an index in [{}, {})",
+                                  index, 0, n));
+            return p[index];
+        };
+        v2::unpack(begin(indices), end(indices), number_spins(), out,
+                   projection);
+        return out;
+    }
+
+    auto _allocate_spins_buffer(size_t const size, bool const pin_memory) const
+        -> torch::Tensor
+    {
+        return torch::empty(
+            {static_cast<int64_t>(size), static_cast<int64_t>(number_spins())},
+            torch::TensorOptions{}
+                .dtype(torch::kFloat32)
+                .pinned_memory(pin_memory));
+    }
+};
+
+namespace detail {
+// Copyright (c) 2012 Jakob Progsch, Václav Zeman
+//
+// This software is provided 'as-is', without any express or implied
+// warranty. In no event will the authors be held liable for any damages
+// arising from the use of this software.
+//
+// Permission is granted to anyone to use this software for any purpose,
+// including commercial applications, and to alter it and redistribute it
+// freely, subject to the following restrictions:
+//
+//    1. The origin of this software must not be misrepresented; you must not
+//    claim that you wrote the original software. If you use this software
+//    in a product, an acknowledgment in the product documentation would be
+//    appreciated but is not required.
+//
+//    2. Altered source versions must be plainly marked as such, and must not be
+//    misrepresented as being the original software.
+//
+//    3. This notice may not be removed or altered from any source
+//    distribution.
+//
+// The following is a small adaptation of https://github.com/progschj/ThreadPool
+// got a single worker thread.
+class ThreadPool {
+  public:
+    ThreadPool() : worker{}, tasks{}, queue_mutex{}, condition{}, stop{false}
+    {
+        worker = std::thread{[this] {
+            for (;;) {
+                std::function<void()> task;
+
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex);
+                    condition.wait(lock,
+                                   [this] { return stop || !tasks.empty(); });
+                    if (stop && tasks.empty()) return;
+                    task = std::move(tasks.front());
+                    tasks.pop();
+                }
+
+                task();
+            }
+        }};
+    }
+
+    template <class F, class... Args>
+    auto enqueue(F&& f, Args&&... args)
+        -> std::future<typename std::result_of<F(Args...)>::type>
+    {
+        using return_type = typename std::result_of<F(Args...)>::type;
+        auto task         = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            // don't allow enqueueing after stopping the pool
+            if (stop) throw std::runtime_error{"enqueue on stopped ThreadPool"};
+            tasks.emplace([p = std::move(task)]() { (*p)(); });
+        }
+        condition.notify_one();
+        return res;
+    }
+
+    ~ThreadPool()
+    {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
+        }
+        condition.notify_all();
+        worker.join();
+    }
+
+  private:
+    // need to keep track of threads so we can join them
+    std::thread worker;
+    // task queue
+    std::queue<std::function<void()>> tasks;
+    // synchronization
+    std::mutex              queue_mutex;
+    std::condition_variable condition;
+    bool                    stop;
+};
+} // namespace detail
+
+class ChunkLoader {
+    using BatchT = std::tuple<torch::Tensor, torch::Tensor>;
+
+    SpinDataset                         _dataset;
+    std::future<BatchT>                 _future;
+    size_t                              _offset;
+    size_t                              _chunk_size;
+    torch::Device                       _device;
+    bool                                _pin_memory;
+    std::optional<std::vector<int64_t>> _indices;
+    detail::ThreadPool                  _pool;
+
+  public:
+    ChunkLoader(SpinDataset&& dataset, size_t chunk_size, bool shuffle,
+                torch::Device device, bool pin_memory)
+        : _dataset{std::move(dataset)}
+        , _future{}
+        , _offset{0}
+        , _chunk_size{chunk_size}
+        , _device{device}
+        , _pin_memory{pin_memory}
+        , _indices{}
+        , _pool{}
+    {
+        if (shuffle) {
+            using std::begin, std::end;
+            _indices.emplace();
+            _indices->resize(dataset.number_samples());
+            std::iota(begin(*_indices), end(*_indices), int64_t{0});
+        }
+    }
+
+    auto reset() -> void
+    {
+        _offset = 0;
+        if (_indices.has_value()) {
+            using std::begin, std::end;
+            std::shuffle(begin(*_indices), end(*_indices),
+                         global_random_generator());
+        }
+        maybe_submit_task();
+    }
+
+    auto next() -> std::optional<BatchT>
+    {
+        TCM_ASSERT(_offset <= _dataset.number_samples(),
+                   "pre-condition violated");
+        if (!_future.valid()) { return std::nullopt; }
+        auto batch = _future.get();
+        maybe_submit_task();
+        TCM_ASSERT(_offset <= _dataset.number_samples(),
+                   "post-condition violated");
+        return batch;
+    }
+
+    auto maybe_submit_task() -> void
+    {
+        TCM_ASSERT(!_future.valid(), "pre-condition violated");
+        auto const size =
+            std::min(_chunk_size, _dataset.number_samples() - _offset);
+        if (size > 0) {
+            if (_indices.has_value()) {
+                _future = _pool.enqueue([this, offset = _offset, size]() {
+                    auto indices = gsl::span<int64_t const>{
+                        _indices->data() + static_cast<int64_t>(offset), size};
+                    return _dataset.fetch(indices, _device, _pin_memory);
+                });
+            }
+            else {
+                _future = _pool.enqueue([this, offset = _offset, size]() {
+                    return _dataset.fetch(static_cast<int64_t>(offset),
+                                          static_cast<int64_t>(offset + size),
+                                          _device, _pin_memory);
+                });
+            }
+            _offset += size;
+        }
+    }
+};
+
+#if 0
 /// \brief A poor man's alternative to `torch.ConcatDataset`.
 ///
 /// Multiple Markov chains are simply concatenated.
@@ -128,9 +457,11 @@ auto DataSet::at(size_t const i) const -> ChainState const&
               fmt::format("index out of range: {}; expected <{}", i, size()));
     return (*this)[i];
 }
+#endif
 // ------------------------------- [DataSet] ------------------------------- }}}
 
 // ---------------------------- [IndexSampler] ----------------------------- {{{
+#if 0
 /// Iterates over batches of indices.
 class IndexSampler {
   private:
@@ -192,9 +523,11 @@ auto IndexSampler::next() noexcept -> gsl::span<unsigned const>
         noexcept_format("{} > {}; size = ", _index, _indices.size(), size));
     return result;
 }
+#endif
 // ---------------------------- [IndexSampler] ----------------------------- }}}
 
 // ----------------------------- [DataLoader] ------------------------------ {{{
+#if 0
 class DataLoader {
   public:
     /// Types of transformations which can be applied to values.
@@ -494,12 +827,16 @@ constexpr auto DataLoader::Iterator::operator!=(Sentinel const& other) const
     return !(*this == other);
 }
 // ------------------------------ [Iterator] ------------------------------- }}}
+#endif
 // ----------------------------- [DataLoader] ------------------------------ }}}
 
+#if 0
 auto bind_dataloader(pybind11::module m) -> void;
+#endif
 
 TCM_NAMESPACE_END
 
+#if 0
 // We make Python think that our `tcm::DataLoader::Example`s are just tuples.
 // It's nice, because one can then write loops like
 // ```{.py}
@@ -534,3 +871,4 @@ namespace detail {
     };
 } // namespace detail
 } // namespace pybind11
+#endif
