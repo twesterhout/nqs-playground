@@ -29,20 +29,32 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import concurrent.futures
 import os
 import sys
 import tempfile
+import pathlib
 from typing import Optional, Tuple
 
 import numpy as np
 import torch
 
-# NOTE(twesterhout): Yes, it's not nice to depend on internal functions, but
-# it's so tiring to reimplement _with_file_like every time...
-from torch.serialization import _with_file_like as with_file_like
-
 from . import _C_nqs as _C
+
+
+# Taken from torch; all credit goes to PyTorch developers.
+def with_file_like(f, mode, body):
+    r"""Executes a 'body' function with a file object for 'f', opening
+    it in 'mode' if it is a string filename.
+    """
+    new_fd = False
+    if isinstance(f, str) or isinstance(f, pathlib.Path):
+        new_fd = True
+        f = open(f, mode)
+    try:
+        return body(f)
+    finally:
+        if new_fd:
+            f.close()
 
 
 class SetToTrain(object):
