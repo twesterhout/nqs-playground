@@ -37,6 +37,7 @@ import math
 import os
 import pickle
 from psutil import cpu_count
+import time
 from typing import Dict, List, Tuple, Optional, Union
 
 import numpy as np
@@ -102,6 +103,7 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
         torch.set_num_threads(old)
 
     parameters = list(module.parameters())
+    n = sum(map(torch.numel, parameters))
     forward = module._c._get_method("forward")
 
     # This if statement if ugly and stupid, but in torch 1.3.1 the argument is
@@ -110,8 +112,8 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
     if tuple(map(int, torch.__version__.split("."))) <= (1, 3, 1):
 
         @torch.jit.script
-        def task(xs: torch.Tensor, parameters: List[torch.Tensor]):
-            out = []
+        def task(xs: torch.Tensor, n: int, parameters: List[torch.Tensor]):
+            out = torch.empty([xs.size(0), n], dtype=torch.float32, device=xs.device)
             for i in range(xs.size(0)):
                 dws = torch.autograd.grad(
                     [forward(xs[i])],
@@ -120,8 +122,8 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
                     create_graph=False,
                     allow_unused=True,
                 )
-                out.append(torch.cat([dw.view([-1]) for dw in dws]).view([1, -1]))
-            return torch.cat(out, dim=0)
+                torch.cat([dw.view([-1]) for dw in dws], out=out[i])
+            return out
 
     else:
 
@@ -140,21 +142,24 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
             return torch.cat(out, dim=0)
 
     @torch.jit.script
-    def go(inputs: torch.Tensor, parameters: List[torch.Tensor]):
+    def go(inputs: torch.Tensor, n: int, parameters: List[torch.Tensor]):
         futures = [
-            torch.jit._fork(task, xs, parameters) for xs in torch.split(inputs, 256)
+            torch.jit._fork(task, xs, n, parameters) for xs in torch.split(inputs, 2048)
         ]
         return torch.cat([torch.jit._wait(f) for f in futures], dim=0)
 
-    with num_threads(cpu_count() // torch.get_num_interop_threads()):
-        return go(inputs, parameters)
+    with torch.jit.optimized_execution(True), num_threads(cpu_count() // torch.get_num_interop_threads()):
+        return go(inputs, n, parameters)
 
 
 class LogarithmicDerivatives:
     def __init__(self, modules, inputs):
         amplitude, phase = modules
-        self.real = jacobian(amplitude, inputs).detach()
-        self.imag = jacobian(phase, inputs).detach()
+        device = next(amplitude.parameters()).device
+        self.real = jacobian(amplitude.cpu(), inputs).to(device)
+        amplitude.to(device)
+        self.imag = jacobian(phase.cpu(), inputs).to(device)
+        phase.to(device)
 
     def center_(self, weights=None):
         if weights is not None:
@@ -196,7 +201,7 @@ class LogarithmicDerivatives:
             scale = 1.0 / self.real.size(0)
             matrix *= scale
             matrix.diagonal()[:] += 1e-2
-            x, _ = torch.solve(vector.view([-1, 1]), matrix)
+            x, _ = torch.lstsq(vector.view([-1, 1]), matrix)
             return x.squeeze()
 
         with torch.no_grad():
@@ -406,6 +411,7 @@ class Runner:
             core.combine_amplitude_and_phase(self.amplitude, self.phase),
             self.hamiltonian,
             spins,
+            batch_size=8192
         )
         if weights is not None:
             energy = np.dot(weights, local_energies)
@@ -423,7 +429,7 @@ class Runner:
         # TODO: Fix this! Unpacking all the Monte Carlo data might not be a
         # good idea...
         logarithmic_derivatives = LogarithmicDerivatives(
-            (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins)
+            (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins) # .to(self.device)
         )
         # logarithmic_derivatives = logarithmic_derivative(
         #     (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins)
@@ -467,6 +473,7 @@ class Runner:
             _ = run(self.phase, i)
 
     def step(self):
+        tick = time.time()
         force, delta = self.monte_carlo()
         # delta = self.solve(S, force)
         self.tb_writer.add_scalar("SR/delta", torch.norm(delta), self._iteration)
@@ -480,6 +487,7 @@ class Runner:
             self.amplitude.state_dict(),
             os.path.join(self.config.output, "sign_weights.pt"),
         )
+        print("{}: Done in {} seconds...".format(self._iteration, time.time() - tick))
         self._iteration += 1
 
 
