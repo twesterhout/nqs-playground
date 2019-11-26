@@ -499,10 +499,13 @@ def local_energy(
     if len(spins) == 0:
         return numpy.array([], dtype=np.complex64)
     with torch.no_grad(), torch.jit.optimized_execution(True):
+        device = next(state.parameters()).device
         if log_values is None:
             number_spins = hamiltonian.basis.number_spins
             log_values = forward_with_batches(
-                lambda x: state(_C.v2.unpack(x, number_spins)), spins, batch_size
+                lambda x: state(_C.v2.unpack(x, number_spins).to(device)).cpu(),
+                spins,
+                batch_size,
             )
             if log_values.dim() != 2:
                 raise ValueError(
@@ -518,6 +521,7 @@ def local_energy(
                     _C.v2.Polynomial(hamiltonian, [0.0]),
                     state._c._get_method("forward"),
                     batch_size,
+                    device,
                 ),
                 spins,
                 batch_size=batch_size // 4,

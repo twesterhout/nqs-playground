@@ -160,6 +160,64 @@ auto vector_to_numpy(std::vector<T, Allocator>&& xs) -> py::array
     return py::array_t<T>{size, data, std::move(base)};
 }
 
+auto invoke_jit_function(torch::jit::script::Method& method,
+                         std::vector<torch::IValue>  stack)
+{
+    return method(std::move(stack));
+}
+
+auto invoke_jit_function(torch::jit::StrongFunctionPtr const& ptr,
+                         std::vector<torch::IValue>           stack)
+{
+    return (*ptr.function_)(std::move(stack));
+}
+
+template <class Function>
+auto from_jit_function(Function                          function,
+                       ::TCM_NAMESPACE::SpinBasis const& basis,
+                       torch::Device                     device)
+    -> ::TCM_NAMESPACE::v2::ForwardT<::TCM_NAMESPACE::SpinBasis::StateT>
+{
+    using namespace TCM_NAMESPACE;
+    struct _Forward {
+        using StateT = v2::PolynomialState::StateT;
+        Function               _method;
+        SpinBasis const* const _basis;
+        torch::Device const    _device;
+
+        auto operator()(gsl::span<StateT const> spins) -> torch::Tensor
+        {
+            TCM_CHECK(!spins.empty(), std::invalid_argument,
+                      "empty batches are not supported");
+            auto const batch_size = static_cast<int64_t>(spins.size());
+            auto const system_size =
+                static_cast<int64_t>(_basis->number_spins());
+            auto input = torch::empty(
+                {batch_size, system_size},
+                torch::TensorOptions{}
+                    .dtype(torch::kFloat32)
+                    .pinned_memory(_device.type() == torch::DeviceType::CUDA));
+            v2::unpack(spins.begin(), spins.end(), _basis->number_spins(),
+                       input);
+            input = input.to(input.options().device(_device),
+                             /*non_blocking=*/true, /*copy=*/false);
+
+            auto output = invoke_jit_function(_method, {input}).toTensor();
+            output = output.to(output.options().device(torch::DeviceType::CPU),
+                               /*non_blocking=*/true, /*copy=*/false);
+            auto const shape = output.sizes();
+            TCM_CHECK(
+                (shape.size() == 2 && shape[0] == batch_size && shape[1] == 2),
+                std::runtime_error,
+                fmt::format("output tensor has invalid "
+                            "shape: [{}]; expected [{}, 2]",
+                            fmt::join(shape, ", "), batch_size));
+            return output;
+        }
+    };
+    return _Forward{std::move(function), std::addressof(basis), device};
+}
+
 auto bind_spin_basis(py::module m) -> void
 {
     using namespace tcm;
@@ -563,46 +621,22 @@ auto bind_spin_basis(py::module m) -> void
             py::arg{"state"}, py::return_value_policy::reference_internal);
 
     py::class_<v2::PolynomialState>(m, "PolynomialState")
-        .def(py::init([](std::shared_ptr<v2::Polynomial> polynomial,
-                         torch::jit::script::Method      forward,
-                         unsigned const                  internal_batch_size) {
-            struct Function {
-                using StateT = v2::PolynomialState::StateT;
-                torch::jit::script::Method _method;
-                torch::Tensor              _buffer;
-                SpinBasis const*           _basis;
-
-                auto operator()(gsl::span<StateT const> spins) -> torch::Tensor
-                {
-                    TCM_CHECK(!spins.empty(), std::invalid_argument,
-                              "empty batches are not supported");
-                    auto const batch_size = static_cast<int64_t>(spins.size());
-                    auto const system_size =
-                        static_cast<int64_t>(_basis->number_spins());
-                    if (!_buffer.defined()) {
-                        _buffer = ::TCM_NAMESPACE::detail::make_tensor<float>(
-                            batch_size, system_size);
-                    }
-                    _buffer.resize_({batch_size, system_size});
-                    v2::unpack(spins.begin(), spins.end(),
-                               _basis->number_spins(), _buffer);
-                    auto       output = _method({_buffer}).toTensor();
-                    auto const shape  = output.sizes();
-                    TCM_CHECK((shape.size() == 2 && shape[0] == batch_size
-                               && shape[1] == 2),
-                              std::runtime_error,
-                              fmt::format("output tensor has invalid "
-                                          "shape: [{}]; expected [{}, 2]",
-                                          fmt::join(shape, ", "), batch_size));
-                    return output;
-                }
-            };
-
-            auto* basis = polynomial->hamiltonian()->basis().get();
-            return std::make_unique<v2::PolynomialState>(
-                std::move(polynomial), Function{std::move(forward), {}, basis},
-                internal_batch_size);
-        }))
+        .def(
+            py::init([](std::shared_ptr<v2::Polynomial> polynomial,
+                        torch::jit::script::Method      forward,
+                        unsigned const internal_batch_size, py::object device) {
+                auto d =
+                    device.is_none()
+                        ? torch::Device{torch::kCPU}
+                        : torch::python::detail::py_object_to_device(device);
+                auto* basis = polynomial->hamiltonian()->basis().get();
+                return std::make_unique<v2::PolynomialState>(
+                    std::move(polynomial),
+                    from_jit_function(std::move(forward), *basis, d),
+                    internal_batch_size);
+            }),
+            py::arg{"polynomial"}, py::arg{"forward"}, py::arg{"batch_size"},
+            py::arg{"device"} = py::none())
         .def(py::init(
             [](std::shared_ptr<v2::Polynomial> polynomial,
                std::function<torch::Tensor(std::vector<SpinBasis::StateT>)>

@@ -104,24 +104,45 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
     parameters = list(module.parameters())
     forward = module._c._get_method("forward")
 
-    @torch.jit.script
-    def task(xs: torch.Tensor, parameters: List[torch.Tensor]):
-        out = []
-        for i in range(xs.size(0)):
-            dws = torch.autograd.grad(
-                [forward(xs[i])],
-                parameters,
-                keep_graph=True,
-                create_graph=False,
-                allow_unused=True,
-            )
-            out.append(torch.cat([dw.reshape([-1]) for dw in dws]).view([1, -1]))
-        return torch.cat(out, dim=0)
+    # This if statement if ugly and stupid, but in torch 1.3.1 the argument is
+    # called keep_graph, but in later versions it's retain_graph. And we don't
+    # want to interfere with JIT.
+    if tuple(map(int, torch.__version__.split("."))) <= (1, 3, 1):
+
+        @torch.jit.script
+        def task(xs: torch.Tensor, parameters: List[torch.Tensor]):
+            out = []
+            for i in range(xs.size(0)):
+                dws = torch.autograd.grad(
+                    [forward(xs[i])],
+                    parameters,
+                    keep_graph=True,
+                    create_graph=False,
+                    allow_unused=True,
+                )
+                out.append(torch.cat([dw.view([-1]) for dw in dws]).view([1, -1]))
+            return torch.cat(out, dim=0)
+
+    else:
+
+        @torch.jit.script
+        def task(xs: torch.Tensor, parameters: List[torch.Tensor]):
+            out = []
+            for i in range(xs.size(0)):
+                dws = torch.autograd.grad(
+                    [forward(xs[i])],
+                    parameters,
+                    retain_graph=True,
+                    create_graph=False,
+                    allow_unused=True,
+                )
+                out.append(torch.cat([dw.view([-1]) for dw in dws]).view([1, -1]))
+            return torch.cat(out, dim=0)
 
     @torch.jit.script
     def go(inputs: torch.Tensor, parameters: List[torch.Tensor]):
         futures = [
-            torch.jit._fork(task, xs, parameters) for xs in torch.split(inputs, 64)
+            torch.jit._fork(task, xs, parameters) for xs in torch.split(inputs, 256)
         ]
         return torch.cat([torch.jit._wait(f) for f in futures], dim=0)
 
@@ -129,97 +150,159 @@ def jacobian(module: torch.jit.ScriptModule, inputs: torch.Tensor) -> torch.Tens
         return go(inputs, parameters)
 
 
-def logarithmic_derivative(
-    modules: Tuple[torch.nn.Module, torch.nn.Module], inputs: torch.Tensor
-) -> np.ndarray:
-    r"""Computes ``∂log(ψ(inputs))/∂W``.
+class LogarithmicDerivatives:
+    def __init__(self, modules, inputs):
+        amplitude, phase = modules
+        self.real = jacobian(amplitude, inputs).detach()
+        self.imag = jacobian(phase, inputs).detach()
 
-    Wavefunction ψ is represented by two ``torch.nn.Module``s: amplitude and
-    phase. Both modules, given a tensor of shape ``(batch_size, in_features)``
-    shoule return a tensor of shape ``(batch_size, 1)``. Output of the
-    amplitude module is interpreted as ``Re[log(ψ(inputs))]`` (i.e. logarithm
-    of the amplitudes of the wavefunction) and output of the phase module is
-    interpreted as ``Im[log(ψ(inputs))]`` (i.e. phases of the coefficients of
-    the wavefunction).
+    def center_(self, weights=None):
+        if weights is not None:
+            raise NotImplementedError()
 
-    :return: a complex tensor of shape ``(#inputs, #parameters)``.
-    """
-    amplitude, phase = modules
-    middle = num_parameters(amplitude)
-    n = middle + num_parameters(phase)
-    out = torch.zeros([inputs.size(0), n, 2], dtype=torch.float32)
-    out[:, :middle, 0] = jacobian(amplitude, inputs)
-    out[:, middle:, 1] = jacobian(phase, inputs)
-    return out.detach().numpy().view(np.complex64).squeeze(axis=2)
+        self.real -= self.real.mean(dim=0)
+        self.imag -= self.imag.mean(dim=0)
 
+    def gradient(self, local_energies, weights=None):
+        if weights is not None:
+            raise NotImplementedError()
 
-def energy_gradient(
-    local_energies: np.ndarray,
-    logarithmic_derivatives: np.ndarray,
-    weights: np.ndarray = None,
-) -> np.ndarray:
-    r"""Calculates the gradient of energy with respect to variational
-    parameters: ``∂⟨ψ|H|ψ⟩/∂W``.
+        device = self.real.device
+        if isinstance(local_energies, np.ndarray):
+            local_energies = torch.from_numpy(
+                local_energies.reshape([-1, 1]).view(np.float32)
+            )
+            local_energies = local_energies.to(device, copy=False)
 
-    :param local_energies: local energy estimators ``⟨σ|H|ψ⟩/⟨σ|ψ⟩``.
-    :param logarithmic_derivatives: **centered** logarithmic derivatives of the
-        wavefunction with respect to variational parameters.
-    :param weights: if specified, it is assumed that {σ} span the whole
-        Hilbert space basis. Then ``weights`` are **normalized** probabilities
-        ``|⟨σ|ψ⟩|²/‖ψ‖₂``. If ``weights`` is ``None``, then it is assumed that
-        {σ} come from Monte Carlo sampling and are distributed according to
-        ``|⟨σ|ψ⟩|²/‖ψ‖₂``.
-    """
-    if weights is not None:
-        assert np.isclose(np.sum(weights), 1.0)
-        local_energies = weights * local_energies
-        np.conj(local_energies, out=local_energies)
-        local_energies = local_energies.reshape(1, -1)
-        gradient = local_energies @ logarithmic_derivatives
-    else:
-        local_energies = local_energies.conj()
-        local_energies = local_energies.reshape(1, -1)
-        gradient = local_energies @ logarithmic_derivatives
-        assert gradient.real.dtype == np.float32
-    return torch.from_numpy(
-        (2.0 / logarithmic_derivatives.shape[0]) * gradient.real.squeeze()
-    ).contiguous()
-
-
-def covariance_matrix(
-    logarithmic_derivatives: np.ndarray, weights: np.ndarray = None
-) -> np.ndarray:
-    r"""Calculates the covariance matrix S.
-
-    :param logarithmic_derivatives: **centered** logarithmic derivatives of the
-        wavefunction with respect to variational parameters.
-    :param weights: if specified, it is assumed that {σ} span the whole
-        Hilbert space basis. Then ``weights`` are **normalized** probabilities
-        ``|⟨σ|ψ⟩|²/‖ψ‖₂``. If ``weights`` is ``None``, then it is assumed that
-        {σ} come from Monte Carlo sampling and are distributed according to
-        ``|⟨σ|ψ⟩|²/‖ψ‖₂``.
-    """
-    assert weights is None
-    if weights is not None:
-        assert np.isclose(np.sum(weights), 1.0)
-        matrix = (
-            weights.reshape(-1, 1) * logarithmic_derivatives
-        ).T.conj() @ logarithmic_derivatives
-    else:
         with torch.no_grad():
-            real = torch.from_numpy(logarithmic_derivatives.real).contiguous()
-            imag = torch.from_numpy(logarithmic_derivatives.imag).contiguous()
-            matrix = torch.mm(real.t(), real)
-            scale = 1.0 / logarithmic_derivatives.shape[0]
-            torch.addmm(scale, matrix, scale, imag.t(), imag, out=matrix)
-            # matrix = logarithmic_derivatives.T.conj() @ logarithmic_derivatives
-            # matrix /= logarithmic_derivatives.shape[0]
-    return matrix  # np.ascontiguousarray(matrix.real)
+            real_energies = local_energies[:, 0].view([1, -1])
+            imag_energies = local_energies[:, 1].view([1, -1])
+            scale = 2.0 / self.real.size(0)
+            gradient = torch.cat(
+                [
+                    torch.mm(real_energies, self.real),
+                    torch.mm(imag_energies, self.imag),
+                ],
+                dim=1,
+            )
+            gradient *= scale
+            return gradient.squeeze()
+
+    def solve(self, gradient, weights=None):
+        if weights is not None:
+            raise NotImplementedError()
+
+        def solve_part(matrix, vector):
+            scale = 1.0 / self.real.size(0)
+            matrix *= scale
+            matrix.diagonal()[:] += 1e-2
+            x, _ = torch.solve(vector.view([-1, 1]), matrix)
+            return x.squeeze()
+
+        with torch.no_grad():
+            middle = self.real.size(1)
+            return torch.cat(
+                [
+                    solve_part(torch.mm(self.real.t(), self.real), gradient[:middle]),
+                    solve_part(torch.mm(self.imag.t(), self.imag), gradient[middle:]),
+                ]
+            )
+
+
+# def logarithmic_derivative(
+#     modules: Tuple[torch.nn.Module, torch.nn.Module], inputs: torch.Tensor
+# ) -> np.ndarray:
+#     r"""Computes ``∂log(ψ(inputs))/∂W``.
+#
+#     Wavefunction ψ is represented by two ``torch.nn.Module``s: amplitude and
+#     phase. Both modules, given a tensor of shape ``(batch_size, in_features)``
+#     shoule return a tensor of shape ``(batch_size, 1)``. Output of the
+#     amplitude module is interpreted as ``Re[log(ψ(inputs))]`` (i.e. logarithm
+#     of the amplitudes of the wavefunction) and output of the phase module is
+#     interpreted as ``Im[log(ψ(inputs))]`` (i.e. phases of the coefficients of
+#     the wavefunction).
+#
+#     :return: a complex tensor of shape ``(#inputs, #parameters)``.
+#     """
+#     amplitude, phase = modules
+#     middle = num_parameters(amplitude)
+#     n = middle + num_parameters(phase)
+#     out = torch.zeros([inputs.size(0), n, 2], dtype=torch.float32)
+#     out[:, :middle, 0] = jacobian(amplitude, inputs)
+#     out[:, middle:, 1] = jacobian(phase, inputs)
+#     return out.detach().numpy().view(np.complex64).squeeze(axis=2)
+
+
+# def energy_gradient(
+#     local_energies: np.ndarray,
+#     logarithmic_derivatives: np.ndarray,
+#     weights: np.ndarray = None,
+# ) -> np.ndarray:
+#     r"""Calculates the gradient of energy with respect to variational
+#     parameters: ``∂⟨ψ|H|ψ⟩/∂W``.
+#
+#     :param local_energies: local energy estimators ``⟨σ|H|ψ⟩/⟨σ|ψ⟩``.
+#     :param logarithmic_derivatives: **centered** logarithmic derivatives of the
+#         wavefunction with respect to variational parameters.
+#     :param weights: if specified, it is assumed that {σ} span the whole
+#         Hilbert space basis. Then ``weights`` are **normalized** probabilities
+#         ``|⟨σ|ψ⟩|²/‖ψ‖₂``. If ``weights`` is ``None``, then it is assumed that
+#         {σ} come from Monte Carlo sampling and are distributed according to
+#         ``|⟨σ|ψ⟩|²/‖ψ‖₂``.
+#     """
+#     if weights is not None:
+#         assert np.isclose(np.sum(weights), 1.0)
+#         local_energies = weights * local_energies
+#         np.conj(local_energies, out=local_energies)
+#         local_energies = local_energies.reshape(1, -1)
+#         gradient = local_energies @ logarithmic_derivatives
+#     else:
+#         local_energies = local_energies.conj()
+#         local_energies = local_energies.reshape(1, -1)
+#         gradient = local_energies @ logarithmic_derivatives
+#         assert gradient.real.dtype == np.float32
+#     return torch.from_numpy(
+#         (2.0 / logarithmic_derivatives.shape[0]) * gradient.real.squeeze()
+#     ).contiguous()
+
+
+# def covariance_matrix(
+#     logarithmic_derivatives: np.ndarray, weights: np.ndarray = None
+# ) -> np.ndarray:
+#     r"""Calculates the covariance matrix S.
+#
+#     :param logarithmic_derivatives: **centered** logarithmic derivatives of the
+#         wavefunction with respect to variational parameters.
+#     :param weights: if specified, it is assumed that {σ} span the whole
+#         Hilbert space basis. Then ``weights`` are **normalized** probabilities
+#         ``|⟨σ|ψ⟩|²/‖ψ‖₂``. If ``weights`` is ``None``, then it is assumed that
+#         {σ} come from Monte Carlo sampling and are distributed according to
+#         ``|⟨σ|ψ⟩|²/‖ψ‖₂``.
+#     """
+#     assert weights is None
+#     if weights is not None:
+#         assert np.isclose(np.sum(weights), 1.0)
+#         matrix = (
+#             weights.reshape(-1, 1) * logarithmic_derivatives
+#         ).T.conj() @ logarithmic_derivatives
+#     else:
+#         with torch.no_grad():
+#             real = torch.from_numpy(logarithmic_derivatives.real).contiguous()
+#             imag = torch.from_numpy(logarithmic_derivatives.imag).contiguous()
+#             matrix = torch.mm(real.t(), real)
+#             scale = 1.0 / logarithmic_derivatives.shape[0]
+#             torch.addmm(scale, matrix, scale, imag.t(), imag, out=matrix)
+#             # matrix = logarithmic_derivatives.T.conj() @ logarithmic_derivatives
+#             # matrix /= logarithmic_derivatives.shape[0]
+#     return matrix  # np.ascontiguousarray(matrix.real)
 
 
 class Runner:
     def __init__(self, config):
         self.config = config
+        self.device = self.config.device
+        if isinstance(self.device, str):
+            self.device = torch.device(self.device)
         self.__load_hamiltonian()
         self.__load_model()
         self.__load_optimiser()
@@ -248,8 +331,8 @@ class Runner:
             return torch.jit.script(core.import_network(name)(self.basis.number_spins))
 
         amplitude_file, phase_file = self.config.model
-        self.amplitude = load(amplitude_file)
-        self.phase = load(phase_file)
+        self.amplitude = load(amplitude_file).to(self.device)
+        self.phase = load(phase_file).to(self.device)
 
     def __load_optimiser(self):
         self.optimiser = eval(self.config.optimiser)(
@@ -275,26 +358,23 @@ class Runner:
             if isinstance(r, torch.Tensor):
                 self.ground_state = r
             elif isinstance(r, np.ndarray):
-                self.ground_state = eliminate_phase(r)
+                self.ground_state = eliminate_phase(r.squeeze())
             else:
                 _, self.ground_state = r
-                self.ground_state = eliminate_phase(self.ground_state)
-        self.ground_state = self.ground_state.squeeze()
+                self.ground_state = eliminate_phase(self.ground_state.squeeze())
+        self.ground_state = self.ground_state.to(self.device)
         self.ground_state /= torch.norm(self.ground_state)
 
         def compute(A=None, φ=None):
             with torch.no_grad(), torch.jit.optimized_execution(True):
+                unpack = lambda x: _C.unpack(x, self.basis.number_spins).to(self.device)
                 if A is None:
                     A = forward_with_batches(
-                        lambda x: self.amplitude(_C.unpack(x, self.basis.number_spins)),
-                        self.basis.states,
-                        8192,
+                        lambda x: self.amplitude(unpack(x)), self.basis.states, 8192
                     ).squeeze()
                 if φ is None:
                     φ = forward_with_batches(
-                        lambda x: self.phase(_C.unpack(x, self.basis.number_spins)),
-                        self.basis.states,
-                        8192,
+                        lambda x: self.phase(unpack(x)), self.basis.states, 8192
                     ).squeeze()
                 A -= torch.max(A) - 1.0
                 torch.exp_(A)
@@ -342,20 +422,28 @@ class Runner:
 
         # TODO: Fix this! Unpacking all the Monte Carlo data might not be a
         # good idea...
-        logarithmic_derivatives = logarithmic_derivative(
+        logarithmic_derivatives = LogarithmicDerivatives(
             (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins)
         )
+        # logarithmic_derivatives = logarithmic_derivative(
+        #     (self.amplitude, self.phase), _C.unpack(spins, self.basis.number_spins)
+        # )
         # Centering
-        if weights is not None:
-            mean_derivative = (weights @ logarithmic_derivatives).reshape(1, -1)
-        else:
-            mean_derivative = np.mean(logarithmic_derivatives, axis=0).reshape(1, -1)
-        logarithmic_derivatives -= mean_derivative
+        logarithmic_derivatives.center_(weights)
+        # if weights is not None:
+        #     mean_derivative = (weights @ logarithmic_derivatives).reshape(1, -1)
+        # else:
+        #     mean_derivative = np.mean(logarithmic_derivatives, axis=0).reshape(1, -1)
+        # logarithmic_derivatives -= mean_derivative
 
-        force = energy_gradient(local_energies, logarithmic_derivatives, weights)
-        self.tb_writer.add_scalar("SR/grad", np.linalg.norm(force), self._iteration)
-        S = covariance_matrix(logarithmic_derivatives, weights)
-        return force, S
+        force = logarithmic_derivatives.gradient(local_energies, weights)
+        self.tb_writer.add_scalar("SR/grad", torch.norm(force), self._iteration)
+        delta = logarithmic_derivatives.solve(force, weights)
+        # force = energy_gradient(local_energies, logarithmic_derivatives, weights)
+        # self.tb_writer.add_scalar("SR/grad", np.linalg.norm(force), self._iteration)
+        # S = covariance_matrix(logarithmic_derivatives, weights)
+        # delta = self.solve(S, force)
+        return force, delta
 
     def solve(self, matrix, vector):
         diag = matrix.diagonal()
@@ -379,8 +467,8 @@ class Runner:
             _ = run(self.phase, i)
 
     def step(self):
-        force, S = self.monte_carlo()
-        delta = self.solve(S, force)
+        force, delta = self.monte_carlo()
+        # delta = self.solve(S, force)
         self.tb_writer.add_scalar("SR/delta", torch.norm(delta), self._iteration)
         self.set_gradient(delta)
         self.optimiser.step()
@@ -406,12 +494,13 @@ Config = namedtuple(
         "number_chains",
         "optimiser",
         ## OPTIONAL
+        "device",
         "exact",
         "magnetisation",
         "sweep_size",
         "number_discarded",
     ],
-    defaults=[None, None, None, None],
+    defaults=["cpu", None, None, None, None],
 )
 
 

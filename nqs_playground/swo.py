@@ -131,6 +131,7 @@ def sample_some(
        **Not yet implemented**
     
     """
+    device = next(log_ψ.parameters()).device
 
     def make_xs_and_ys():
         assert mode in {"exact", "full"}
@@ -139,7 +140,9 @@ def sample_some(
         xs = basis.states
         # ys are log amplitudes on all states xs
         ys = forward_with_batches(
-            lambda xs: log_ψ(_C.unpack(xs, basis.number_spins)), xs, batch_size=8192
+            lambda xs: log_ψ(_C.unpack(xs, basis.number_spins).to(device)),
+            xs,
+            batch_size=8192,
         ).squeeze()
         if ys.dim() != 1:
             raise ValueError(
@@ -164,21 +167,23 @@ def sample_some(
                     # emulates the actual Monte Carlo behaviour
                     replacement=True,
                 )
+                cpu_indices = indices.to(device="cpu")
             else:
                 # If we have more than 2²⁴ different probabilities chances are,
                 # NumPy will complain about probabilities not being normalised
                 # since float32 precision is not enough. The simplest
                 # workaround is to convert the probabilities to float64 and
                 # then renormalise then which is what we do.
-                probabilities = probabilities.to(torch.float64)
+                probabilities = probabilities.to(device="cpu", dtype=torch.float64)
                 probabilities /= torch.sum(probabilities)
-                indices = np.random.choice(
+                cpu_indices = np.random.choice(
                     len(probabilities),
                     size=options.number_chains * options.number_samples,
                     replace=True,
                     p=probabilities,
                 )
-            return xs[indices], ys[indices], {"xs": xs, "ys": ys}
+                indices = torch.from_numpy(indices).to(device)
+            return xs[cpu_indices], ys[indices], {"xs": xs, "ys": ys}
     elif mode == "full":
         with torch.no_grad(), torch.jit.optimized_execution(True):
             xs, ys = make_xs_and_ys()
