@@ -29,7 +29,6 @@
 #pragma once
 
 #include "config.hpp"
-
 #include <boost/pool/pool.hpp>
 #include <boost/smart_ptr/detail/spinlock.hpp>
 
@@ -40,6 +39,7 @@ class Pool {
     boost::detail::spinlock _lock;
 
     using GuardT = boost::detail::spinlock::scoped_lock;
+
   public:
     explicit Pool(size_t chunk_size, size_t number_chunks);
 
@@ -53,4 +53,3 @@ class Pool {
 };
 
 TCM_NAMESPACE_END
-
