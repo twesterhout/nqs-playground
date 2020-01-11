@@ -31,10 +31,10 @@
 
 r"""This module defines routines for constructing symmetry operators and
 building symmetry groups. It will work properly only if the group
-representation is one-dimensional representation.
+representation is one-dimensional.
 """
 
-__all__ = ["Symmetry", "make_group", "diagonalise"]
+__all__ = ["Symmetry", "make_group"]
 
 from cmath import exp
 from cmath import pi as π
@@ -44,7 +44,7 @@ from typing import List
 import numpy as np
 
 from ._benes import make_perm_fn
-from .core import _C
+from ._C import Symmetry as _Symmetry
 
 
 class Symmetry:
@@ -122,8 +122,8 @@ class Symmetry:
         r"""Returns the C++ equivalent of this symmetry operator."""
         if self._network is None:
             self._network = make_perm_fn(self._map)
-        return _C.v2.Symmetry(
-            [self._network.left, self._network.right], self.sector, self.periodicity
+        return _Symmetry(
+            (self._network.left, self._network.right), self.sector, self.periodicity
         )
 
     def __mul__(self, other):
@@ -167,7 +167,7 @@ class Symmetry:
         )
 
 
-def _make_cyclic_group(symmetry):
+def _make_cyclic_group(symmetry: Symmetry) -> List[Symmetry]:
     group = []
     g = Symmetry(np.arange(len(symmetry.permutation)), sector=0)
     for i in range(symmetry.periodicity):
@@ -176,7 +176,7 @@ def _make_cyclic_group(symmetry):
     return group
 
 
-def make_group(symmetries: List[Symmetry]):
+def make_group(symmetries: List[Symmetry]) -> List[_Symmetry]:
     r"""Given a list of symmetries, extends this list into a group."""
     group = set(sum((_make_cyclic_group(t) for t in symmetries), []))
     while True:
@@ -191,19 +191,3 @@ def make_group(symmetries: List[Symmetry]):
         for g in extra:
             group.add(g)
     return [g.to_cxx() for g in group]
-
-
-def diagonalise(hamiltonian, k=2):
-    import scipy.sparse.linalg
-
-    hamiltonian.basis.build()
-    n = hamiltonian.basis.number_states
-    dtype = np.float64 if hamiltonian.is_real else np.complex128
-
-    def matvec(x):
-        y = np.empty(n, dtype=dtype)
-        hamiltonian(x, y)
-        return y
-
-    op = scipy.sparse.linalg.LinearOperator(shape=(n, n), matvec=matvec, dtype=dtype)
-    return scipy.sparse.linalg.eigsh(op, k=k, which="SA")

@@ -31,66 +31,127 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import cmath
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+import pathlib
 import numpy as np
+import torch
+from torch import Tensor
 
-from .core import _C, with_file_like
+from ._C import Heisenberg as _Heisenberg
+from .core import forward_with_batches
 
-__all__ = ["Heisenberg", "read_hamiltonian"]
-
-
-class Heisenberg(object):
-    """
-    Isotropic Heisenberg Hamiltonian on a lattice.
-    """
-
-    def __init__(self, specs: List[Tuple[float, int, int]]):
-        """
-        Initialises the Hamiltonian given a list of edges.
-        """
-        self._specs = specs
-        smallest = min(map(lambda t: min(t[1:]), specs))
-        largest = max(map(lambda t: max(t[1:]), specs))
-        if smallest != 0:
-            ValueError(
-                "Invalid graph: Counting from 0, but the minimal index "
-                "present is {}.".format(smallest)
-            )
-        self._number_spins = largest + 1
-
-    def to_cxx(self) -> _C.Heisenberg:
-        return _C.Heisenberg(self._specs)
-
-    @property
-    def number_spins(self) -> int:
-        """
-        :return: number of spins in the system.
-        """
-        return self._number_spins
-
-    @property
-    def edges(self) -> List[Tuple[int, int]]:
-        return [(i, j) for _, i, j in self._specs]
+__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise"]
 
 
-def _read_hamiltonian(stream):
-    specs = []
-    for (coupling, edges) in map(
-        lambda x: x.strip().split(maxsplit=1),
-        filter(lambda x: not x.startswith(b"#"), stream),
-    ):
-        coupling = float(coupling)
-        # TODO: Parse the edges properly, it's not that difficult...
-        edges = eval(edges)
-        for i, j in edges:
-            specs.append((coupling, i, j))
-    return Heisenberg(specs)
+def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
+    smallest = min(map(lambda t: min(t[1:]), specs))
+    largest = max(map(lambda t: max(t[1:]), specs))
+    if smallest != 0:
+        raise ValueError(
+            "Invalid graph: counting from 0, but the minimal index "
+            "present is {}.".format(smallest)
+        )
+    number_spins = largest + 1
+    if number_spins > basis.number_spins:
+        raise ValueError(
+            "Invalid graph: there are {} spins in the system, but the "
+            "largest index is {}".format(basis.number_spins, largest)
+        )
+    return _Heisenberg(specs, basis)
 
 
-def read_hamiltonian(stream) -> Heisenberg:
-    """
-    Reads the Hamiltonian from ``stream``. ``stream`` could be either a
+def read_hamiltonian(stream, basis) -> _Heisenberg:
+    r"""Reads the Hamiltonian from ``stream``. ``stream`` could be either a
     file-like object or a ``str`` file name.
     """
-    return with_file_like(stream, "rb", _read_hamiltonian)
+
+    def _read_from_txt(stream, basis):
+        specs = []
+        for (coupling, edges) in map(
+            lambda x: x.strip().split(maxsplit=1),
+            filter(lambda x: not x.startswith(b"#") and len(x.strip()) > 0, stream),
+        ):
+            coupling = float(coupling)
+            # TODO: Parse the edges properly, it's not that difficult...
+            edges = eval(edges)
+            for i, j in edges:
+                specs.append((coupling, i, j))
+        return Heisenberg(specs, basis)
+
+    new_fd = False
+    if isinstance(stream, str) or isinstance(stream, pathlib.Path):
+        new_fd = True
+        stream = open(stream, "r")
+    try:
+        return _read_from_txt(stream, basis)
+    finally:
+        if new_fd:
+            stream.close()
+
+
+def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None):
+    r"""Diagonalises the hamiltonian.
+
+    :param hamiltonian: Heisenberg Hamiltonian to diagonalise.
+    :param k: number eigenstates to calculate.
+    :param dtype: which data type to use.
+    """
+    import numpy as np
+    import scipy.sparse.linalg
+
+    hamiltonian.basis.build()
+    n = hamiltonian.basis.number_states
+    if dtype is not None:
+        if dtype not in {np.float32, np.float64, np.complex64, np.complex128}:
+            raise ValueError(
+                "invalid dtype: {}; expected float32, float64, complex64 or complex128"
+                "".format(dtype)
+            )
+        if not hamiltonian.is_real and dtype in {np.float32, np.float64}:
+            raise ValueError(
+                "invalid dtype: {}; Hamiltonian is complex -- expected either complex64 "
+                "or complex128".format(dtype)
+            )
+    else:
+        dtype = np.float64 if hamiltonian.is_real else np.complex128
+
+    op = scipy.sparse.linalg.LinearOperator(
+        shape=(n, n), matvec=hamiltonian, dtype=dtype
+    )
+    return scipy.sparse.linalg.eigsh(op, k=k, which="SA")
+
+
+def local_values(
+    spins,
+    hamiltonian: _Heisenberg,
+    state: torch.jit.ScriptModule,
+    log_psi: Optional[Tensor] = None,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    r"""Computes local values ``⟨s|H|ψ⟩/⟨s|ψ⟩`` for all ``s ∈ spins``.
+
+    :param spins: Spin configurations ``{s}``. Must be either a
+        ``numpy.ndarray`` of ``uint64`` or a ``torch.Tensor`` of ``int64``.
+    :param hamiltonian: Heisenberg Hamiltonian.
+    :param state: Quantum state ``ψ`` represented by a TorchScript module,
+        which predicts ``log(ψ(s))``.
+    :param log_psi: Pre-computed ``log(ψ(s))`` for all ``s`` in ``spins``.
+    :param batch_size: Batch size to use internally for forward propagationn
+        through ``state``.
+    """
+    if isinstance(spins, np.ndarray):
+        if spins.dtype != np.uint64:
+            raise TypeError(
+                "spins must be either a numpy.ndarray of uint64 or a torch.Tensor "
+                "of int64; got a numpy.ndarray of {}".format(spins.dtype)
+            )
+        spins = torch.from_numpy(spins.view(np.int64))
+    with torch.no_grad():
+        # Computes log(⟨s|H|ψ⟩) for all s.
+        # TODO: add support for batch size
+        log_h_psi = _C.apply(spins, hamiltonian, state._c._get_method("forward"))
+        # Computes log(⟨s|ψ⟩) for all s.
+        if log_psi is None:
+            log_psi = forward_with_batches(state, spins, batch_size)
+        log_h_psi -= log_psi
+        return np.exp(log_h_psi.numpy().view(np.complex64))
