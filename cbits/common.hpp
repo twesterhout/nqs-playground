@@ -43,8 +43,8 @@
 
 TCM_NAMESPACE_BEGIN
 
-using torch::optional;
 using torch::nullopt;
+using torch::optional;
 
 // -------------------------------- [SIMD] --------------------------------- {{{
 namespace detail {
@@ -159,10 +159,16 @@ using ForwardT =
 static_assert(sizeof(ForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
 
 namespace v2 {
-template <class S>
-using ForwardT =
-    stdext::inplace_function<auto(gsl::span<S const>)->torch::Tensor,
-                             /*capacity=*/32, /*alignment=*/8>;
+using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,
+                                          /*capacity=*/32, /*alignment=*/8>;
 } // namespace v2
+
+template <class T, class = void> struct is_complex : std::false_type {};
+template <class T>
+struct is_complex<std::complex<T>,
+                  std::enable_if_t<std::is_floating_point<T>::value>>
+    : std::true_type {};
+
+template <class T> inline constexpr bool is_complex_v = is_complex<T>::value;
 
 TCM_NAMESPACE_END

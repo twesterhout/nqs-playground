@@ -62,7 +62,7 @@ constexpr auto excess_indent(std::string_view const str) -> size_t
 }
 } // namespace detail
 
-auto trim(std::vector<std::string>& keep_alive, std::string_view raw)
+TCM_EXPORT auto trim(std::vector<std::string>& keep_alive, std::string_view raw)
     -> char const*
 {
     auto const n = detail::excess_indent(raw);

@@ -32,13 +32,15 @@
 TCM_NAMESPACE_BEGIN
 
 namespace detail {
-inline auto really_need_that_random_seed_now() -> uint64_t
-{
-    std::random_device                      random_device;
-    std::uniform_int_distribution<uint64_t> dist;
-    auto const                              seed = dist(random_device);
-    return seed;
-}
+namespace {
+    auto really_need_that_random_seed_now() -> uint64_t
+    {
+        std::random_device                      random_device;
+        std::uniform_int_distribution<uint64_t> dist;
+        auto const                              seed = dist(random_device);
+        return seed;
+    }
+} // namespace
 } // namespace detail
 
 auto global_random_generator() -> RandomGenerator&

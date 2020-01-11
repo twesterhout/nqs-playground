@@ -40,7 +40,7 @@ TCM_NAMESPACE_BEGIN
 /// pybind11 needs `char const*` for doc strings, so we keep a vector of strings
 /// which need to remain alive before pybind11 converts them to Python strings
 /// (copying the data).
-auto trim(std::vector<std::string>& keep_alive, std::string_view raw)
+TCM_IMPORT auto trim(std::vector<std::string>& keep_alive, std::string_view raw)
     -> char const*;
 
 TCM_NAMESPACE_END

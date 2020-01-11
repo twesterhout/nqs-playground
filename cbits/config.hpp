@@ -48,6 +48,7 @@
 #define TCM_CURRENT_FUNCTION BOOST_CURRENT_FUNCTION
 #define TCM_EXPORT BOOST_SYMBOL_EXPORT
 #define TCM_IMPORT BOOST_SYMBOL_IMPORT
+#define TCM_RESTRICT __restrict__
 
 #if defined(BOOST_GCC)
 #    define TCM_GCC BOOST_GCC
@@ -90,7 +91,7 @@
         (TCM_LIKELY(cond)                                                      \
              ? static_cast<void>(0)                                            \
              : ::TCM_NAMESPACE::detail::assert_fail(                           \
-                   #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
+                 #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
 #else
 #    define TCM_ASSERT(cond, msg) static_cast<void>(0)
 #endif
@@ -104,6 +105,7 @@ using std::uint64_t;
 using real_type    = double;
 using complex_type = std::complex<real_type>;
 
+#if 0
 struct SplitTag {};
 struct SerialTag {};
 struct ParallelTag {};
@@ -113,5 +115,6 @@ constexpr UnsafeTag split_tag;
 constexpr UnsafeTag serial_tag;
 constexpr UnsafeTag parallel_tag;
 constexpr UnsafeTag unsafe_tag;
+#endif
 
 TCM_NAMESPACE_END

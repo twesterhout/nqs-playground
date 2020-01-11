@@ -36,7 +36,7 @@
 #    pragma GCC diagnostic ignored "-Wsign-promo"
 #    pragma GCC diagnostic ignored "-Wswitch-default"
 #    pragma GCC diagnostic ignored "-Wctor-dtor-privacy"
-// #    pragma GCC diagnostic ignored "-Wstrict-overflow"
+#    pragma GCC diagnostic ignored "-Wstrict-overflow"
 #elif defined(TCM_CLANG)
 #    pragma clang diagnostic push
 #    pragma clang diagnostic ignored "-Wmissing-noreturn"
@@ -52,10 +52,27 @@
 #endif
 
 #include <torch/types.h> // torch::ScalarType
-#include <cstdio>
 #include <string>
 
 TCM_NAMESPACE_BEGIN
+
+namespace detail {
+TCM_IMPORT TCM_NORETURN auto assert_fail(char const* expr, char const* file,
+                                         size_t line, char const* function,
+                                         std::string const& msg) noexcept
+    -> void;
+
+TCM_IMPORT TCM_NORETURN auto assert_fail(char const* expr, char const* file,
+                                         size_t line, char const* function,
+                                         char const* msg) noexcept -> void;
+
+TCM_IMPORT TCM_NORETURN auto failed_to_construct_the_message() noexcept -> void;
+
+TCM_IMPORT auto make_what_message(char const* file, size_t line,
+                                  char const*        func,
+                                  std::string const& description)
+    -> std::string;
+} // namespace detail
 
 /// \brief An alternative to `fmt::format` that never throws.
 ///
@@ -74,76 +91,10 @@ auto noexcept_format(T&& fmt, Ts&&... args) noexcept -> std::string
             return std::string{};
         }
         catch (...) {
-            std::fprintf(
-                stderr,
-                "Failed to construct the message. Calling terminate...");
-            std::terminate();
+            detail::failed_to_construct_the_message();
         }
     }
 }
-
-namespace detail {
-TCM_NORETURN auto assert_fail(char const* expr, char const* file, size_t line,
-                              char const*        function,
-                              std::string const& msg) noexcept -> void;
-
-TCM_NORETURN auto assert_fail(char const* expr, char const* file, size_t line,
-                              char const* function, char const* msg) noexcept
-    -> void;
-
-auto make_what_message(char const* file, size_t line, char const* func,
-                       std::string const& description) -> std::string;
-
-constexpr auto is_dim_okay(int64_t const dimension,
-                           int64_t const expected) noexcept -> bool
-{
-    return dimension == expected;
-}
-
-constexpr auto is_dim_okay(int64_t const dimension, int64_t const expected_1,
-                           int64_t const expected_2) noexcept -> bool
-{
-    return dimension == expected_1 || dimension == expected_2;
-}
-
-constexpr auto is_shape_okay(int64_t const shape,
-                             int64_t const expected) noexcept -> bool
-{
-    return shape == expected;
-}
-
-constexpr auto
-is_shape_okay(std::tuple<int64_t, int64_t> const& shape,
-              std::tuple<int64_t, int64_t> const& expected) noexcept -> bool
-{
-    return shape == expected;
-}
-
-inline auto is_shape_okay(c10::IntArrayRef const         shape,
-                          std::initializer_list<int64_t> expected) noexcept
-    -> bool
-{
-    return shape == c10::IntArrayRef{expected};
-}
-
-auto make_wrong_dim_msg(int64_t dimension, int64_t expected) -> std::string;
-auto make_wrong_dim_msg(int64_t dimension, int64_t expected_1,
-                        int64_t expected_2) -> std::string;
-auto make_wrong_shape_msg(int64_t const shape, int64_t const expected)
-    -> std::string;
-auto make_wrong_shape_msg(std::tuple<int64_t, int64_t> const& shape,
-                          std::tuple<int64_t, int64_t> const& expected)
-    -> std::string;
-auto make_wrong_shape_msg(c10::IntArrayRef               shape,
-                          std::initializer_list<int64_t> expected)
-    -> std::string;
-
-
-inline auto check_shape(char const* function, char const* arg, torch::Tensor const& x, std::initializer_list<int64_t> expected) -> void
-{
-}
-
-} // namespace detail
 
 TCM_NAMESPACE_END
 
@@ -159,17 +110,6 @@ TCM_NAMESPACE_END
     if (TCM_UNLIKELY(!(condition))) { TCM_ERROR(ExceptionType, __VA_ARGS__); } \
     do {                                                                       \
     } while (false)
-
-#define TCM_CHECK_DIM(dimension, ...)                                          \
-    TCM_CHECK(                                                                 \
-        ::TCM_NAMESPACE::detail::is_dim_okay(dimension, __VA_ARGS__),          \
-        std::domain_error,                                                     \
-        ::TCM_NAMESPACE::detail::make_wrong_dim_msg(dimension, __VA_ARGS__))
-
-// #define TCM_CHECK_SHAPE(...)                                                   
-//     TCM_CHECK(::TCM_NAMESPACE::detail::is_shape_okay(__VA_ARGS__),             
-//               std::domain_error,                                               
-//               ::TCM_NAMESPACE::detail::make_wrong_shape_msg(__VA_ARGS__))
 
 #define TCM_CHECK_SHAPE(name, arg, ...)                                        \
     do {                                                                       \
@@ -188,20 +128,21 @@ TCM_NAMESPACE_END
                              }),                                               \
                   std::domain_error,                                           \
                   ::fmt::format("{} has wrong shape: {}; expected {}", name,   \
-                                fmt::join(_temp_shape_, ", "),                 \
-                                fmt::join(_temp_expected_, ", ")));            \
+                                ::fmt::join(_temp_shape_, ", "),               \
+                                ::fmt::join(_temp_expected_, ", ")));          \
     } while (false)
+
+#define TCM_CHECK_TYPE(name, arg, type)                                        \
+    TCM_CHECK(arg.scalar_type() == type, std::domain_error,                    \
+              ::fmt::format("{} has wrong type: {}; expected {}" name,         \
+                            arg.scalar_type(), type))
 
 #define TCM_CHECK_CONTIGUOUS(name, arg)                                        \
     TCM_CHECK(arg.is_contiguous(), std::domain_error,                          \
               ::fmt::format("expected {} to be contiguous, but it has "        \
                             "sizes={} and strides={}",                         \
-                            name, fmt::join(arg.sizes(), ", "),                \
-                            fmt::join(arg.strides(), ", ")));
-
-#define TCM_CHECK_TYPE(type, expected)                                         \
-    TCM_CHECK(type == expected, std::domain_error,                             \
-              ::fmt::format("wrong type: {}; expected {}", type, expected))
+                            name, ::fmt::join(arg.sizes(), ", "),              \
+                            ::fmt::join(arg.strides(), ", ")))
 
 // [torch::ScalarType] Formatting {{{
 /// Formatting of torch::ScalarType using fmtlib facilities
