@@ -114,6 +114,8 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
     target_compile_definitions(${MY_TARGET} PUBLIC
         _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
     set_property(TARGET ${MY_TARGET}
+        PROPERTY CXX_VISIBILITY_PRESET hidden)
+    set_property(TARGET ${MY_TARGET}
         PROPERTY POSITION_INDEPENDENT_CODE ON)
 endfunction()
 
@@ -223,6 +225,17 @@ if(NOT TARGET SG14)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14)
 endif()
 
+# ThreadPool
+if(NOT TARGET ThreadPool)
+    find_package(Threads REQUIRED)
+    execute_process(COMMAND git submodule update --init -- external/ThreadPool
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    add_library(ThreadPool INTERFACE)
+    target_include_directories(ThreadPool
+        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+    target_link_libraries(ThreadPool INTERFACE Threads::Threads)
+endif()
+
 # Boost libraries (some header-only parts)
 if(NOT TARGET Boost::boost)
     execute_process(COMMAND git submodule update --init -- external/boost
@@ -234,6 +247,7 @@ if(NOT TARGET Boost::boost)
                                                            libs/core
                                                            libs/detail
                                                            libs/integer
+                                                           libs/intrusive
                                                            libs/move
                                                            libs/pool
                                                            libs/predef
@@ -252,6 +266,7 @@ if(NOT TARGET Boost::boost)
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/integer/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/intrusive/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/move/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/predef/include
@@ -273,15 +288,17 @@ if(TRUE)
 endif()
 
 # OpenMP
-find_package(OpenMP REQUIRED)
+# find_package(OpenMP REQUIRED)
 
 # Taskflow
 if(NOT TARGET Taskflow)
+    find_package(Threads REQUIRED)
     execute_process(COMMAND git submodule update --init -- external/cpp-taskflow
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     add_library(Taskflow INTERFACE)
     target_include_directories(Taskflow
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-taskflow)
+    target_link_libraries(Taskflow INTERFACE Threads::Threads)
 endif()
 
 # Sleef
@@ -315,38 +332,72 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               Boost::boost
               SG14
               vectorclass
+              ThreadPool
               Taskflow
-              OpenMP::OpenMP_CXX
 )
 
 set(nqs_cbits_HEADERS)
 
-pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
-    cbits/nqs.cpp
-    # cbits/data.cpp
+
+add_library(nqs SHARED
     cbits/errors.cpp
-    # cbits/monte_carlo.cpp
-    cbits/monte_carlo_v2.cpp
-    # cbits/nn.cpp
-    cbits/polynomial.cpp
+    cbits/metropolis.cpp
+    cbits/heisenberg.cpp
+    cbits/forward_propagator.cpp
     cbits/polynomial_state.cpp
     cbits/random.cpp
-    cbits/spin.cpp
+    cbits/operators.cpp
+    cbits/symmetry.cpp
     cbits/spin_basis.cpp
     cbits/pool.cpp
     cbits/trim.cpp
 )
-nqs_cbits_add_low_level_flags(_C_nqs)
-target_compile_definitions(_C_nqs PUBLIC
+nqs_cbits_add_low_level_flags(nqs)
+target_compile_definitions(nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
-    TORCH_EXTENSION_NAME="_C_nqs")
-target_link_libraries(_C_nqs PRIVATE nqs_cbits_Common)
+    TORCH_EXTENSION_NAME="_C")
+target_link_libraries(nqs PUBLIC nqs_cbits_Common)
+
+
+pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
+    cbits/python/bind_symmetry.cpp
+    cbits/python/bind_heisenberg.cpp
+    cbits/python/bind_spin_basis.cpp
+    cbits/python/bind_polynomial_state.cpp
+    cbits/python/init.cpp
+)
+# pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
+#     cbits/nqs.cpp
+#     # cbits/data.cpp
+#     cbits/errors.cpp
+#     cbits/metropolis.cpp
+#     cbits/heisenberg.cpp
+#     # cbits/monte_carlo_v2.cpp
+#     # cbits/nn.cpp
+#     # cbits/polynomial.cpp
+#     # cbits/polynomial_state.cpp
+#     cbits/random.cpp
+#     cbits/operators.cpp
+#     cbits/symmetry.cpp
+#     cbits/spin_basis.cpp
+#     cbits/pool.cpp
+#     cbits/python/bind_symmetry.cpp
+#     cbits/trim.cpp
+# )
+nqs_cbits_add_low_level_flags(_C)
+target_compile_definitions(_C PUBLIC
+    TORCH_API_INCLUDE_EXTENSION_H=1
+    TORCH_EXTENSION_NAME="_C")
+target_link_libraries(_C PUBLIC nqs nqs_cbits_Common)
 # target_compile_options(_C_nqs PRIVATE "-fsanitize=address")
 # target_link_libraries(_C_nqs PRIVATE "-fsanitize=address")
 
 add_subdirectory(cbits/test/headers)
 
-install(TARGETS _C_nqs
+set_property(TARGET _C
+    PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
+
+install(TARGETS nqs _C
         LIBRARY
         DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground)
 

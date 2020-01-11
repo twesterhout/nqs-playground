@@ -10,11 +10,11 @@ add_header_test(errors)
 add_header_test(spin_basis)
 target_link_libraries(spin_basis-header PRIVATE pybind11::pybind11)
 
-add_header_test(quantum_state)
-target_link_libraries(quantum_state-header PRIVATE pybind11::pybind11)
+# add_header_test(quantum_state)
+# target_link_libraries(quantum_state-header PRIVATE pybind11::pybind11)
 
-add_header_test(polynomial)
-target_link_libraries(polynomial-header PRIVATE pybind11::pybind11)
+# add_header_test(polynomial)
+# target_link_libraries(polynomial-header PRIVATE pybind11::pybind11)
 
 if(FALSE)
     add_library(NQS_common INTERFACE)

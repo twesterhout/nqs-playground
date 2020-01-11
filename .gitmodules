@@ -31,3 +31,6 @@
 [submodule "external/cpp-taskflow"]
 	path = external/cpp-taskflow
 	url = https://github.com/cpp-taskflow/cpp-taskflow
+[submodule "external/ThreadPool"]
+	path = external/ThreadPool
+	url = https://github.com/progschj/ThreadPool
