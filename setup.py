@@ -17,7 +17,8 @@ setup(name='nqs_playground',
       author_email='t.westerhout@student.ru.nl',
       license='BSD3',
       packages=['nqs_playground'],
-      package_data={'nqs_playground': ['_C_nqs.*']},
+      # This will break on OSX and Windows...
+      package_data={'nqs_playground': ['_C.*.so', 'libnqs.so']},
       install_requires=[
           # 'numpy',
           # 'scipy',
