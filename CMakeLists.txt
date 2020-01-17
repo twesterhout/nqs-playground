@@ -9,7 +9,7 @@ string(TOUPPER "${CMAKE_BUILD_TYPE}" TCM_BUILD_TYPE)
 cmake_policy(SET CMP0048 NEW)
 project(nqs_cbits
     VERSION 0.0.1
-    DESCRIPTION "_C_nqs Python extension for nqs-playground"
+    DESCRIPTION "_C Python extension for nqs-playground"
     LANGUAGES C CXX)
 
 # C++17 without extensions
@@ -49,8 +49,6 @@ if(UNIX AND CMAKE_GENERATOR STREQUAL "Ninja")
     # endif()
 endif()
 
-# This requires at least CMake 3.12
-find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
 # list(APPEND CMAKE_PREFIX_PATH
 #     "$ENV{CONDA_PREFIX}/lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages/torch")
@@ -62,29 +60,32 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 # target_include_directories(Torch SYSTEM INTERFACE ${TORCH_PREFIX})
 # target_compile_options()
 
-# Runs python command _COMMAND and stores its output into _RESULT
-function(run_python_command _COMMAND _RESULT)
-    execute_process(COMMAND ${Python3_EXECUTABLE} -c "${_COMMAND}"
-        RESULT_VARIABLE _SUCCESS
-        OUTPUT_VARIABLE _VALUE
-        ERROR_VARIABLE _ERROR_VALUE
-	OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT _SUCCESS MATCHES 0)
-        message(FATAL_ERROR
-            "Could not find PyTorch include directories:\n${_ERROR_VALUE}")
-        return()
-    endif()
-    set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
-endfunction()
-
-# Stores the last line of _STRING into _RESULT
-function(get_last_line _STRING _RESULT)
-    string(REGEX REPLACE "^(.*)\n" "" _VALUE "${_STRING}")
-    set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
-endfunction()
-
 # Torch
-if(TRUE)
+if(FALSE)
+    # This requires at least CMake 3.12
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+
+    # Runs python command _COMMAND and stores its output into _RESULT
+    function(run_python_command _COMMAND _RESULT)
+        execute_process(COMMAND ${Python3_EXECUTABLE} -c "${_COMMAND}"
+            RESULT_VARIABLE _SUCCESS
+            OUTPUT_VARIABLE _VALUE
+            ERROR_VARIABLE _ERROR_VALUE
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT _SUCCESS MATCHES 0)
+            message(FATAL_ERROR
+                "Could not find PyTorch include directories:\n${_ERROR_VALUE}")
+            return()
+        endif()
+        set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
+    endfunction()
+
+    # Stores the last line of _STRING into _RESULT
+    function(get_last_line _STRING _RESULT)
+        string(REGEX REPLACE "^(.*)\n" "" _VALUE "${_STRING}")
+        set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
+    endfunction()
+
     # We don't use CUDA in our C++ code, so everything's simple
     add_library(Torch INTERFACE)
     run_python_command("from torch.utils.cpp_extension import include_paths; \
@@ -108,11 +109,20 @@ print(int(torch._C._GLIBCXX_USE_CXX11_ABI))" _TEMP)
     # PyTorch installations
     target_compile_options(Torch INTERFACE -Wno-missing-include-dirs)
     add_library(torch ALIAS Torch)
+
+else()
+
+    find_package(Torch REQUIRED)
 endif()
 
 function(nqs_cbits_add_low_level_flags MY_TARGET)
-    target_compile_definitions(${MY_TARGET} PUBLIC
-        _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+    if (TCM_USE_CXX11_ABI)
+        target_compile_definitions(${MY_TARGET} PUBLIC
+            _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+    endif()
+    if (TORCH_CXX_FLAGS)
+        target_compile_options(${MY_TARGET} PUBLIC ${TORCH_CXX_FLAGS})
+    endif()
     set_property(TARGET ${MY_TARGET}
         PROPERTY CXX_VISIBILITY_PRESET hidden)
     set_property(TARGET ${MY_TARGET}
@@ -394,10 +404,9 @@ target_link_libraries(_C PUBLIC nqs nqs_cbits_Common)
 
 add_subdirectory(cbits/test/headers)
 
-set_property(TARGET _C
-    PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
+# set_property(TARGET _C
+#     PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
 
 install(TARGETS nqs _C
         LIBRARY
         DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground)
-
