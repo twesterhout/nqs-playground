@@ -31,10 +31,10 @@
 #include "common.hpp"
 #include "config.hpp"
 #include "errors.hpp"
+#include "parallel.hpp"
 
 #include <torch/types.h>
 
-#include <future>
 #include <queue>
 #include <vector>
 
@@ -212,7 +212,7 @@ auto Accumulator::operator()(Iterator first, Iterator last) -> void
         _builder.add(first->first, first->second);
         if (_builder.full()) {
             drain_if_needed();
-            _futures.push(std::async(_builder.submit()));
+            _futures.push(async(_builder.submit()));
         }
     }
     _builder.finish();
@@ -228,7 +228,7 @@ auto Accumulator::operator()(ForEach&& for_each) -> void
         _builder.add(spin, coeff);
         if (_builder.full()) {
             drain_if_needed();
-            _futures.push(std::async(_builder.submit()));
+            _futures.push(async(_builder.submit()));
         }
     });
     _builder.finish();

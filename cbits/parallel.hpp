@@ -1,15 +1,22 @@
 #include "config.hpp"
+#include "errors.hpp"
 #include <taskflow/taskflow.hpp>
+
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <stdexcept>
+#include <thread>
+#include <vector>
 
 TCM_NAMESPACE_BEGIN
 
-inline auto global_executor() noexcept -> tf::Executor&
-{
-    static tf::Executor executor;
-    return executor;
-}
+auto global_executor() noexcept -> tf::Executor&;
 
-#if 0
+#if 1
 // Copyright (c) 2012 Jakob Progsch, Václav Zeman
 //
 // This software is provided 'as-is', without any express or implied
@@ -35,53 +42,27 @@ inline auto global_executor() noexcept -> tf::Executor&
 // got a single worker thread.
 class ThreadPool {
   public:
-    ThreadPool() : worker{}, tasks{}, queue_mutex{}, condition{}, stop{false}
+    ThreadPool();
+
+    template <class F>
+    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
     {
-        worker = std::thread{[this] {
-            for (;;) {
-                std::function<void()> task;
-
-                {
-                    std::unique_lock<std::mutex> lock(queue_mutex);
-                    condition.wait(lock,
-                                   [this] { return stop || !tasks.empty(); });
-                    if (stop && tasks.empty()) return;
-                    task = std::move(tasks.front());
-                    tasks.pop();
-                }
-
-                task();
-            }
-        }};
-    }
-
-    template <class F, class... Args>
-    auto enqueue(F&& f, Args&&... args)
-        -> std::future<typename std::result_of<F(Args...)>::type>
-    {
-        using return_type = typename std::result_of<F(Args...)>::type;
+        using return_type = typename std::result_of<F()>::type;
         auto task         = std::make_shared<std::packaged_task<return_type()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+            std::forward<F>(f));
         std::future<return_type> res = task->get_future();
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
             // don't allow enqueueing after stopping the pool
-            if (stop) throw std::runtime_error{"enqueue on stopped ThreadPool"};
+            TCM_CHECK(!stop, std::runtime_error,
+                      "enqueue on stopped ThreadPool");
             tasks.emplace([p = std::move(task)]() { (*p)(); });
         }
         condition.notify_one();
         return res;
     }
 
-    ~ThreadPool()
-    {
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex);
-            stop = true;
-        }
-        condition.notify_all();
-        worker.join();
-    }
+    ~ThreadPool();
 
   private:
     // need to keep track of threads so we can join them
@@ -94,5 +75,14 @@ class ThreadPool {
     bool                    stop;
 };
 #endif
+
+namespace detail {
+auto global_thread_pool() noexcept -> ThreadPool&;
+} // namespace detail
+
+template <class F> auto async(F&& f)
+{
+    return detail::global_thread_pool().enqueue(std::forward<F>(f));
+}
 
 TCM_NAMESPACE_END

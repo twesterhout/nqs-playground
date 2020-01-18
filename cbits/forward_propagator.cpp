@@ -189,7 +189,7 @@ auto Accumulator::finalize() -> void
     if (!_builder.empty()) {
         _builder.add_junk();
         drain_if_needed();
-        _futures.push(std::async(_builder.submit()));
+        _futures.push(async(_builder.submit()));
     }
     TCM_ASSERT(_builder.empty(), "postcondition violated");
     drain(_futures.size());
