@@ -1,7 +1,5 @@
 #include "polynomial_state.hpp"
 
-#include <iostream>
-
 TCM_NAMESPACE_BEGIN
 
 TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
@@ -26,15 +24,12 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
         static_cast<std::complex<float>*>(buffer.data_ptr()), states.size()};
 
     detail::Accumulator acc{std::move(psi), out, batch_size};
-    std::cerr << "constructed acc\n";
     for (auto const x : states) {
         acc([&hamiltonian, x](auto&& f) {
             hamiltonian(x, std::forward<decltype(f)>(f));
         });
     }
-    std::cerr << "iteration done, calling finalize\n";
     acc.finalize();
-    std::cerr << "finalize done\n";
 
     return buffer;
 }

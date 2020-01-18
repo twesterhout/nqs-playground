@@ -1,8 +1,6 @@
 #include "forward_propagator.hpp"
 #include <torch/jit.h>
 
-#include <iostream>
-
 TCM_NAMESPACE_BEGIN
 
 namespace detail {
@@ -22,11 +20,13 @@ auto TaskBuilder::prepare(v2::ForwardT fn) -> void
                               torch::TensorOptions{}.dtype(torch::kInt64));
     auto coeffs = torch::empty({static_cast<int64_t>(_batch_size), 2L},
                                torch::TensorOptions{}.dtype(torch::kFloat32));
-    _next_task  = Task{/*psi=*/std::move(fn), /*spins=*/std::move(spins),
-                      /*coeffs=*/std::move(coeffs),
-                      /*counts=*/std::vector<uint64_t>{}, /*complete=*/true};
-    _i          = 0;
-    _spins_ptr  = static_cast<uint64_t*>(_next_task.spins.data_ptr());
+    _next_task  = Task{
+        /*psi=*/std::move(fn), /*spins=*/std::move(spins),
+        /*coeffs=*/std::move(coeffs),
+        /*counts=*/std::vector<uint64_t>{std::initializer_list<uint64_t>{0UL}},
+        /*complete=*/true};
+    _i         = 0;
+    _spins_ptr = static_cast<uint64_t*>(_next_task.spins.data_ptr());
     _coeffs_ptr =
         static_cast<std::complex<float>*>(_next_task.coeffs.data_ptr());
 }
@@ -82,20 +82,16 @@ auto TaskBuilder::Task::operator()() const
 {
     torch::NoGradGuard no_grad;
 
-    std::cerr << "calling this->psi(spins)...\n";
-    auto output = this->psi(spins);
-    std::cerr << "received output\n";
+    auto       output     = this->psi(spins);
     auto const batch_size = this->spins.size(0);
     TCM_CHECK_SHAPE("output tensor", output, {batch_size, 2});
     TCM_CHECK_CONTIGUOUS("output tensor", output);
     auto real = torch::narrow(output, /*dim=*/1, /*start=*/0, /*length=*/1);
     auto imag = torch::narrow(output, /*dim=*/1, /*start=*/1, /*length=*/1);
-    std::cerr << "constructed real & imag\n";
 
     auto const scale = torch::max(real).item<float>();
     TCM_CHECK(!std::isnan(scale), std::runtime_error,
               "NaN encountered in neural network output");
-    std::cerr << "calculated scale\n";
 
     // The following computes complex-valued exp of (output - scale) in-place
     real -= scale;
@@ -104,7 +100,6 @@ auto TaskBuilder::Task::operator()() const
     torch::sin_(imag);
     imag *= real;
     real *= cos;
-    std::cerr << "updated output\n";
 
     std::vector<std::complex<float>> results;
     results.reserve(this->counts.size());
@@ -113,23 +108,26 @@ auto TaskBuilder::Task::operator()() const
     auto offset = int64_t{0};
     auto j      = size_t{0};
     for (; j < this->counts.size() - 1; offset += this->counts[j++]) {
-        auto r = dotu(torch::narrow(coeffs, /*dim=*/0,
-                                    /*start=*/offset,
-                                    /*length=*/counts[j]),
-                      torch::narrow(output, /*dim=*/0, /*start=*/offset,
-                                    /*length=*/counts[j]));
+        auto r = counts[j] > 0
+                     ? dotu(torch::narrow(coeffs, /*dim=*/0,
+                                          /*start=*/offset,
+                                          /*length=*/counts[j]),
+                            torch::narrow(output, /*dim=*/0, /*start=*/offset,
+                                          /*length=*/counts[j]))
+                     : std::complex<float>{0.0f, 0.0f};
         results.push_back(r);
     }
     if (!(counts[j] == 0 && offset != batch_size)) {
-        auto r = dotu(torch::narrow(coeffs, /*dim=*/0,
-                                    /*start=*/offset,
-                                    /*length=*/counts[j]),
-                      torch::narrow(output, /*dim=*/0, /*start=*/offset,
-                                    /*length=*/counts[j]));
+        auto r = counts[j] > 0
+                     ? dotu(torch::narrow(coeffs, /*dim=*/0,
+                                          /*start=*/offset,
+                                          /*length=*/counts[j]),
+                            torch::narrow(output, /*dim=*/0, /*start=*/offset,
+                                          /*length=*/counts[j]))
+                     : std::complex<float>{0.0f, 0.0f};
         results.push_back(r);
     }
 
-    std::cerr << "returning results\n";
     return {scale, complete, std::move(results)};
 }
 
@@ -154,9 +152,7 @@ auto Accumulator::drain(unsigned const count) -> void
     for (auto i = 0U; i < count; ++i) {
         auto future = std::move(_futures.front());
         _futures.pop();
-        std::cerr << "calling future::get()...\n";
         auto value = future.get();
-        std::cerr << "calling process...\n";
         process(value);
     }
 }
@@ -191,12 +187,9 @@ auto Accumulator::finalize() -> void
 {
     TCM_ASSERT(!_builder.full(), "precondition violated");
     if (!_builder.empty()) {
-        std::cerr << "adding junk...\n";
         _builder.add_junk();
         drain_if_needed();
-        std::cerr << "draining done\n";
         _futures.push(std::async(_builder.submit()));
-        std::cerr << "submitted a task\n";
     }
     TCM_ASSERT(_builder.empty(), "postcondition violated");
     drain(_futures.size());

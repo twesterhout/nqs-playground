@@ -70,7 +70,7 @@ struct TaskBuilder {
     auto start()
     {
         TCM_ASSERT(!full(), "buffer is full");
-        _next_task.counts.push_back(0);
+        if (!empty()) { _next_task.counts.push_back(0); }
         _next_task.complete = false;
     }
 
@@ -88,7 +88,11 @@ struct TaskBuilder {
 
     auto add_junk() -> void;
 
-    auto finish() { _next_task.complete = true; }
+    auto finish() -> void
+    {
+        _next_task.complete = true;
+        if (empty()) { _next_task.counts.push_back(0); }
+    }
 
     auto submit(bool prepare_next = true) -> Task;
 
