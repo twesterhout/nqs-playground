@@ -40,7 +40,7 @@ from torch import Tensor
 from ._C import Heisenberg as _Heisenberg
 from .core import forward_with_batches
 
-__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise"]
+__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values"]
 
 
 def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
@@ -154,4 +154,5 @@ def local_values(
         if log_psi is None:
             log_psi = forward_with_batches(state, spins, batch_size)
         log_h_psi -= log_psi
-        return np.exp(log_h_psi.numpy().view(np.complex64))
+        log_h_psi = log_h_psi.numpy().view(np.complex64)
+        return np.exp(log_h_psi, out=log_h_psi)
