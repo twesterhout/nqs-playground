@@ -2,21 +2,25 @@
 #include "errors.hpp"
 #include <taskflow/taskflow.hpp>
 
-#include <condition_variable>
-#include <functional>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <queue>
-#include <stdexcept>
-#include <thread>
-#include <vector>
+#include <ATen/Parallel.h>
+
+#if 0
+#    include <condition_variable>
+#    include <functional>
+#    include <future>
+#    include <memory>
+#    include <mutex>
+#    include <queue>
+#    include <stdexcept>
+#    include <thread>
+#    include <vector>
+#endif
 
 TCM_NAMESPACE_BEGIN
 
 auto global_executor() noexcept -> tf::Executor&;
 
-#if 1
+#if 0
 // Copyright (c) 2012 Jakob Progsch, Václav Zeman
 //
 // This software is provided 'as-is', without any express or implied
@@ -74,15 +78,20 @@ class ThreadPool {
     std::condition_variable condition;
     bool                    stop;
 };
-#endif
 
 namespace detail {
 auto global_thread_pool() noexcept -> ThreadPool&;
 } // namespace detail
+#endif
 
 template <class F> auto async(F&& f)
 {
-    return detail::global_thread_pool().enqueue(std::forward<F>(f));
+    using R     = typename std::result_of<F()>::type;
+    auto task   = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
+    auto future = task->get_future();
+    at::launch([p = std::move(task)]() { (*p)(); });
+    return future;
+    // return detail::global_thread_pool().enqueue(std::forward<F>(f));
 }
 
 TCM_NAMESPACE_END

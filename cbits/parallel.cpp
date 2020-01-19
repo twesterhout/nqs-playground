@@ -8,6 +8,7 @@ auto global_executor() noexcept -> tf::Executor&
     return executor;
 }
 
+#if 0
 ThreadPool::ThreadPool()
     : worker{}, tasks{}, queue_mutex{}, condition{}, stop{false}
 {
@@ -45,5 +46,6 @@ auto global_thread_pool() noexcept -> ThreadPool&
     return pool;
 }
 } // namespace detail
+#endif
 
 TCM_NAMESPACE_END
