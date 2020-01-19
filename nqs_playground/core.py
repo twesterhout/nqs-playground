@@ -38,7 +38,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from . import _C_nqs as _C
+from . import _C
 
 
 # Taken from torch; all credit goes to PyTorch developers.
@@ -412,83 +412,83 @@ def combine_amplitude_and_phase(
     return m
 
 
-def _forward_with_batches(state, input, batch_size):
-    n = input.shape[0]
-    if n == 0:
-        raise ValueError("input should not be empty")
-    system_size = len(_C.unsafe_get(input, 0))
-    i = 0
-    out = []
-    while i + batch_size <= n:
-        out.append(state(_C.unpack(input[i : i + batch_size])))
-        i += batch_size
-    if i != n:  # Remaining part
-        out.append(state(_C.unpack(input[i:]).view(-1, system_size)))
-    # r = torch.cat(out, dim=0)
-    # assert torch.all(r == state(_C.unpack(input)))
-    # return r
-    return torch.cat(out, dim=0)
-
-
-def local_energy(
-    state: torch.jit.ScriptModule,
-    hamiltonian: _C.v2.Heisenberg,
-    spins: np.ndarray,
-    log_values: Optional[np.ndarray] = None,
-    batch_size: int = 128,
-) -> np.ndarray:
-    r"""Computes local estimators ⟨σ|H|ψ⟩/⟨σ|ψ⟩ for all σ.
-
-    :param state: wavefunction ``ψ``. ``state`` should be a function
-        mapping ``R^{batch_size x in_features}`` to ``R^{batch_size x 2}``.
-        Columns of the output are interpreted as real and imaginary parts of
-        ``log(⟨σ|ψ⟩)``.
-    :param hamiltonian: Hamiltonian ``H``.
-    :param spins: spin configurations ``σ``. Should be a non-empty NumPy array
-        of compact spin configurations.
-    :param log_values: pre-computed ``log(⟨σ|ψ⟩)``. Should be a NumPy array of
-        ``complex64``.
-    :param batch_size: batch size to use for forward propagation through
-        ``state``.
-
-    :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
-    """
-    assert isinstance(state, torch.jit.ScriptModule)
-    assert isinstance(hamiltonian, _C.v2.Heisenberg)
-    if len(spins) == 0:
-        return numpy.array([], dtype=np.complex64)
-    with torch.no_grad(), torch.jit.optimized_execution(True):
-        device = next(state.parameters()).device
-        if log_values is None:
-            number_spins = hamiltonian.basis.number_spins
-            log_values = forward_with_batches(
-                lambda x: state(_C.v2.unpack(x, number_spins).to(device)).cpu(),
-                spins,
-                batch_size,
-            )
-            if log_values.dim() != 2:
-                raise ValueError(
-                    "state should return the logarithm of the wavefunction, but"
-                    "output tensor has dimension {}; did you by accident forget"
-                    "to combine amplitude and phase networks?".format(log_values.dim())
-                )
-            log_values = log_values.numpy().view(np.complex64)
-
-        log_H_values = (
-            forward_with_batches(
-                _C.v2.PolynomialState(
-                    _C.v2.Polynomial(hamiltonian, [0.0]),
-                    state._c._get_method("forward"),
-                    batch_size,
-                    device,
-                ),
-                spins,
-                batch_size=batch_size // 4,
-            )
-            .numpy()
-            .view(np.complex64)
-        )
-        return np.exp(log_H_values - log_values).squeeze(axis=1)
+# def _forward_with_batches(state, input, batch_size):
+#     n = input.shape[0]
+#     if n == 0:
+#         raise ValueError("input should not be empty")
+#     system_size = len(_C.unsafe_get(input, 0))
+#     i = 0
+#     out = []
+#     while i + batch_size <= n:
+#         out.append(state(_C.unpack(input[i : i + batch_size])))
+#         i += batch_size
+#     if i != n:  # Remaining part
+#         out.append(state(_C.unpack(input[i:]).view(-1, system_size)))
+#     # r = torch.cat(out, dim=0)
+#     # assert torch.all(r == state(_C.unpack(input)))
+#     # return r
+#     return torch.cat(out, dim=0)
+# 
+# 
+# def local_energy(
+#     state: torch.jit.ScriptModule,
+#     hamiltonian: _C.v2.Heisenberg,
+#     spins: np.ndarray,
+#     log_values: Optional[np.ndarray] = None,
+#     batch_size: int = 128,
+# ) -> np.ndarray:
+#     r"""Computes local estimators ⟨σ|H|ψ⟩/⟨σ|ψ⟩ for all σ.
+# 
+#     :param state: wavefunction ``ψ``. ``state`` should be a function
+#         mapping ``R^{batch_size x in_features}`` to ``R^{batch_size x 2}``.
+#         Columns of the output are interpreted as real and imaginary parts of
+#         ``log(⟨σ|ψ⟩)``.
+#     :param hamiltonian: Hamiltonian ``H``.
+#     :param spins: spin configurations ``σ``. Should be a non-empty NumPy array
+#         of compact spin configurations.
+#     :param log_values: pre-computed ``log(⟨σ|ψ⟩)``. Should be a NumPy array of
+#         ``complex64``.
+#     :param batch_size: batch size to use for forward propagation through
+#         ``state``.
+# 
+#     :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
+#     """
+#     assert isinstance(state, torch.jit.ScriptModule)
+#     assert isinstance(hamiltonian, _C.v2.Heisenberg)
+#     if len(spins) == 0:
+#         return numpy.array([], dtype=np.complex64)
+#     with torch.no_grad(), torch.jit.optimized_execution(True):
+#         device = next(state.parameters()).device
+#         if log_values is None:
+#             number_spins = hamiltonian.basis.number_spins
+#             log_values = forward_with_batches(
+#                 lambda x: state(_C.v2.unpack(x, number_spins).to(device)).cpu(),
+#                 spins,
+#                 batch_size,
+#             )
+#             if log_values.dim() != 2:
+#                 raise ValueError(
+#                     "state should return the logarithm of the wavefunction, but"
+#                     "output tensor has dimension {}; did you by accident forget"
+#                     "to combine amplitude and phase networks?".format(log_values.dim())
+#                 )
+#             log_values = log_values.numpy().view(np.complex64)
+# 
+#         log_H_values = (
+#             forward_with_batches(
+#                 _C.v2.PolynomialState(
+#                     _C.v2.Polynomial(hamiltonian, [0.0]),
+#                     state._c._get_method("forward"),
+#                     batch_size,
+#                     device,
+#                 ),
+#                 spins,
+#                 batch_size=batch_size // 4,
+#             )
+#             .numpy()
+#             .view(np.complex64)
+#         )
+#         return np.exp(log_H_values - log_values).squeeze(axis=1)
 
 
 @torch.jit.script
