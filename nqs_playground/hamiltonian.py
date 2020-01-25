@@ -37,10 +37,12 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from . import _C
 from ._C import Heisenberg as _Heisenberg
+from ._C import SpinBasis
 from .core import forward_with_batches
 
-__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values"]
+__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values", "local_values_slow"]
 
 
 def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
@@ -52,7 +54,9 @@ def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
             "present is {}.".format(smallest)
         )
     number_spins = largest + 1
-    if number_spins > basis.number_spins:
+    if basis is None:
+        basis = SpinBasis([], number_spins, hamming_weight=number_spins // 2)
+    elif number_spins > basis.number_spins:
         raise ValueError(
             "Invalid graph: there are {} spins in the system, but the "
             "largest index is {}".format(basis.number_spins, largest)
@@ -153,6 +157,61 @@ def local_values(
         # Computes log(⟨s|ψ⟩) for all s.
         if log_psi is None:
             log_psi = forward_with_batches(state, spins, batch_size)
+        log_h_psi -= log_psi
+        log_h_psi = log_h_psi.numpy().view(np.complex64)
+        return np.exp(log_h_psi, out=log_h_psi)
+
+
+def local_values_slow(
+    spins,
+    hamiltonian: _Heisenberg,
+    state: torch.jit.ScriptModule,
+    log_psi: Optional[Tensor] = None,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    class SlowPolynomialState:
+        def __init__(self, hamiltonian, roots, log_psi):
+            self.hamiltonian = hamiltonian
+            self.basis = hamiltonian.basis
+            self.basis.build()
+            self.state, self.scale = self._make_state(log_psi)
+            self.roots = roots
+
+        def _make_state(self, log_psi):
+            with torch.no_grad():
+                spins = torch.from_numpy(self.basis.states.view(np.int64))
+                out = log_psi(spins)
+                scale = torch.max(out[:, 0]).item()
+                out[:, 0] -= scale
+                out = out.numpy().view(np.complex64).squeeze()
+                out = np.exp(out)
+                return out, scale
+
+        def _forward_one(self, x):
+            basis = self.hamiltonian.basis
+            i = basis.index(x)
+            vector = np.zeros((basis.number_states,), dtype=np.complex64)
+            vector[i] = 1.0
+            for r in self.roots:
+                vector = self.hamiltonian(vector) - r * vector
+            return self.scale + np.log(np.dot(self.state, vector))
+
+        def __call__(self, spins):
+            if isinstance(spins, torch.Tensor):
+                assert spins.dtype == torch.int64
+                spins = spins.numpy().view(np.uint64)
+            return torch.from_numpy(
+                np.array([self._forward_one(x) for x in spins], dtype=np.complex64)
+                .view(np.float32)
+                .reshape(-1, 2)
+            )
+
+    with torch.no_grad():
+        # Computes log(⟨s|H|ψ⟩) for all s.
+        # TODO: add support for batch size
+        log_h_psi = SlowPolynomialState(hamiltonian, [0.0], state)(spins)
+        # Computes log(⟨s|ψ⟩) for all s.
+        log_psi = forward_with_batches(state, spins, batch_size)
         log_h_psi -= log_psi
         log_h_psi = log_h_psi.numpy().view(np.complex64)
         return np.exp(log_h_psi, out=log_h_psi)

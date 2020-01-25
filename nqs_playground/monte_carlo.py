@@ -1,12 +1,15 @@
 from itertools import islice
-import math
 from typing import Optional, Tuple, Callable
 
 import numpy as np
 import torch
 from torch import Tensor
 
-from ._C_nqs.v2 import unpack, MetropolisKernel
+unpack = torch.ops.tcm.unpack
+from ._C import MetropolisKernel
+from .core import forward_with_batches
+
+__all__ = ["SamplingOptions", "sample_some"]
 
 
 class Sampler:
@@ -16,7 +19,7 @@ class Sampler:
 
     def __init__(
         self,
-        transition_kernel: Callable[[Tensor, Tensor], Tensor],
+        transition_kernel: Callable[[Tensor], Tuple[Tensor, Tensor]],
         log_prob_fn: Callable[[Tensor], Tensor],
         batch_size: int = 32,
     ):
@@ -41,9 +44,9 @@ class Sampler:
 
     def bootstrap(self):
         state = _prepare_initial_state(self.basis, self.batch_size)
-        log_prob = self.log_prob_fn(state)
+        log_prob = self.log_prob_fn(state).squeeze()
         norm = torch.tensor(
-            [self.basis.normalisation(x) for x in state], dtype=torch.float32
+            [self.basis.full_info(x)[2] for x in state], dtype=torch.float32
         )
         return state, norm, log_prob
 
@@ -51,8 +54,8 @@ class Sampler:
         current = self.bootstrap()
         while True:
             yield current
-            proposed_state, proposed_norm = self.kernel(current[0], False)
-            proposed_log_prob = self.log_prob_fn(proposed_state)
+            proposed_state, proposed_norm = self.kernel(current[0])
+            proposed_log_prob = self.log_prob_fn(proposed_state).squeeze()
             current = _step(current, (proposed_state, proposed_norm, proposed_log_prob))
 
 
@@ -64,6 +67,7 @@ class SamplingOptions:
         number_samples: int,
         number_chains: int = 1,
         number_discarded: Optional[int] = None,
+        device: Optional[torch.device] = None,
     ):
         r"""Initialises the options.
 
@@ -97,14 +101,18 @@ class SamplingOptions:
                 )
         else:
             self.number_discarded = self.number_samples // 10
+        if device is None:
+            device = "cpu"
+        if not isinstance(device, torch.device):
+            device = torch.device(device)
+        self.device = device
 
 
 def _sample_using_metropolis(
-    fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions
+    log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions
 ):
     kernel = MetropolisKernel(basis)
-    log_prob_fn = lambda x: 2 * fn(unpack(x, basis.number_spins))
-    sampler = Sampler(kernel, log_prob_fn, batch_size=options.number_chains)
+    sampler = Sampler(kernel, lambda x: 2 * log_ψ(x), batch_size=options.number_chains)
 
     shape = (options.number_samples, options.number_chains)
     states = torch.empty(shape, dtype=torch.int64)
@@ -119,7 +127,91 @@ def _sample_using_metropolis(
     ):
         states[i] = x
         log_prob[i] = y
+    return states.view([-1]), log_prob.view([-1])
+
+
+def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
+    r"""Samples states from the Hilbert space basis ``basis`` according to the
+    probability distribution proportional to ‖ψ‖².
+
+    We compute ``‖ψ(s)‖²`` for all states ``s`` in ``basis`` and then directly
+    sample from this discrete probability distribution.
+
+    Number of samples is ``options.number_chains * options.number_samples``,
+    and ``options.number_discarded`` is ignored, since there is no need for
+    thermalisation.
+    """
+    device = options.device
+
+    def make_xs_and_ys():
+        basis.build()  # Initialises internal cache if not done already
+        # Compute log amplitudes
+        xs = torch.from_numpy(basis.states.view(np.int64))
+        # ys are log amplitudes on all states xs
+        ys = forward_with_batches(log_ψ, xs, batch_size=8192).squeeze()
+        if ys.dim() != 1:
+            raise ValueError(
+                "log_ψ should return real part of the logarithm of the "
+                "wavefunction, but output tensor has dimension {}; did "
+                "you by accident use sign instead of amplitude network?"
+                "".format(ys.dim())
+            )
+        if ys.device != device:
+            raise ValueError(
+                "log_ψ should return tensors residing on {}; received "
+                "tensors residing on {} instead".format(device, ys.device)
+            )
+        return xs, ys
+
+    xs, ys = make_xs_and_ys()
+    probabilities = _log_amplitudes_to_probabilities(ys)
+    print(probabilities)
+    if len(probabilities) < (1 << 24):
+        # PyTorch only supports discrete probability distributions
+        # shorter than 2²⁴.
+        indices = torch.multinomial(
+            probabilities,
+            num_samples=options.number_chains * options.number_samples,
+            # replacement=True is IMPORTANT because it more closely
+            # emulates the actual Monte Carlo behaviour
+            replacement=True,
+        )
+        log_prob = probabilities[indices]
+        log_prob = torch.log_(log_prob)
+        states = xs[indices.to(device="cpu")].to(device=device)
+    else:
+        # If we have more than 2²⁴ different probabilities chances are,
+        # NumPy will complain about probabilities not being normalised
+        # since float32 precision is not enough. The simplest
+        # workaround is to convert the probabilities to float64 and
+        # then renormalise then which is what we do.
+        probabilities = probabilities.to(device="cpu", dtype=torch.float64)
+        probabilities /= torch.sum(probabilities)
+        cpu_indices = np.random.choice(
+            len(probabilities),
+            size=options.number_chains * options.number_samples,
+            replace=True,
+            p=probabilities,
+        )
+        log_prob = probabilities[indices].to(device=device, dtype=torch.float32)
+        log_prob = torch.log_(log_prob)
+        states = xs[cpu_indices].to(device=device)
     return states, log_prob
+
+
+def sample_some(
+    log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions, mode="exact"
+) -> Tuple[Tensor, Tensor]:
+    with torch.no_grad(), torch.jit.optimized_execution(True):
+        if mode == "exact":
+            return _sample_exactly(log_ψ, basis, options)
+        elif mode == "monte_carlo":
+            return _sample_using_metropolis(log_ψ, basis, options)
+        else:
+            raise ValueError(
+                "invalid mode: {!r}; expected either 'exact' or "
+                "'monte_carlo'".format(mode)
+            )
 
 
 def closeness_testing_l1(p, q, n, C, m):
@@ -164,7 +256,7 @@ def benchmark():
 
 def test_uniform():
     from itertools import islice
-    from nqs_playground._C_nqs.v2 import SpinBasis, MetropolisKernel
+    from nqs_playground import SpinBasis
 
     basis = SpinBasis([], number_spins=10, hamming_weight=5)
     basis.build()
@@ -235,17 +327,12 @@ def _step(
     r"""Internal function of the Sampler."""
     state, norm, log_prob = current
     proposed_state, proposed_norm, proposed_log_prob = proposed
-    r = torch.where(
-        proposed_norm > 0,
-        torch.rand(state.size(0)) * proposed_norm / norm,
-        torch.tensor(math.inf, dtype=torch.float32),
-    )
-    t = r <= torch.exp(proposed_log_prob - log_prob)
-    return (
-        torch.where(t, proposed_state, state),
-        torch.where(t, proposed_norm, norm),
-        torch.where(t, proposed_log_prob, log_prob),
-    )
+    r = torch.rand(state.size(0)) * proposed_norm / norm
+    t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - log_prob))
+    state[t] = proposed_state[t]
+    norm[t] = proposed_norm[t]
+    log_prob[t] = proposed_log_prob[t]
+    return state, norm, log_prob
 
 
 def _random_spin_configuration(n: int, hamming_weight: Optional[int] = None) -> int:
@@ -273,7 +360,16 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
     states = set()
     for _ in range(max(2 * batch_size, 10000)):
         spin = _random_spin_configuration(basis.number_spins, basis.hamming_weight)
-        states.add(basis.representative(spin))
+        states.add(basis.full_info(spin)[0])
     states = np.array(list(states), dtype=np.uint64)
     batch = np.random.choice(states, size=batch_size, replace=True)
     return torch.from_numpy(batch.view(np.int64))
+
+
+@torch.jit.script
+def _log_amplitudes_to_probabilities(values: Tensor) -> Tensor:
+    prob = values - torch.max(values)
+    prob *= 2
+    prob = torch.exp_(prob)
+    prob /= torch.sum(prob)
+    return prob

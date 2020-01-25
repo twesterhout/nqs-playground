@@ -34,6 +34,7 @@ import sys
 import tempfile
 import pathlib
 from typing import Optional, Tuple
+from typing_extensions import Final
 
 import numpy as np
 import torch
@@ -377,7 +378,7 @@ def combine_amplitude_and_sign(
 
 
 def combine_amplitude_and_phase(
-    *modules, apply_log: bool = False, use_jit: bool = True
+        *modules, number_spins: Optional[int], apply_log: bool = False, use_jit: bool = True
 ) -> torch.nn.Module:
     r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
     and phase into a single module representing the logarithm of the
@@ -391,18 +392,26 @@ def combine_amplitude_and_phase(
     :param use_jit: if ``True``, the returned module is a
         ``torch.jit.ScriptModule``.
     """
+    if number_spins is None:
+        number_spins = -1
 
     class CombiningState(torch.nn.Module):
-        __constants__ = ["apply_log"]
+        apply_log: Final[bool]
+        number_spins: Final[int]
 
         def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
             super().__init__()
             self.apply_log = apply_log
+            self.number_spins = number_spins
             self.amplitude = amplitude
             self.phase = phase
 
         def forward(self, x: torch.Tensor):
-            a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
+            if self.number_spins > 0:
+                x = torch.ops.tcm.unpack(x, self.number_spins)
+            a = self.amplitude(x)
+            if self.apply_log:
+                a = torch.log_(a)
             b = self.phase(x)
             return torch.cat([a, b], dim=1)
 
@@ -489,15 +498,6 @@ def combine_amplitude_and_phase(
 #             .view(np.complex64)
 #         )
 #         return np.exp(log_H_values - log_values).squeeze(axis=1)
-
-
-@torch.jit.script
-def _log_amplitudes_to_probabilities(values: torch.Tensor) -> torch.Tensor:
-    prob = values - torch.max(values)
-    prob *= 2
-    prob = torch.exp_(prob)
-    prob /= torch.sum(prob)
-    return prob
 
 
 # def make_monte_carlo_options(config, number_spins: int) -> _C._Options:
