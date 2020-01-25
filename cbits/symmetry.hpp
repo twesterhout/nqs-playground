@@ -163,11 +163,12 @@ struct TCM_IMPORT Symmetry {
         return std::complex<double>{std::cos(arg), std::sin(arg)};
     }
 
+    using PickleStateT = std::tuple<typename detail::BenesNetwork<UInt>::MasksT,
+                                    typename detail::BenesNetwork<UInt>::MasksT,
+                                    unsigned, unsigned>;
+
     // Used to implement pickle support.
-    constexpr auto _state_as_tuple() const noexcept
-        -> std::tuple<typename detail::BenesNetwork<UInt>::MasksT,
-                      typename detail::BenesNetwork<UInt>::MasksT, unsigned,
-                      unsigned>
+    constexpr auto _state_as_tuple() const noexcept -> PickleStateT
     {
         return {_permute.fwd, _permute.bwd, _sector, _periodicity};
     }

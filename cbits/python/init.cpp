@@ -27,6 +27,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "bind_heisenberg.hpp"
+#include "bind_metropolis.hpp"
 #include "bind_polynomial_state.hpp"
 #include "bind_spin_basis.hpp"
 #include "bind_symmetry.hpp"
@@ -60,6 +61,6 @@ PYBIND11_MODULE(_C, m)
     // bind_sampling(m);
     // bind_networks(m);
     // bind_dataloader(m);
-    // bind_monte_carlo(m.ptr());
+    bind_metropolis(m.ptr());
     bind_polynomial_state(m.ptr());
 }

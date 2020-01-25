@@ -4,6 +4,8 @@
 
 #include <ATen/Parallel.h>
 
+#include <omp.h>
+
 #if 0
 #    include <condition_variable>
 #    include <functional>
@@ -93,5 +95,35 @@ template <class F> auto async(F&& f)
     return future;
     // return detail::global_thread_pool().enqueue(std::forward<F>(f));
 }
+
+struct omp_task_handler {
+  private:
+    std::atomic_flag   _error_flag    = ATOMIC_FLAG_INIT;
+    std::exception_ptr _exception_ptr = nullptr;
+
+  public:
+    template <class F> auto submit(F f) -> void
+    {
+        static_assert(std::is_nothrow_copy_constructible<F>::value,
+                      TCM_STATIC_ASSERT_BUG_MESSAGE);
+#pragma omp task default(none) firstprivate(f)                                 \
+    shared(_error_flag, _exception_ptr)
+        {
+            try {
+                f();
+            }
+            catch (...) {
+                if (!_error_flag.test_and_set()) {
+                    _exception_ptr = std::current_exception();
+                }
+            }
+        }
+    }
+
+    auto check_errors() const -> void
+    {
+        if (_exception_ptr) { std::rethrow_exception(_exception_ptr); }
+    }
+};
 
 TCM_NAMESPACE_END

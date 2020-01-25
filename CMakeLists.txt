@@ -22,7 +22,6 @@ endif()
 
 include(CTest)
 include(CheckCXXCompilerFlag)
-include(ExternalProject)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     set(TCM_WARNING_FLAGS -Weverything -Wno-c++98-compat -Wno-c++98-compat-pedantic
@@ -298,7 +297,7 @@ if(TRUE)
 endif()
 
 # OpenMP
-# find_package(OpenMP REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # Taskflow
 if(NOT TARGET Taskflow)
@@ -344,6 +343,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               vectorclass
               ThreadPool
               Taskflow
+              OpenMP::OpenMP_CXX
 )
 
 set(nqs_cbits_HEADERS)
@@ -359,6 +359,7 @@ add_library(nqs SHARED
     cbits/operators.cpp
     cbits/symmetry.cpp
     cbits/spin_basis.cpp
+    cbits/parallel.cpp
     cbits/pool.cpp
     cbits/trim.cpp
 )
@@ -372,6 +373,7 @@ target_link_libraries(nqs PUBLIC nqs_cbits_Common)
 pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
     cbits/python/bind_symmetry.cpp
     cbits/python/bind_heisenberg.cpp
+    cbits/python/bind_metropolis.cpp
     cbits/python/bind_spin_basis.cpp
     cbits/python/bind_polynomial_state.cpp
     cbits/python/init.cpp
@@ -398,14 +400,17 @@ nqs_cbits_add_low_level_flags(_C)
 target_compile_definitions(_C PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
-target_link_libraries(_C PUBLIC nqs nqs_cbits_Common)
-# target_compile_options(_C_nqs PRIVATE "-fsanitize=address")
-# target_link_libraries(_C_nqs PRIVATE "-fsanitize=address")
+# We need to link against libtorch_python.so as well since _C is a Python
+# extension
+find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
+target_link_libraries(_C PUBLIC nqs nqs_cbits_Common ${TORCH_PYTHON_LIBRARY})
 
 add_subdirectory(cbits/test/headers)
 
-# set_property(TARGET _C
-#     PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
+set_property(TARGET _C
+    PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
+set_property(TARGET _C PROPERTY INSTALL_RPATH_USE_LINK_PATH TRUE)
+set_property(TARGET nqs PROPERTY INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 install(TARGETS nqs _C
         LIBRARY

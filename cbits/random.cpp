@@ -43,7 +43,7 @@ namespace {
 } // namespace
 } // namespace detail
 
-auto global_random_generator() -> RandomGenerator&
+TCM_EXPORT auto global_random_generator() -> RandomGenerator&
 {
     static thread_local RandomGenerator generator{
         detail::really_need_that_random_seed_now()};

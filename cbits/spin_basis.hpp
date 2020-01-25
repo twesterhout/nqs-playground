@@ -36,6 +36,8 @@
 #include <gsl/gsl-lite.hpp>
 
 #include <array>
+#include <optional>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -168,12 +170,15 @@ class TCM_IMPORT SpinBasis : public std::enable_shared_from_this<SpinBasis> {
     auto number_states() const -> uint64_t;
     auto index(StateT const x) const -> uint64_t;
 
-#if 0
-    constexpr auto _get_state() const noexcept
-        -> std::tuple<std::vector<Symmetry> const&, unsigned,
-                      std::optional<unsigned>,
-                      std::optional<detail::BasisCache> const&>;
-#endif
+    using PickleStateT = std::tuple<
+        std::vector<Symmetry>, unsigned, std::optional<unsigned>,
+        std::optional<std::tuple<std::vector<StateT>,
+                                 std::vector<std::pair<uint64_t, uint64_t>>>>>;
+    // This function is terribly inefficient and may run out of memory. Use at
+    // your own risk!
+    auto        _state_as_tuple() const -> PickleStateT;
+    static auto _from_tuple_state(PickleStateT const&)
+        -> std::shared_ptr<SpinBasis>;
 }; // }}}
 
 // SpinBasis IMPLEMENTATION {{{

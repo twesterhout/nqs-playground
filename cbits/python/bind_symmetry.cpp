@@ -53,9 +53,10 @@ auto bind_symmetry(PyObject* _module) -> void
              Shuffles bits of ``x`` according to the underlying permutation.)EOF"),
              py::arg{"x"})
         .def(py::pickle(
-            [](Symmetry const& self) { return self._state_as_tuple(); },
-            [](decltype(std::declval<Symmetry const&>()._state_as_tuple())
-                   const& state) {
+            [](Symmetry const& self) -> Symmetry::PickleStateT {
+                return self._state_as_tuple();
+            },
+            [](Symmetry::PickleStateT const& state) {
                 return Symmetry{{std::get<0>(state), std::get<1>(state)},
                                 std::get<2>(state),
                                 std::get<3>(state)};

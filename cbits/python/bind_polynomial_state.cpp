@@ -16,14 +16,12 @@ namespace {
 auto make_forward_function(torch::jit::script::Method method,
                            std::optional<unsigned> number_spins) -> v2::ForwardT
 {
-    if (!number_spins.has_value()) {
-        return [f = std::move(method)](auto x) mutable {
-            return f({std::move(x)}).toTensor();
-        };
-    }
-    return [f = std::move(method),
-            n = static_cast<int64_t>(*number_spins)](auto x) mutable {
-        return f({unpack(std::move(x), n)}).toTensor();
+    static_cast<void>(number_spins);
+    // auto const n =
+    //     number_spins.has_value() ? static_cast<int64_t>(*number_spins) : -1L;
+    return [f = std::move(method)](auto x) mutable {
+        // if (x.scalar_type == torch::kInt64) { x = unpack(x, n); }
+        return f({std::move(x)}).toTensor();
     };
 }
 } // namespace

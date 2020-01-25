@@ -1,7 +1,7 @@
 #include "spin_basis.hpp"
 #include "common.hpp"
 #include "parallel.hpp"
-#include <boost/pool/pool_alloc.hpp>
+// #include <boost/pool/pool_alloc.hpp>
 
 TCM_NAMESPACE_BEGIN
 
@@ -42,8 +42,9 @@ struct BasisCache {
     inline auto index(Symmetry::UInt x, unsigned number_spins) const
         -> uint64_t;
 
-    constexpr auto _get_state() const noexcept
-        -> std::tuple<StatesT const&, RangesT const&>;
+    auto _state_as_tuple() const
+        -> std::tuple<std::vector<Symmetry::UInt>,
+                      std::vector<std::pair<uint64_t, uint64_t>>>;
 };
 // }}}
 
@@ -115,7 +116,7 @@ constexpr auto get_info(Iterator first, Sentinel last, Symmetry::UInt const x)
 }
 // }}}
 
-// generate_states_parallel {{{
+// generate_states {{{
 /// Returns the closest integer to x with the specified hamming weight
 inline auto closest_hamming(uint64_t x, int const hamming_weight) noexcept
     -> uint64_t
@@ -149,10 +150,10 @@ template <bool FixedHammingWeight> struct GenerateStatesTask {
     gsl::span<Symmetry const> symmetries;
     std::vector<UInt>*        states;
 
-    GenerateStatesTask(GenerateStatesTask const&) = default;
-    GenerateStatesTask(GenerateStatesTask&&)      = default;
-    GenerateStatesTask& operator=(GenerateStatesTask const&) = default;
-    GenerateStatesTask& operator=(GenerateStatesTask&&) = default;
+    GenerateStatesTask(GenerateStatesTask const&) noexcept = default;
+    GenerateStatesTask(GenerateStatesTask&&) noexcept      = default;
+    GenerateStatesTask& operator=(GenerateStatesTask const&) noexcept = default;
+    GenerateStatesTask& operator=(GenerateStatesTask&&) noexcept = default;
 
     auto operator()() -> void
     {
@@ -198,8 +199,15 @@ template <bool FixedHammingWeight> struct GenerateStatesTask {
 };
 
 template <bool FixedHammingWeight, class Callback>
-auto split_into_tasks(Symmetry::UInt current, Symmetry::UInt const bound,
-                      unsigned const number_chunks, Callback&& callback) -> void
+auto split_into_tasks(
+    Symmetry::UInt current, Symmetry::UInt const bound,
+    unsigned const number_chunks,
+    Callback&&
+        callback) noexcept(noexcept(std::
+                                        declval<Callback&>()(
+                                            std::declval<Symmetry::UInt>(),
+                                            std::declval<Symmetry::UInt>())))
+    -> void
 {
     TCM_ASSERT(current <= bound, "invalid range");
     TCM_ASSERT(0 < number_chunks, "invalid number of chunks");
@@ -229,6 +237,7 @@ auto split_into_tasks(Symmetry::UInt current, Symmetry::UInt const bound,
     }
 }
 
+#if 0
 inline auto generate_states_parallel(
     gsl::span<Symmetry const> symmetries, unsigned const number_spins,
     std::optional<unsigned> const hamming_weight) -> BasisCache::StatesT
@@ -295,6 +304,87 @@ inline auto generate_states_parallel(
     });
     return r;
 }
+#endif
+
+inline auto generate_states(gsl::span<Symmetry const>     symmetries,
+                            unsigned const                number_spins,
+                            std::optional<unsigned> const hamming_weight)
+    -> BasisCache::StatesT
+{
+    TCM_CHECK(0 < number_spins && number_spins <= 64, std::invalid_argument,
+              fmt::format("invalid number of spins: {}; expected a "
+                          "positive integer not greater than 64.",
+                          number_spins));
+
+    auto const number_chunks =
+        20U * static_cast<unsigned>(omp_get_max_threads());
+
+    omp_task_handler task_handler;
+    // We want to make sure that references to states remain valid, so we can't
+    // use vector here.
+    std::forward_list<std::vector<Symmetry::UInt>> states;
+    if (hamming_weight.has_value()) {
+        TCM_CHECK(*hamming_weight <= number_spins, std::invalid_argument,
+                  fmt::format("invalid hamming weight: {}; expected a "
+                              "non-negative integer not greater than {}.",
+                              *hamming_weight, number_spins));
+        if (*hamming_weight == 0U) { return {uint64_t{0}}; }
+        if (*hamming_weight == 64U) { return {~uint64_t{0}}; }
+        auto const current = (~uint64_t{0}) >> (64U - *hamming_weight);
+        auto const bound   = number_spins > *hamming_weight
+                               ? (current << (number_spins - *hamming_weight))
+                               : current;
+#pragma omp parallel default(none) firstprivate(current, bound, number_chunks) \
+    shared(symmetries, states, task_handler)
+        {
+#pragma omp single nowait
+            {
+                split_into_tasks<true>(
+                    current, bound, number_chunks,
+                    [&symmetries, &states, &task_handler](auto const first,
+                                                          auto const last) {
+                        auto& chunk = states.emplace_front();
+                        chunk.reserve(1048576UL / sizeof(Symmetry::UInt));
+                        task_handler.submit(GenerateStatesTask<true>{
+                            first, last, symmetries, std::addressof(chunk)});
+                    });
+            }
+        }
+    }
+    else {
+        auto current = uint64_t{0};
+        auto bound   = number_spins == 64U
+                         ? (~uint64_t{0})
+                         : ((~uint64_t{0}) >> (64U - number_spins));
+#pragma omp parallel default(none) firstprivate(current, bound, number_chunks) \
+    shared(symmetries, states, task_handler)
+        {
+#pragma omp single nowait
+            {
+                split_into_tasks<false>(
+                    current, bound, number_chunks,
+                    [&symmetries, &states, &task_handler](auto const first,
+                                                          auto const last) {
+                        auto& chunk = states.emplace_front();
+                        chunk.reserve(1048576UL / sizeof(Symmetry::UInt));
+                        task_handler.submit(GenerateStatesTask<false>{
+                            first, last, symmetries, std::addressof(chunk)});
+                    });
+            }
+        }
+    }
+
+    task_handler.check_errors();
+    states.reverse();
+    auto r = BasisCache::StatesT{};
+    r.reserve(std::accumulate(
+        std::begin(states), std::end(states), size_t{0},
+        [](auto acc, auto const& x) { return acc + x.size(); }));
+    std::for_each(std::begin(states), std::end(states), [&r](auto& x) {
+        r.insert(std::end(r), std::begin(x), std::end(x));
+    });
+    return r;
+}
 // }}}
 
 // generate_ranges {{{
@@ -334,8 +424,8 @@ auto generate_ranges(Iterator first, Sentinel last, unsigned number_spins)
 BasisCache::BasisCache(gsl::span<Symmetry const> symmetries,
                        unsigned const            number_spins,
                        std::optional<unsigned>   hamming_weight)
-    : _states{generate_states_parallel(symmetries, number_spins,
-                                       std::move(hamming_weight))}
+    : _states{generate_states(symmetries, number_spins,
+                              std::move(hamming_weight))}
     , _ranges{
           generate_ranges<bits>(_states.cbegin(), _states.cend(), number_spins)}
 {}
@@ -370,10 +460,11 @@ auto BasisCache::index(Symmetry::UInt const x,
     return static_cast<uint64_t>(i - begin(_states));
 }
 
-constexpr auto BasisCache::_get_state() const noexcept
-    -> std::tuple<StatesT const&, RangesT const&>
+auto BasisCache::_state_as_tuple() const
+    -> std::tuple<std::vector<Symmetry::UInt>,
+                  std::vector<std::pair<uint64_t, uint64_t>>>
 {
-    return {_states, _ranges};
+    return {{_states.begin(), _states.end()}, {_ranges.begin(), _ranges.end()}};
 }
 // }}}
 
@@ -447,6 +538,28 @@ TCM_EXPORT auto SpinBasis::states() const -> gsl::span<StateT const>
               "cache must be initialised before calling `states()`; use "
               "`build()` member function to initialise the cache.");
     return _cache->states();
+}
+
+TCM_EXPORT auto SpinBasis::_state_as_tuple() const -> PickleStateT
+{
+    return {_symmetries, _number_spins, _hamming_weight,
+            _cache == nullptr ? std::nullopt
+                              : std::optional{_cache->_state_as_tuple()}};
+}
+
+TCM_EXPORT auto SpinBasis::_from_tuple_state(PickleStateT const& state)
+    -> std::shared_ptr<SpinBasis>
+{
+    auto const& [symmetries, number_spins, hamming_weight, cache] = state;
+    auto basis =
+        std::make_shared<SpinBasis>(symmetries, number_spins, hamming_weight);
+    if (cache.has_value()) {
+        auto const& [states, ranges] = *cache;
+        basis->_cache                = std::make_unique<detail::BasisCache>(
+            detail::BasisCache::StatesT{states.begin(), states.end()},
+            detail::BasisCache::RangesT{ranges.begin(), ranges.end()});
+    }
+    return basis;
 }
 
 // expand_basis {{{

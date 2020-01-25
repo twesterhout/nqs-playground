@@ -37,7 +37,7 @@ TCM_NAMESPACE_BEGIN
 
 class SpinBasis;
 
-class MetropolisKernel {
+class TCM_IMPORT MetropolisKernel {
   private:
     std::shared_ptr<SpinBasis const> _basis;
     gsl::not_null<RandomGenerator*>  _generator;

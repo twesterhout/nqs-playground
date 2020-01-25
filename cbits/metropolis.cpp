@@ -85,12 +85,14 @@ constexpr auto find_nth_set(uint64_t const v, unsigned r) noexcept -> unsigned
 
 } // namespace detail
 
+TCM_EXPORT
 MetropolisKernel::MetropolisKernel(std::shared_ptr<SpinBasis const> basis,
                                    RandomGenerator& generator) noexcept
     : _basis{std::move(basis)}, _generator{std::addressof(generator)}
 {}
 
-auto MetropolisKernel::operator()(torch::Tensor const& x, bool pin_memory) const
+TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor const& x,
+                                             bool pin_memory) const
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
     TCM_CHECK(x.dim(), std::invalid_argument,

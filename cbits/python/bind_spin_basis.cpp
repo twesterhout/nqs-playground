@@ -28,7 +28,7 @@ auto span_to_numpy(gsl::span<T> xs, py::object base) -> py::array
     using type = std::remove_const_t<T>;
     auto a     = py::array_t<type>{xs.size(), xs.data(), std::move(base)};
     if (std::is_const<T>::value) { to_const(a); }
-    return a;
+    return static_cast<py::array>(std::move(a));
 }
 
 auto bind_spin_basis(PyObject* _module) -> void
@@ -103,41 +103,11 @@ auto bind_spin_basis(PyObject* _module) -> void
              the representative of ``x``, ``N`` is the "norm" of ``r``, and λ is
              the eigenvalue of a group element ``g`` such that ``gr == x``.
              )EOF"))
-#if 0
+#if 1
         .def(py::pickle(
-            [](py::object _self) {
-                auto const& self = _self.cast<SpinBasis const&>();
-                auto const& [symmetries, number_spins, hamming_weight, cache] =
-                    self._get_state();
-                auto cache_state = py::none();
-                if (cache.has_value()) {
-                    auto const& [states, ranges] = cache->_get_state();
-                    cache_state =
-                        py::make_tuple(states_to_numpy(states, _self),
-                                       ranges_to_numpy(ranges, _self));
-                }
-                return py::make_tuple(symmetries, number_spins, hamming_weight,
-                                      cache_state);
-            },
-            [](py::tuple state) {
-                TCM_CHECK(state.size() == 4, std::runtime_error,
-                          fmt::format("state has wrong length: {}; expected a "
-                                      "state of length 4",
-                                      state.size()));
-                auto symmetries     = state[0].cast<std::vector<Symmetry>>();
-                auto number_spins   = state[1].cast<unsigned>();
-                auto hamming_weight = state[2].cast<std::optional<unsigned>>();
-                using ::TCM_NAMESPACE::detail::BasisCache;
-                auto cache = std::optional<BasisCache>{std::nullopt};
-                if (!state[3].is_none()) {
-                    auto cache_state = py::tuple{state[3]};
-                    auto states = states_from_numpy(py::array{cache_state[0]});
-                    auto ranges = ranges_from_numpy(py::array{cache_state[1]});
-                    cache.emplace(std::move(states), std::move(ranges));
-                }
-                return std::make_shared<SpinBasis>(
-                    std::move(symmetries), number_spins,
-                    std::move(hamming_weight), std::move(cache));
+            [](SpinBasis const& self) { return self._state_as_tuple(); },
+            [](SpinBasis::PickleStateT const& state) {
+                return SpinBasis::_from_tuple_state(state);
             }))
 #endif
         .def("expand", [](SpinBasis const& self, torch::Tensor src,
