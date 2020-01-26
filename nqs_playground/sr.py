@@ -127,7 +127,12 @@ def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
                     create_graph=False,
                     allow_unused=True,
                 )
-                torch.cat([dw.view([-1]) for dw in dws], out=out[i])
+                offset = 0
+                for dw in dws:
+                    if dw is not None:
+                        out[i, offset:offset + dw.numel()] = dw.view([-1])
+                        offset += dw.numel()
+                # torch.cat([dw.view([-1]) for dw in dws], out=out[i])
             return out
 
     @torch.jit.script
