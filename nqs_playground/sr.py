@@ -230,14 +230,25 @@ class LogarithmicDerivatives:
             gradient *= scale
             return gradient.squeeze()
 
+
     def solve(self, gradient: Tensor, scale_inv_reg=1e-3, diag_reg=None, weights=None) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O
         - ⟨O⟩)⟩⁻¹⟨H⟩``.
         """
+
+        def remove_singularity(S):
+            for i in range(S.size(0)):
+                if S[i, i] < 1e-4:
+                    S[i, :] = 0.0
+                    S[:, i] = 0.0
+                    S[i, i] = 1.0
+            return S
+
         if weights is not None:
             raise NotImplementedError()
 
         def solve_part(matrix, vector):
+            matrix = remove_singularity(matrix)
             scale = 1.0 / self.real.size(0)
             matrix *= scale
             if scale_inv_reg is not None:
