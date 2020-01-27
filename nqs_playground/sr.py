@@ -230,7 +230,7 @@ class LogarithmicDerivatives:
             gradient *= scale
             return gradient.squeeze()
 
-    def solve(self, gradient: Tensor, diag_reg=5e-3, weights=None) -> Tensor:
+    def solve(self, gradient: Tensor, scale_inv_reg=1e-3, diag_reg=None, weights=None) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O
         - ⟨O⟩)⟩⁻¹⟨H⟩``.
         """
@@ -240,6 +240,16 @@ class LogarithmicDerivatives:
         def solve_part(matrix, vector):
             scale = 1.0 / self.real.size(0)
             matrix *= scale
+
+            if scale_inv_reg is not None:
+                diag = torch.sqrt(torch.abs(torch.diag(matrix)))  # diag = sqrt(diag(|S_cov|))
+                vector_pc = vector / diag
+                matrix_pc = torch.einsum('i,ij,j->ij', 1.0 / diag, matrix, 1.0 / diag)  # S[m, n] -> S[m, n] / sqrt(diag[m] * diag[n])
+                matrix_pc += scale_inv_reg * torch.eye(matrix_pc.size(0))
+                x = torch.cholesky_solve(vector_pc.view([-1, 1]), torch.cholesky(matrix_pc))
+                x = x / diag
+                return x.squeeze()
+
             if diag_reg is not None:
                 matrix.diagonal()[:] += diag_reg
             # x, _ = torch.solve(vector.view([-1, 1]), matrix)
