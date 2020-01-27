@@ -230,16 +230,36 @@ class LogarithmicDerivatives:
             gradient *= scale
             return gradient.squeeze()
 
-    def solve(self, gradient: Tensor, diag_reg=5e-3, weights=None) -> Tensor:
+
+    def solve(self, gradient: Tensor, scale_inv_reg=1e-3, diag_reg=None, weights=None) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O
         - ⟨O⟩)⟩⁻¹⟨H⟩``.
         """
+
+        def remove_singularity(S):
+            for i in range(S.size(0)):
+                if S[i, i] < 1e-4:
+                    S[i, :] = 0.0
+                    S[:, i] = 0.0
+                    S[i, i] = 1.0
+            return S
+
         if weights is not None:
             raise NotImplementedError()
 
         def solve_part(matrix, vector):
+            matrix = remove_singularity(matrix)
             scale = 1.0 / self.real.size(0)
             matrix *= scale
+            if scale_inv_reg is not None:
+                diag = torch.sqrt(torch.abs(torch.diag(matrix)))  # diag = sqrt(diag(|S_cov|))
+                vector_pc = vector / diag  # vector_pc = vector / diag
+                matrix_pc = torch.einsum('i,ij,j->ij', 1.0 / diag, matrix, 1.0 / diag)  # S_pc[m, n] -> S[m, n] / sqrt(diag[m] * diag[n])
+                matrix_pc += scale_inv_reg * torch.eye(matrix_pc.size(0))  #S_pc += diag * 1e-3
+                x = torch.cholesky_solve(vector_pc.view([-1, 1]), torch.cholesky(matrix_pc)).squeeze()  # matrix_pc^{-1} x vector_pc
+                x = x / diag  # x = matrix_pc^{-1} x vector_pc / diag
+                return x
+
             if diag_reg is not None:
                 matrix.diagonal()[:] += diag_reg
             # x, _ = torch.solve(vector.view([-1, 1]), matrix)
@@ -254,7 +274,6 @@ class LogarithmicDerivatives:
                     solve_part(torch.mm(self.imag.t(), self.imag), gradient[middle:]),
                 ]
             )
-
 
 class Runner:
     def __init__(self, config):
