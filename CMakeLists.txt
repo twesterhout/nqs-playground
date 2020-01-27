@@ -60,7 +60,7 @@ endif()
 # target_compile_options()
 
 # Torch
-if(FALSE)
+if(TRUE)
     # This requires at least CMake 3.12
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 

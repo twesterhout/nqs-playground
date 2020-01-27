@@ -31,8 +31,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from typing import List, Optional, Tuple
 import pathlib
+from typing import List, Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor

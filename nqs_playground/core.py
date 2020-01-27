@@ -34,10 +34,16 @@ import sys
 import tempfile
 import pathlib
 from typing import Optional, Tuple
-from typing_extensions import Final
 
 import numpy as np
 import torch
+
+try:
+    from typing_extensions import Final
+except ImportError:
+    # If you don't have `typing_extensions` installed, you can use a
+    # polyfill from `torch.jit`.
+    from torch.jit import Final
 
 from . import _C
 

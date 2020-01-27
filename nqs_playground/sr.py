@@ -36,7 +36,13 @@ import json
 import math
 import os
 import pickle
-from psutil import cpu_count
+
+# The version from psutil is nicer
+try:
+    from psutil import cpu_count
+except ImportError:
+    from os import cpu_count
+
 import time
 from typing import Dict, List, Tuple, Optional, Union
 
