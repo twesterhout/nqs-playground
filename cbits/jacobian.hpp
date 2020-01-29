@@ -26,43 +26,14 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "bind_heisenberg.hpp"
-#include "bind_jacobian.hpp"
-#include "bind_metropolis.hpp"
-#include "bind_polynomial_state.hpp"
-#include "bind_spin_basis.hpp"
-#include "bind_symmetry.hpp"
-#include <pybind11/pybind11.h>
+#pragma once
 
-namespace py = pybind11;
+#include "config.hpp"
+#include <torch/script.h>
 
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wmissing-prototypes"
-#endif
-PYBIND11_MODULE(_C, m)
-{
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic pop
-#endif
+TCM_NAMESPACE_BEGIN
 
-    m.doc() = R"EOF()EOF";
+TCM_IMPORT auto jacobian(torch::jit::script::Module fn, torch::Tensor in,
+                         std::optional<torch::Tensor> out) -> torch::Tensor;
 
-    using namespace TCM_NAMESPACE;
-
-    // bind_spin(m.ptr());
-    bind_symmetry(m.ptr());
-    bind_spin_basis(m.ptr());
-    bind_heisenberg(m.ptr());
-    bind_jacobian(m.ptr());
-    // bind_heisenberg(m);
-    // bind_explicit_state(m);
-    // bind_polynomial(m);
-    // bind_options(m);
-    // bind_chain_result(m);
-    // bind_sampling(m);
-    // bind_networks(m);
-    // bind_dataloader(m);
-    bind_metropolis(m.ptr());
-    bind_polynomial_state(m.ptr());
-}
+TCM_NAMESPACE_END

@@ -99,10 +99,19 @@ print(';'.join(include_paths(cuda=False)))" _TEMP)
 print(int(torch._C._GLIBCXX_USE_CXX11_ABI))" _TEMP)
     # Same here
     get_last_line("${_TEMP}" TCM_USE_CXX11_ABI)
+
+    run_python_command("import torch; \
+a, b, c, = map(int, torch.__version__.split('.')); \
+print(1000 * (1000 * c + b) + a)" _TEMP)
+    get_last_line("${_TEMP}" _TORCH_VERSION)
+
+
+    message(STATUS "Torch version: ${_TORCH_VERSION}")
     message(STATUS "Torch include directories: ${_TORCH_INCLUDE_DIRS}")
     message(STATUS "[nqs_cbits] using C++11 abi: ${TCM_USE_CXX11_ABI}")
     target_include_directories(Torch SYSTEM INTERFACE ${_TORCH_INCLUDE_DIRS})
     target_compile_definitions(Torch INTERFACE
+        TCM_TORCH_VERSION=${_TORCH_VERSION}
         _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
     # Because PyTorch adds torch/include/THC, but it's not available on cpuonly
     # PyTorch installations
@@ -352,6 +361,7 @@ set(nqs_cbits_HEADERS)
 add_library(nqs SHARED
     cbits/errors.cpp
     cbits/metropolis.cpp
+    cbits/jacobian.cpp
     cbits/heisenberg.cpp
     cbits/forward_propagator.cpp
     cbits/polynomial_state.cpp
@@ -376,6 +386,7 @@ pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
     cbits/python/bind_metropolis.cpp
     cbits/python/bind_spin_basis.cpp
     cbits/python/bind_polynomial_state.cpp
+    cbits/python/bind_jacobian.cpp
     cbits/python/init.cpp
 )
 # pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
@@ -402,8 +413,9 @@ target_compile_definitions(_C PUBLIC
     TORCH_EXTENSION_NAME="_C")
 # We need to link against libtorch_python.so as well since _C is a Python
 # extension
-find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
-target_link_libraries(_C PUBLIC nqs nqs_cbits_Common ${TORCH_PYTHON_LIBRARY})
+# find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
+# target_link_libraries(_C PUBLIC nqs nqs_cbits_Common ${TORCH_PYTHON_LIBRARY})
+target_link_libraries(_C PUBLIC nqs)
 
 add_subdirectory(cbits/test/headers)
 
