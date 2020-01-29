@@ -10,7 +10,7 @@ cmake_policy(SET CMP0048 NEW)
 project(nqs_cbits
     VERSION 0.0.1
     DESCRIPTION "_C Python extension for nqs-playground"
-    LANGUAGES C CXX)
+    LANGUAGES C CXX CUDA)
 
 # C++17 without extensions
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -18,6 +18,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
+endif()
+
+# C++17 in CUDA
+if(CMAKE_CUDA_COMPILER)
+    if(NOT DEFINED CMAKE_CUDA_STANDARD)
+        set(CMAKE_CUDA_STANDARD 11)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    endif()
 endif()
 
 include(CTest)
@@ -102,7 +110,7 @@ print(int(torch._C._GLIBCXX_USE_CXX11_ABI))" _TEMP)
 
     run_python_command("import torch; \
 a, b, c, = map(int, torch.__version__.split('.')); \
-print(1000 * (1000 * c + b) + a)" _TEMP)
+print(1000 * (1000 * a + b) + c)" _TEMP)
     get_last_line("${_TEMP}" _TORCH_VERSION)
 
 
@@ -115,7 +123,7 @@ print(1000 * (1000 * c + b) + a)" _TEMP)
         _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
     # Because PyTorch adds torch/include/THC, but it's not available on cpuonly
     # PyTorch installations
-    target_compile_options(Torch INTERFACE -Wno-missing-include-dirs)
+    # target_compile_options(Torch INTERFACE -Wno-missing-include-dirs)
     add_library(torch ALIAS Torch)
 
 else()
@@ -139,10 +147,10 @@ endfunction()
 
 add_library(nqs_cbits_Common INTERFACE)
 # TODO: The following is rather unportable and should be fixed...
-target_compile_options(nqs_cbits_Common
-    INTERFACE -mmmx
-              -msse -msse2 -msse3 -msse4.1 -msse4.2
-              -mavx -march=ivybridge -mtune=native)
+# target_compile_options(nqs_cbits_Common
+#     INTERFACE -mmmx
+#               -msse -msse2 -msse3 -msse4.1 -msse4.2
+#               -mavx -march=ivybridge -mtune=native)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
 endif()
@@ -349,13 +357,39 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               ska_sort
               Boost::boost
               SG14
-              vectorclass
               ThreadPool
               Taskflow
               OpenMP::OpenMP_CXX
 )
 
 set(nqs_cbits_HEADERS)
+
+if(CMAKE_CUDA_COMPILER)
+    add_library(nqs_gpu STATIC
+        cbits/config.hpp
+        cbits/gpu/unpack.hpp
+        cbits/gpu/unpack.cu)
+    target_compile_definitions(nqs_gpu PUBLIC
+        _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+    set_property(TARGET nqs_gpu
+        PROPERTY POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(nqs_gpu PUBLIC Boost::boost torch)
+endif()
+
+
+add_library(nqs_cpu STATIC
+    cbits/cpu/unpack.hpp
+    cbits/cpu/unpack.cpp)
+target_compile_definitions(nqs_cpu PUBLIC
+    _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+set_property(TARGET nqs_cpu
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost vectorclass)
+target_compile_options(nqs_cpu
+    PRIVATE -mmmx
+            -msse -msse2 -msse3 -msse4.1 -msse4.2
+            -mavx -march=ivybridge -mtune=native)
+
 
 
 add_library(nqs SHARED
@@ -366,7 +400,8 @@ add_library(nqs SHARED
     cbits/forward_propagator.cpp
     cbits/polynomial_state.cpp
     cbits/random.cpp
-    cbits/operators.cpp
+    cbits/unpack.cpp
+    # cbits/operators.cpp
     cbits/symmetry.cpp
     cbits/spin_basis.cpp
     cbits/parallel.cpp
@@ -375,9 +410,10 @@ add_library(nqs SHARED
 )
 nqs_cbits_add_low_level_flags(nqs)
 target_compile_definitions(nqs PUBLIC
+    TCM_USE_CUDA=1
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
-target_link_libraries(nqs PUBLIC nqs_cbits_Common)
+target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu nqs_gpu)
 
 
 pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
@@ -387,6 +423,7 @@ pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
     cbits/python/bind_spin_basis.cpp
     cbits/python/bind_polynomial_state.cpp
     cbits/python/bind_jacobian.cpp
+    cbits/python/bind_cuda.cpp
     cbits/python/init.cpp
 )
 # pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS

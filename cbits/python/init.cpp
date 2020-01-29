@@ -32,6 +32,7 @@
 #include "bind_polynomial_state.hpp"
 #include "bind_spin_basis.hpp"
 #include "bind_symmetry.hpp"
+#include "bind_cuda.hpp"
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;
@@ -65,4 +66,5 @@ PYBIND11_MODULE(_C, m)
     // bind_dataloader(m);
     bind_metropolis(m.ptr());
     bind_polynomial_state(m.ptr());
+    bind_cuda(m.ptr());
 }
