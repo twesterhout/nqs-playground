@@ -10,22 +10,27 @@ cmake_policy(SET CMP0048 NEW)
 project(nqs_cbits
     VERSION 0.0.1
     DESCRIPTION "_C Python extension for nqs-playground"
-    LANGUAGES C CXX CUDA)
+    LANGUAGES C CXX)
 
-# C++17 without extensions
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# C++17 without extensions
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 
-# C++17 in CUDA
+# Determine if we have nvcc
+include(CheckLanguage)
+check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
     if(NOT DEFINED CMAKE_CUDA_STANDARD)
         set(CMAKE_CUDA_STANDARD 11)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     endif()
+else()
+    message(WARNING "[nqs_cbits] Compiling without CUDA support")
 endif()
 
 include(CTest)
@@ -127,7 +132,8 @@ print(1000 * (1000 * a + b) + c)" _TEMP)
     add_library(torch ALIAS Torch)
 
 else()
-
+    # This doesn't work properly, because PyTorch is hardcoding some paths in
+    # Caffe2Config.cmake
     find_package(Torch REQUIRED)
 endif()
 
@@ -211,13 +217,13 @@ if(NOT TARGET flat_hash_map)
 endif()
 
 # ska_sort library
-if(NOT TARGET ska_sort)
-    execute_process(COMMAND git submodule update --init -- external/ska_sort
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    add_library(ska_sort INTERFACE)
-    target_include_directories(ska_sort
-        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/ska_sort)
-endif()
+# if(NOT TARGET ska_sort)
+#     execute_process(COMMAND git submodule update --init -- external/ska_sort
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+#     add_library(ska_sort INTERFACE)
+#     target_include_directories(ska_sort
+#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/ska_sort)
+# endif()
 
 if(NOT TARGET vectorclass)
     execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
@@ -354,7 +360,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               fmt::fmt
               gsl::gsl-lite
               flat_hash_map
-              ska_sort
+              # ska_sort
               Boost::boost
               SG14
               ThreadPool
@@ -364,34 +370,50 @@ target_link_libraries(nqs_cbits_Common INTERFACE
 
 set(nqs_cbits_HEADERS)
 
+###############################################################################
+# Library of CUDA specific kernels
+###############################################################################
 if(CMAKE_CUDA_COMPILER)
     add_library(nqs_gpu STATIC
-        cbits/config.hpp
         cbits/gpu/unpack.hpp
         cbits/gpu/unpack.cu)
     target_compile_definitions(nqs_gpu PUBLIC
         _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+    target_compile_options(nqs_gpu PRIVATE ${TCM_WARNING_FLAGS})
     set_property(TARGET nqs_gpu
         PROPERTY POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(nqs_gpu PUBLIC Boost::boost torch)
 endif()
 
 
+###############################################################################
+# Library of CPU specific kernels
+###############################################################################
 add_library(nqs_cpu STATIC
     cbits/cpu/unpack.hpp
     cbits/cpu/unpack.cpp)
 target_compile_definitions(nqs_cpu PUBLIC
     _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
-set_property(TARGET nqs_cpu
-    PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost vectorclass)
-target_compile_options(nqs_cpu
-    PRIVATE -mmmx
-            -msse -msse2 -msse3 -msse4.1 -msse4.2
-            -mavx -march=ivybridge -mtune=native)
+target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
+set_property(TARGET nqs_cpu PROPERTY POSITION_INDEPENDENT_CODE ON)
+# Efficient AVX implementation
+add_library(nqs_cpu_avx STATIC
+    cbits/cpu/unpack.hpp
+    cbits/cpu/unpack_avx.cpp)
+target_compile_definitions(nqs_cpu_avx PUBLIC
+    _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
+set_property(TARGET nqs_cpu_avx PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost vectorclass)
+target_compile_options(nqs_cpu_avx PRIVATE
+    -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
+# And use it
+target_link_libraries(nqs_cpu PRIVATE nqs_cpu_avx)
 
 
-
+###############################################################################
+# General Python independent code
+###############################################################################
 add_library(nqs SHARED
     cbits/errors.cpp
     cbits/metropolis.cpp
@@ -410,10 +432,13 @@ add_library(nqs SHARED
 )
 nqs_cbits_add_low_level_flags(nqs)
 target_compile_definitions(nqs PUBLIC
-    TCM_USE_CUDA=1
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
-target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu nqs_gpu)
+target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu)
+if(CMAKE_CUDA_COMPILER)
+    target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
+    target_link_libraries(nqs PUBLIC nqs_gpu)
+endif()
 
 
 pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS

@@ -106,9 +106,8 @@ TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor const& x,
     auto       y = torch::empty(
         {n},
         torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
-    auto norm = torch::empty({n}, torch::TensorOptions{}
-                                      .dtype(torch::kFloat32)
-                                      .pinned_memory(pin_memory));
+    auto norm =
+        torch::empty({n}, torch::TensorOptions{}.dtype(torch::kFloat32));
     kernel_cpu(
         static_cast<size_t>(n), reinterpret_cast<uint64_t const*>(x.data_ptr()),
         reinterpret_cast<uint64_t*>(y.data_ptr()), norm.data_ptr<float>());
