@@ -91,26 +91,30 @@ MetropolisKernel::MetropolisKernel(std::shared_ptr<SpinBasis const> basis,
     : _basis{std::move(basis)}, _generator{std::addressof(generator)}
 {}
 
-TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor const& x,
-                                             bool pin_memory) const
+TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor x) const
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
-    TCM_CHECK(x.dim(), std::invalid_argument,
+    TCM_CHECK(x.dim() == 1, std::invalid_argument,
               fmt::format("x has wrong number of dimensions: {}; expected "
                           "a one-dimensional tensor",
                           x.dim()));
+    TCM_CHECK_TYPE("x", x, torch::kInt64);
     TCM_CHECK_CONTIGUOUS("x", x);
-    TCM_CHECK(x.device().type() == torch::DeviceType::CPU,
-              std::invalid_argument, fmt::format("x must reside on the CPU"));
+	auto pin_memory = false;
+	auto const device = x.device();
     auto const n = x.numel();
-    auto       y = torch::empty(
-        {n},
-        torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
-    auto norm =
-        torch::empty({n}, torch::TensorOptions{}.dtype(torch::kFloat32));
+	if (device.type() != torch::DeviceType::CPU) { pin_memory = true; x = x.cpu(); }
+    auto y = torch::empty({n},
+		torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
+    auto norm = torch::empty({n},
+		torch::TensorOptions{}.dtype(torch::kFloat32).pinned_memory(pin_memory));
     kernel_cpu(
         static_cast<size_t>(n), reinterpret_cast<uint64_t const*>(x.data_ptr()),
         reinterpret_cast<uint64_t*>(y.data_ptr()), norm.data_ptr<float>());
+	if (device.type() != torch::DeviceType::CPU) {
+		y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
+		norm = norm.to(norm.options().device(device), /*non_blocking=*/pin_memory);
+	}
     return {std::move(y), std::move(norm)};
 }
 

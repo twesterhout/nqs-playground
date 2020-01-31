@@ -3,6 +3,7 @@
 #include "../trim.hpp"
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <torch/script.h>
 
@@ -25,6 +26,7 @@ auto bind_jacobian(PyObject* _module) -> void
           :param out: Output tensor where the Jacobian is stored.)EOF"),
           py::arg{"module"}.noconvert(), py::arg{"inputs"}.noconvert(),
           py::arg{"out"}.noconvert() = py::none(),
+		  py::arg{"num_threads"}.noconvert() = 1,
           // NOTE: releasing GIL here is important, see
           //     https://github.com/pytorch/pytorch/issues/32045
           py::call_guard<py::gil_scoped_release>());

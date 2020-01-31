@@ -52,7 +52,7 @@ class TCM_IMPORT MetropolisKernel {
     MetropolisKernel& operator=(MetropolisKernel const&) = default;
     MetropolisKernel& operator=(MetropolisKernel&&) noexcept = default;
 
-    auto operator()(torch::Tensor const& x) const
+    auto operator()(torch::Tensor x) const
         -> std::tuple<torch::Tensor, torch::Tensor>;
 
     auto basis() const noexcept -> std::shared_ptr<SpinBasis const>

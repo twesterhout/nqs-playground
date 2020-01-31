@@ -33,7 +33,7 @@
 
 TCM_NAMESPACE_BEGIN
 
-TCM_IMPORT auto jacobian(torch::jit::script::Module fn, torch::Tensor in,
-                         std::optional<torch::Tensor> out) -> torch::Tensor;
+TCM_IMPORT auto jacobian(torch::jit::script::Module const& fn, torch::Tensor in,
+                         std::optional<torch::Tensor> out, int num_threads = 1) -> torch::Tensor;
 
 TCM_NAMESPACE_END

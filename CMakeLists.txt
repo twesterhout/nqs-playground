@@ -160,7 +160,7 @@ add_library(nqs_cbits_Common INTERFACE)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
 endif()
-target_compile_options(nqs_cbits_Common INTERFACE ${TCM_WARNING_FLAGS})
+# target_compile_options(nqs_cbits_Common INTERFACE ${TCM_WARNING_FLAGS})
 # target_include_directories(nqs_cbits_Common SYSTEM INTERFACE $ENV{CONDA_PREFIX}/include)
 
 # {fmt} library
@@ -379,7 +379,9 @@ if(CMAKE_CUDA_COMPILER)
         cbits/gpu/unpack.cu)
     target_compile_definitions(nqs_gpu PUBLIC
         _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
-    target_compile_options(nqs_gpu PRIVATE ${TCM_WARNING_FLAGS})
+    # TODO: Fix warnings
+    target_compile_options(nqs_gpu PRIVATE
+    	--compiler-options "-W -Wall -Wextra")
     set_property(TARGET nqs_gpu
         PROPERTY POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(nqs_gpu PUBLIC Boost::boost torch)

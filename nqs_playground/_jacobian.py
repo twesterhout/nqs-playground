@@ -1,0 +1,86 @@
+from typing import List, Optional
+
+import torch
+from torch import Tensor
+
+if torch.has_cuda:
+    import threading
+    from torch.nn.parallel.scatter_gather import scatter, gather
+    from torch.nn.parallel.replicate import replicate
+    from torch.cuda._utils import _get_device_index
+    from torch._utils import ExceptionWrapper
+
+from ._C import _jacobian
+
+
+def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
+    r"""Given a ``torch.nn.Module`` and a ``torch.Tensor`` of inputs, computes
+    the Jacobian ∂module(inputs)/∂W where W are module's parameters.
+
+    It is assumed that if ``inputs`` has shape ``(batch_size, in_features)``,
+    then ``module(inputs)`` has shape ``(batch_size, 1)``.
+    """
+    if inputs.device.type == "cuda":
+        return jacobian_cuda(module, inputs)
+    elif inputs.device.type == "cuda":
+        return jacobian_cpu(module, inputs)
+    else:
+        raise ValueError(
+            "inputs resides on an unsupported device: {}; expected either "
+            "'cpu' or 'cuda'".format(inputs.device.type)
+        )
+
+def jacobian_simple(module: torch.nn.Module, inputs: Tensor) -> Tensor:
+    r"""Trivial implementation of ``jacobian``. It is used to assess
+    correctness of fancier techniques.
+    """
+    parameters = list(module.parameters())
+    out = inputs.new_empty([inputs.size(0), sum(map(torch.numel, parameters))],
+        dtype=parameters[0].dtype)
+    for i in range(inputs.size(0)):
+        dws = torch.autograd.grad([module(inputs[[i]])], parameters)
+        torch.cat([dw.flatten() for dw in dws], out=out[i])
+    return out
+
+def jacobian_cpu(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
+    r"""Jacobian computation on CPU."""
+    return _jacobian(module._c, inputs, num_threads=-1)
+
+def jacobian_cuda(module: torch.jit.ScriptModule, inputs: Tensor,
+                  devices: Optional[List[torch.device]] = None,
+                  parallel: Optional[bool] = True) -> Tensor:
+    r"""Jacobian computation on (multiple) GPUs."""
+    if not parallel:
+        return _jacobian(module._c, inputs)
+    if devices is None:
+        device_ids = list(range(torch.cuda.device_count()))
+    else:
+        device_ids = list(map(lambda x: _get_device_index(x, True), devices))
+
+    output_device = inputs.device
+    inputs = scatter(inputs, device_ids, dim=0)
+    replicas = replicate(module, device_ids, detach=False)
+    outputs = _parallel_apply_jacobian(replicas, inputs)
+    return gather(outputs, output_device, dim=0)
+
+def _parallel_apply_jacobian(replicas: List[torch.jit.ScriptModule], inputs: List[Tensor]) -> List[Tensor]:
+    results = [None] * len(inputs)
+
+    def _worker(i, module, x):
+        try:
+            results[i] = _jacobian(module._c, x)
+        except Exception:
+            results[i] = ExceptionWrapper(
+                where="in replica {} on device {}".format(i, x.device))
+    
+    threads = [threading.Thread(target=_worker, args=(i, m, x))
+               for i, (m, x) in enumerate(zip(replicas, inputs))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    for result in results:
+        if isinstance(result, ExceptionWrapper):
+            result.reraise()
+    return results

@@ -30,11 +30,9 @@ TCM_EXPORT auto unpack(torch::Tensor spins, int64_t const number_spins)
         std::initializer_list<int64_t>{shape[0], number_spins},
         torch::TensorOptions{}.device(device).dtype(torch::kFloat32));
     switch (device.type()) {
-    case c10::DeviceType::CPU: cpu::unpack_cpu(spins, number_spins, out); break;
+    case c10::DeviceType::CPU: cpu::unpack_cpu(spins, out); break;
 #if defined(TCM_USE_CUDA)
-    case c10::DeviceType::CUDA:
-        gpu::unpack_cuda(spins, number_spins, out);
-        break;
+    case c10::DeviceType::CUDA: gpu::unpack_cuda(spins, out); break;
 #endif
     default: {
 #if defined(TCM_USE_CUDA)

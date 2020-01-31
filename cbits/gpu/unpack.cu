@@ -38,8 +38,7 @@ namespace detail {
     }
 } // namespace detail
 
-auto unpack_cuda(torch::Tensor spins, int64_t const number_spins,
-                 torch::Tensor out) -> void
+auto unpack_cuda(torch::Tensor spins, torch::Tensor out) -> void
 {
     // clang-format off
     cudaSetDevice(spins.get_device());
