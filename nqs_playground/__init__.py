@@ -7,6 +7,7 @@ from ._C import SpinBasis
 from .symmetry import *
 from .hamiltonian import *
 from .monte_carlo import *
+from ._jacobian import *
 
 # This operator becomes available only after loading _C
 unpack = __torch.ops.tcm.unpack
