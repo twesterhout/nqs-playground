@@ -50,11 +50,12 @@ TCM_EXPORT auto unpack_cpu(torch::Tensor spins, torch::Tensor out) -> void
 {
     TCM_CHECK_CONTIGUOUS("spins", spins);
     TCM_CHECK_CONTIGUOUS("out", out);
+	auto const number_spins = out.size(1);
     if (caffe2::GetCpuId().avx()) {
-        unpack_cpu_avx(std::move(spins), out.size(1), std::move(out));
+        unpack_cpu_avx(std::move(spins), number_spins, std::move(out));
     }
     else {
-        unpack_cpu_generic(std::move(spins), out.size(1), std::move(out));
+        unpack_cpu_generic(std::move(spins), number_spins, std::move(out));
     }
 }
 

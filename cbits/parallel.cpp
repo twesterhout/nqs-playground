@@ -8,8 +8,8 @@ auto global_executor() noexcept -> tf::Executor&
     return executor;
 }
 
-#if 0
-ThreadPool::ThreadPool()
+#if 1
+TCM_EXPORT ThreadPool::ThreadPool()
     : worker{}, tasks{}, queue_mutex{}, condition{}, stop{false}
 {
     worker = std::thread{[this] {
@@ -29,7 +29,7 @@ ThreadPool::ThreadPool()
     }};
 }
 
-ThreadPool::~ThreadPool()
+TCM_EXPORT ThreadPool::~ThreadPool()
 {
     {
         std::unique_lock<std::mutex> lock(queue_mutex);
@@ -40,7 +40,7 @@ ThreadPool::~ThreadPool()
 }
 
 namespace detail {
-auto global_thread_pool() noexcept -> ThreadPool&
+TCM_EXPORT auto global_thread_pool() noexcept -> ThreadPool&
 {
     static ThreadPool pool{};
     return pool;

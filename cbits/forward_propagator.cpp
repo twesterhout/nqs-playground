@@ -5,25 +5,31 @@ TCM_NAMESPACE_BEGIN
 
 namespace detail {
 
-TaskBuilder::TaskBuilder(v2::ForwardT psi, uint64_t batch_size)
+TaskBuilder::TaskBuilder(v2::ForwardT psi, uint64_t batch_size, c10::Device const device)
     : _i{0}, _spins_ptr{nullptr}, _coeffs_ptr{nullptr}, _batch_size{batch_size}
+	// Fill task with random junk. It will be properly initialised in prepare()
+	, _next_task{{}, {}, {}, {}, {c10::DeviceType::CPU}, {}}
 {
     TCM_CHECK(batch_size > 0, std::invalid_argument,
               fmt::format("invalid batch_size: {}; expected a positive integer",
                           batch_size));
-    prepare(std::move(psi));
+    prepare(std::move(psi), device);
 }
 
-auto TaskBuilder::prepare(v2::ForwardT fn) -> void
+auto TaskBuilder::prepare(v2::ForwardT fn, c10::Device const device) -> void
 {
+	auto const common_options = torch::TensorOptions{}
+			.device(c10::DeviceType::CPU)
+			.pinned_memory(device.type() == c10::DeviceType::CUDA);
     auto spins  = torch::empty({static_cast<int64_t>(_batch_size), 1L},
-                              torch::TensorOptions{}.dtype(torch::kInt64));
+    	common_options.dtype(torch::kInt64));
     auto coeffs = torch::empty({static_cast<int64_t>(_batch_size), 2L},
-                               torch::TensorOptions{}.dtype(torch::kFloat32));
+        common_options.dtype(torch::kFloat32));
     _next_task  = Task{
         /*psi=*/std::move(fn), /*spins=*/std::move(spins),
         /*coeffs=*/std::move(coeffs),
         /*counts=*/std::vector<uint64_t>{std::initializer_list<uint64_t>{0UL}},
+		/*device=*/device,
         /*complete=*/true};
     _i         = 0;
     _spins_ptr = static_cast<uint64_t*>(_next_task.spins.data_ptr());
@@ -49,7 +55,13 @@ auto TaskBuilder::submit(bool prepare_next) -> Task
 {
     TCM_ASSERT(full(), "buffer is not full yet");
     auto task = std::move(_next_task);
-    if (prepare_next) { prepare(task.psi); }
+	task.spins = task.spins.to(
+		task.spins.options().device(task.device),
+		/*non_blocking=*/true, /*copy=*/false);
+	task.coeffs = task.coeffs.to(
+		task.coeffs.options().device(task.device),
+		/*non_blocking=*/true, /*copy=*/false);
+    if (prepare_next) { prepare(task.psi, task.device); }
     return task;
 }
 
@@ -132,8 +144,8 @@ auto TaskBuilder::Task::operator()() const
 }
 
 Accumulator::Accumulator(v2::ForwardT psi, gsl::span<std::complex<float>> out,
-                         unsigned batch_size)
-    : _builder{std::move(psi), batch_size}, _store{out}, _state{}, _futures{}
+                         unsigned batch_size, c10::Device device)
+    : _builder{std::move(psi), batch_size, device}, _store{out}, _state{}, _futures{}
 {}
 
 auto Accumulator::reset(gsl::span<std::complex<float>> out) -> void

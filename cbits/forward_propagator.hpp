@@ -49,6 +49,7 @@ struct TaskBuilder {
         torch::Tensor         spins;
         torch::Tensor         coeffs;
         std::vector<uint64_t> counts;
+		c10::Device           device;
         bool                  complete;
 
         auto operator()() const
@@ -60,12 +61,12 @@ struct TaskBuilder {
     uint64_t*            _spins_ptr;
     std::complex<float>* _coeffs_ptr;
     uint64_t             _batch_size;
-    Task                 _next_task;
+	Task                 _next_task;
 
-    auto prepare(v2::ForwardT fn) -> void;
+    auto prepare(v2::ForwardT fn, c10::Device device) -> void;
 
   public:
-    TaskBuilder(v2::ForwardT psi, uint64_t batch_size);
+    TaskBuilder(v2::ForwardT psi, uint64_t batch_size, c10::Device device);
 
     auto start()
     {
@@ -178,7 +179,7 @@ class Accumulator {
 
   public:
     Accumulator(v2::ForwardT fn, gsl::span<std::complex<float>> out,
-                unsigned batch_size);
+                unsigned batch_size, c10::Device device);
 
     auto reset(gsl::span<std::complex<float>> out) -> void;
 

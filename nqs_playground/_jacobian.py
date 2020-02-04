@@ -1,3 +1,37 @@
+# Copyright Tom Westerhout (c) 2020
+#
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above
+#       copyright notice, this list of conditions and the following
+#       disclaimer in the documentation and/or other materials provided
+#       with the distribution.
+#
+#     * Neither the name of Tom Westerhout nor the names of other
+#       contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+__all__ = ["jacobian", "jacobian_simple", "jacobian_cpu", "jacobian_cuda"]
+
+
 from typing import List, Optional
 
 import torch
@@ -22,7 +56,7 @@ def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
     """
     if inputs.device.type == "cuda":
         return jacobian_cuda(module, inputs)
-    elif inputs.device.type == "cuda":
+    elif inputs.device.type == "cpu":
         return jacobian_cpu(module, inputs)
     else:
         raise ValueError(
@@ -48,6 +82,7 @@ def jacobian_cpu(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
 
 def jacobian_cuda(module: torch.jit.ScriptModule, inputs: Tensor,
                   devices: Optional[List[torch.device]] = None,
+                  output_device: Optional[torch.device] = None,
                   parallel: Optional[bool] = True) -> Tensor:
     r"""Jacobian computation on (multiple) GPUs."""
     if not parallel:
@@ -57,7 +92,8 @@ def jacobian_cuda(module: torch.jit.ScriptModule, inputs: Tensor,
     else:
         device_ids = list(map(lambda x: _get_device_index(x, True), devices))
 
-    output_device = inputs.device
+    if output_device is None:
+        output_device = inputs.device
     inputs = scatter(inputs, device_ids, dim=0)
     replicas = replicate(module, device_ids, detach=False)
     outputs = _parallel_apply_jacobian(replicas, inputs)

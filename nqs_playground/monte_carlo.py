@@ -169,7 +169,7 @@ def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: Sampling
                 "you by accident use sign instead of amplitude network?"
                 "".format(ys.dim())
             )
-        if ys.device != device:
+        if ys.device.type != device.type:
             raise ValueError(
                 "log_ψ should return tensors residing on {}; received "
                 "tensors residing on {} instead".format(device, ys.device)

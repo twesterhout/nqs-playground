@@ -13,8 +13,8 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
                           fmt::join(spins.sizes(), ", ")));
     TCM_CHECK_TYPE("spins", spins, torch::kInt64);
     TCM_CHECK_CONTIGUOUS("spins", spins);
-    TCM_CHECK(spins.device().type() == torch::DeviceType::CPU,
-              std::domain_error, fmt::format("spins must reside on the CPU"));
+	auto const device = spins.device();
+	spins = spins.to(spins.options().device(torch::DeviceType::CPU));
     auto states = gsl::span<uint64_t const>{
         static_cast<uint64_t const*>(spins.data_ptr()),
         static_cast<size_t>(spins.numel())};
@@ -23,7 +23,7 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
     auto out    = gsl::span<std::complex<float>>{
         static_cast<std::complex<float>*>(buffer.data_ptr()), states.size()};
 
-    detail::Accumulator acc{std::move(psi), out, batch_size};
+    detail::Accumulator acc{std::move(psi), out, batch_size, device};
     for (auto const x : states) {
         acc([&hamiltonian, x](auto&& f) {
             hamiltonian(x, std::forward<decltype(f)>(f));
