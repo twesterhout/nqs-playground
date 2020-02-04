@@ -1,4 +1,4 @@
-# Copyright Tom Westerhout (c) 2019
+# Copyright Tom Westerhout (c) 2019-2020
 #
 # All rights reserved.
 #
@@ -36,13 +36,6 @@ import json
 import math
 import os
 import pickle
-
-# The version from psutil is nicer
-try:
-    from psutil import cpu_count
-except ImportError:
-    from os import cpu_count
-
 import time
 from typing import Dict, List, Tuple, Optional, Union
 
@@ -51,6 +44,10 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
+if torch.has_cuda:
+    import threading
+    from torch._utils import ExceptionWrapper
+
 import nqs_playground
 from nqs_playground.core import forward_with_batches, combine_amplitude_and_phase
 from nqs_playground import (
@@ -58,130 +55,79 @@ from nqs_playground import (
     SamplingOptions,
     sample_some,
     unpack,
+    jacobian_cpu,
+    jacobian_cuda,
     local_values,
     local_values_slow,
 )
-
-# SR requires one to run a whole lot of backward operations on independent
-# inputs. We parallelise this using PyTorches interop thread-pool. The
-# following value is determined emprically. Feel free to modify it.
-torch.set_num_interop_threads(cpu_count() // 2)
-
 
 def _get_device(module: torch.nn.Module):
     r"""Determines the device on which ``module`` resides."""
     return next(module.parameters()).device
 
 
-def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
-    r"""Given a ``torch.nn.Module`` and a ``torch.Tensor`` of inputs, computes
-    the Jacobian ∂module(inputs)/∂W where W are module's parameters.
-
-    It is assumed that if ``inputs`` has shape ``(batch_size, in_features)``,
-    then ``module(inputs)`` has shape ``(batch_size, 1)``.
-    """
-
-    # This is a context manager to temporary change the number of threads used
-    # by PyTorch for intraop parallelism. Think, number of OpenMP threads.
-    @contextmanager
-    def num_threads(n):
-        old = torch.get_num_threads()
-        torch.set_num_threads(n)
-        yield
-        torch.set_num_threads(old)
-
-    parameters = list(module.parameters())
-    n = sum(map(torch.numel, parameters))
-    forward = module._c._get_method("forward")
-
-    # This if statement if ugly and stupid, but in torch 1.3.1 the argument is
-    # called keep_graph, but in later versions it's retain_graph. And we don't
-    # want to interfere with JIT.
-    if tuple(map(int, torch.__version__.split("."))) <= (1, 3, 1):
-
-        # Serial implementation. It computes gradients with respect to
-        # parameters for every input in xs. This is slow since we process one
-        # spin configuration at a time. Unfortunately, I have no idea how to
-        # optimise it. Perhaps, processing in a layer per layer fashion could
-        # be faster...
-        @torch.jit.script
-        def task(xs: Tensor, n: int, parameters: List[Tensor]):
-            batch_size = xs.size(0)
-            out = torch.empty([batch_size, n], dtype=torch.float32, device=xs.device)
-            for i in range(batch_size):
-                dws = torch.autograd.grad(
-                    [forward(xs[i])],
-                    parameters,
-                    keep_graph=True,
-                    create_graph=False,
-                    allow_unused=True,
-                )
-                torch.cat([dw.view([-1]) for dw in dws], out=out[i])
-            return out
-
-    else:
-
-        @torch.jit.script
-        def task(xs: Tensor, n: int, parameters: List[Tensor]):
-            batch_size = xs.size(0)
-            out = torch.empty([batch_size, n], dtype=torch.float32, device=xs.device)
-            for i in range(batch_size):
-                dws = torch.autograd.grad(
-                    [forward(xs[i])],
-                    parameters,
-                    retain_graph=True,
-                    create_graph=False,
-                    allow_unused=True,
-                )
-                offset = 0
-                for dw in dws:
-                    if dw is not None:
-                        out[i, offset:offset + dw.numel()] = dw.view([-1])
-                        offset += dw.numel()
-                # torch.cat([dw.view([-1]) for dw in dws], out=out[i])
-            return out
-
-    @torch.jit.script
-    def go(inputs: torch.Tensor, parameters: List[Tensor], n: int, chunk_size: int):
-        futures = [
-            torch.jit._fork(task, xs, n, parameters)
-            for xs in torch.split(inputs, chunk_size, dim=0)
-        ]
-        return torch.cat([torch.jit._wait(f) for f in futures], dim=0)
-
-    with torch.jit.optimized_execution(True), num_threads(
-        cpu_count() // torch.get_num_interop_threads()
-    ):
-        chunk_size = min(inputs.size(0) // torch.get_num_interop_threads(), 2048)
-        return go(inputs, parameters, n, chunk_size)
-
-
 class LogarithmicDerivatives:
-    def __init__(self, modules, inputs):
+    def __init__(
+        self,
+        modules: Tuple[torch.jit.ScriptModule, torch.jit.ScriptModule],
+        inputs: Tensor
+    ):
+        r"""
+
+        :param modules: is a tuple (or list) of two
+            ``torch.jit.ScriptModule``s. The predict respectively real and
+            imaginary parts of the logarithm of the wavefunction.
+        :param inputs: is a Tensor with spin configurations obtained from Monte
+            Carlo sampling.
+        """
         self._modules = modules
         self._inputs = inputs
+        self._real, self._imag = None, None
+        self.__is_centered = False
 
     def __compute_jacobians(self):
-        r"""Initialises :attr:`real` and :attr:`imag` with Jacobians of log
+        r"""Initialises :attr:`_real` and :attr:`_imag` with Jacobians of log
         amplitudes and phases respectively. Repeated calls to
         ``__compute_jacobian`` will do nothing.
+
+        .. note:: When running on GPU, ``jacobian`` function will automatically
+                  use all available GPUs on the system.
         """
-        if not hasattr(self, "real"):
-            self.real = jacobian(self._modules[0], self._inputs)
-        if not hasattr(self, "imag"):
-            self.imag = jacobian(self._modules[1], self._inputs)
+        if self._real is not None and self._imag is not None:
+            return
+        if self._inputs.device.type == "cpu":
+            # TODO: Tune number of threads
+            self._real = jacobian_cpu(self._modules[0], self._inputs)
+            self._imag = jacobian_cpu(self._modules[1], self._inputs)
+        else:
+            # If we have more than one CUDA device, we put Jacobians of
+            # amplitude and phase networks on different devices such that
+            # operations on them can be parallelised.
+            if torch.cuda.device_count() > 1:
+                output_devices = ['cuda:0', 'cuda:0']
+            else:
+                output_devices = ['cuda', 'cuda']
+            self._real = jacobian_cuda(
+                self._modules[0], self._inputs, output_device=output_devices[0])
+            self._imag = jacobian_cuda(
+                self._modules[1], self._inputs, output_device=output_devices[1])
+            
 
     def __center(self, weights=None):
         r"""Centers logarithmic derivatives, i.e. ``Oₖ <- Oₖ - ⟨Oₖ⟩``. Repeated
         calls to ``__center`` will do nothing.
         """
-        if weights is not None:
-            raise NotImplementedError()
-        if not hasattr(self, "__are_centered"):
+        def center(matrix, weights):
+            if weights is not None:
+                raise NotImplementedError()
+            matrix -= matrix.mean(dim=0)
+
+        if not self.__is_centered:
             self.__compute_jacobians()
-            self.real -= self.real.mean(dim=0)
-            self.imag -= self.imag.mean(dim=0)
-            self.__are_centered = True
+            with torch.no_grad():
+                center(self._real, weights)
+                center(self._imag, weights)
+            self.__is_centered = True
 
     def gradient(
         self, local_energies: np.ndarray, weights=None, compute_jacobian=True
@@ -194,7 +140,6 @@ class LogarithmicDerivatives:
         if not compute_jacobian:
             raise NotImplementedError()
 
-        device = _get_device(self._modules[0])
         if isinstance(local_energies, np.ndarray):
             if local_energies.dtype != np.complex64:
                 raise ValueError(
@@ -206,7 +151,6 @@ class LogarithmicDerivatives:
             local_energies.shape = (-1, 1)
             # Treat complex array as Nx2 tensor of real numbers
             local_energies = torch.from_numpy(local_energies.view(np.float32))
-        local_energies = local_energies.to(device, copy=False)
 
         self.__center()
         with torch.no_grad():
@@ -223,63 +167,127 @@ class LogarithmicDerivatives:
             # Now, `Re[a*·b] = Re[a]·Re[b] - Im[a*]·Im[b] = Re[a]·Re[b] +
             # Im[a]·Im[b]` that's why there are no conjugates or minus signs in
             # the code.
-            real_energies = local_energies[:, 0].view([1, -1])
-            imag_energies = local_energies[:, 1].view([1, -1])
-            scale = 2.0 / self.real.size(0)
-            gradient = torch.cat(
-                [
-                    torch.mm(real_energies, self.real),  # (1xN) x (NxM) -> (1xM)
-                    torch.mm(imag_energies, self.imag),  # (1xN) x (NxK) -> (1xK)
-                ],
-                dim=1,
-            )
-            gradient *= scale
-            return gradient.squeeze()
+            real_energies = local_energies[:, 0].view([1, -1]).to(self._real.device)
+            imag_energies = local_energies[:, 1].view([1, -1]).to(self._imag.device)
+            scale = 2.0 / self._real.size(0)
+            snd_part = torch.mm(imag_energies, self._imag)  # (1xN) x (NxK) -> (1xK)
+            snd_part *= scale
+            snd_part = snd_part.to(self._real.device, non_blocking=True)
+            fst_part = torch.mm(real_energies, self._real)  # (1xN) x (NxM) -> (1xM)
+            fst_part *= scale
+            return torch.cat([fst_part, snd_part], dim=1).squeeze(dim=0)
 
 
-    def solve(self, gradient: Tensor, scale_inv_reg=1e-3, diag_reg=None, weights=None) -> Tensor:
-        r"""Given the gradient of ``⟨H⟩``, calculates ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O
-        - ⟨O⟩)⟩⁻¹⟨H⟩``.
+    def __remove_singularity(self, matrix: Tensor, eps: float = 1e-4) -> Tensor:
+        r"""Removes singularities from ``matrix``. Application of this function to
+        covariance matrix essentially means that we exclude some variational
+        parameters from optimization.
         """
+        # obtains all indices i for which matrix[i, i] < eps
+        indices = torch.nonzero(matrix.diagonal().abs() < eps).squeeze(dim=1)
+        matrix.index_fill_(0, indices, 0.0) # sets matrix[i, :] = 0.0 for all i
+        matrix.index_fill_(1, indices, 0.0) # sets matrix[:, i] = 0.0 for all i
+        matrix.diagonal().index_fill_(0, indices, 1.0) # sets matrix[i, i] = 1.0
+        return matrix
+        # Old version:
+        # for i in range(matrix.size(0)):
+        #     if matrix[i, i] < eps:
+        #         matrix[i, :] = 0.0
+        #         matrix[:, i] = 0.0
+        #         matrix[i, i] = 1.0
+        # return matrix
 
-        def remove_singularity(S):
-            for i in range(S.size(0)):
-                if S[i, i] < 1e-4:
-                    S[i, :] = 0.0
-                    S[:, i] = 0.0
-                    S[i, i] = 1.0
-            return S
+    def __solve_part(
+        self,
+        matrix: Tensor,
+        vector: Tensor,
+        scale_inv_reg: Optional[float],
+        diag_reg: Optional[float],
+    ) -> Tensor:
+        r"""Calculates ``matrix⁻¹·vector``, i.e. solves the linear system."""
+        if scale_inv_reg is not None and diag_reg is not None:
+            raise ValueError("scale_inv_reg and diag_reg are mutually exclusive")
 
+        matrix = self.__remove_singularity(matrix)
+        # The following is an implementation of Eq. (6.51) and (6.52)
+        # from "Quantum Monte Carlo Approaches for Correlated Systems"
+        # by F.Becca & S.Sorella.
+        if scale_inv_reg is not None:
+            # diag <- sqrt(diag(|S|))
+            diag = torch.sqrt(torch.abs(torch.diagonal(matrix)))
+            vector_pc = vector / diag
+            # S_pc[m, n] <- S[m, n] / sqrt(diag[m] * diag[n])
+            inv_diag = 1.0 / diag
+            matrix_pc = torch.einsum('i,ij,j->ij', inv_diag, matrix, inv_diag)
+            # regularizes the preconditioned matrix
+            matrix_pc.diagonal()[:] += scale_inv_reg
+            # solves the linear system
+            try:
+                u = torch.cholesky(matrix_pc)
+            except RuntimeError as e:
+                print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
+                matrix_pc.diagonal()[:] += scale_inv_reg
+                u = torch.cholesky(matrix_pc)
+            x = torch.cholesky_solve(vector_pc.view([-1, 1]), u).squeeze()
+            x *= inv_diag
+            return x
+        # The simpler approach
+        if diag_reg is not None:
+            matrix.diagonal()[:] += diag_reg
+        try:
+            u = torch.cholesky(matrix)
+        except RuntimeError as e:
+            print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
+            matrix.diagonal()[:] += diag_reg
+            u = torch.cholesky(matrix)
+        x = torch.cholesky_solve(vector.view([-1, 1]), u).squeeze()
+        return x
+
+    def solve(self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-2, weights=None) -> Tensor:
+        r"""Given the gradient of ``⟨H⟩``, calculates
+        ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O - ⟨O⟩)⟩⁻¹⟨H⟩``.
+        """
         if weights is not None:
             raise NotImplementedError()
 
-        def solve_part(matrix, vector):
-            matrix = remove_singularity(matrix)
-            scale = 1.0 / self.real.size(0)
-            matrix *= scale
-            if scale_inv_reg is not None:
-                diag = torch.sqrt(torch.abs(torch.diag(matrix)))  # diag = sqrt(diag(|S_cov|))
-                vector_pc = vector / diag  # vector_pc = vector / diag
-                matrix_pc = torch.einsum('i,ij,j->ij', 1.0 / diag, matrix, 1.0 / diag)  # S_pc[m, n] -> S[m, n] / sqrt(diag[m] * diag[n])
-                matrix_pc += scale_inv_reg * torch.eye(matrix_pc.size(0))  #S_pc += diag * 1e-3
-                x = torch.cholesky_solve(vector_pc.view([-1, 1]), torch.cholesky(matrix_pc)).squeeze()  # matrix_pc^{-1} x vector_pc
-                x = x / diag  # x = matrix_pc^{-1} x vector_pc / diag
-                return x
+        @torch.no_grad()
+        def task(log_derivatives: Tensor, operator_gradient: Tensor, **kwargs) -> Tensor:
+            device = log_derivatives.device
+            operator_gradient = operator_gradient.to(device, non_blocking=True)
+            covariance_matrix = torch.mm(log_derivatives.t(), log_derivatives)
+            covariance_matrix *= 1.0 / log_derivatives.size(0)
+            return self.__solve_part(covariance_matrix, operator_gradient, **kwargs)
 
-            if diag_reg is not None:
-                matrix.diagonal()[:] += diag_reg
-            # x, _ = torch.solve(vector.view([-1, 1]), matrix)
-            x = torch.cholesky_solve(vector.view([-1, 1]), torch.cholesky(matrix))
-            return x.squeeze()
+        middle = self._real.size(1)
+        kwargs = {"scale_inv_reg": scale_inv_reg, "diag_reg": diag_reg}
+        if self._real.device == self._imag.device:
+            # Serial implementation
+            return torch.cat([
+                task(self._real, gradient[:middle], **kwargs),
+                task(self._imag, gradient[middle:], **kwargs),
+            ])
+        else:
+            # Parallel implementation
+            results = [None, None]
 
-        with torch.no_grad():
-            middle = self.real.size(1)
-            return torch.cat(
-                [
-                    solve_part(torch.mm(self.real.t(), self.real), gradient[:middle]),
-                    solve_part(torch.mm(self.imag.t(), self.imag), gradient[middle:]),
-                ]
-            )
+            def _worker(i, *args, **kwargs):
+                try:
+                    results[i] = task(*args, **kwargs)
+                except Exception:
+                    results[i] = ExceptionWrapper(
+                        where="in thread {} on device {}".format(i, args[0].device))
+            
+            threads = [threading.Thread(target=_worker, args=(i, d, f), kwargs=kwargs)
+                       for i, (d, f) in enumerate([(self._real, gradient[:middle]),
+                                                   (self._imag, gradient[middle:])])]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            for result in results:
+                if isinstance(result, ExceptionWrapper):
+                    result.reraise()
+            return torch.cat([results[0], results[1].to(results[0].device)])
 
 class Runner:
     def __init__(self, config):
@@ -365,6 +373,10 @@ class Runner:
 
         self.amplitude = load(amplitude).to(self.device)
         self.phase = load(phase).to(self.device)
+        for p in self.amplitude.parameters():
+            assert p.is_contiguous()
+        for p in self.phase.parameters():
+            assert p.is_contiguous()
 
     def __load_optimiser(self):
         optimiser = self.config.optimiser
@@ -409,11 +421,11 @@ class Runner:
             with torch.no_grad(), torch.jit.optimized_execution(True):
                 state = forward_with_batches(
                     self.combined_state,
-                    torch.from_numpy(self.basis.states.view(np.int64)),
+                    torch.from_numpy(self.basis.states.view(np.int64)).to(self.device),
                     8192,
                 )
                 state[:, 0] -= torch.max(state[:, 0])
-                state = state.numpy().view(np.complex64).squeeze()
+                state = state.cpu().numpy().view(np.complex64).squeeze()
                 state = np.exp(state, out=state)
                 overlap = abs(np.dot(state, ground_state)) / np.linalg.norm(state)
                 return overlap
@@ -426,7 +438,7 @@ class Runner:
                 lambda x: self.amplitude(unpack(x, self.basis.number_spins)),
                 self.basis,
                 self.sampling_options,
-                mode="monte_carlo",
+                mode="exact",
             )
             weights = None
 
