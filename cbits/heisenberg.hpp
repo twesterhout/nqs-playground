@@ -132,6 +132,17 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         callback(spin, coeff);
     }
 
+    auto diag(SpinBasis::StateT const spin) const noexcept -> complex_type
+    {
+        auto coeff = complex_type{0, 0};
+        for (auto const [coupling, first, second] : edges()) {
+            auto const not_aligned =
+                ((spin >> first) ^ (spin >> second)) & 0x01;
+            coeff += static_cast<real_type>(1 - 2 * not_aligned) * coupling;
+        }
+        return coeff;
+    }
+
     template <class T, class = std::enable_if_t<
                            std::is_floating_point_v<T> || is_complex_v<T>>>
     auto operator()(gsl::span<T const> x, gsl::span<T> y) const -> void;

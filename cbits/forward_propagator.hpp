@@ -49,7 +49,7 @@ struct TaskBuilder {
         torch::Tensor         spins;
         torch::Tensor         coeffs;
         std::vector<uint64_t> counts;
-		c10::Device           device;
+        c10::Device           device;
         bool                  complete;
 
         auto operator()() const
@@ -61,7 +61,7 @@ struct TaskBuilder {
     uint64_t*            _spins_ptr;
     std::complex<float>* _coeffs_ptr;
     uint64_t             _batch_size;
-	Task                 _next_task;
+    Task                 _next_task;
 
     auto prepare(v2::ForwardT fn, c10::Device device) -> void;
 

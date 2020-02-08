@@ -42,6 +42,16 @@ auto bind_polynomial_state(PyObject* _module) -> void
                                   hamiltonian.basis()->number_spins()));
     });
 
+    m.def("diag", [](torch::Tensor spins, Heisenberg const& hamiltonian) {
+        return diag(std::move(spins), hamiltonian);
+    }, DOC(R"EOF(
+        Computes diagonal elements ``⟨s|H|s⟩``.
+
+        :param spins: a 1D tensor of spin configurations for which to compute
+            diagonal matrix elements.
+        :param hamiltonian: operator which matrix elements to compute.)EOF"),
+    py::arg{"spins"}, py::arg{"hamiltonian"});
+
 #undef DOC
 }
 
