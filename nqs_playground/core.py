@@ -445,7 +445,7 @@ def combine_amplitude_and_sign_classifier(
             p = 2 * self.phase(x) - 1
 
             a = log_phi + torch.log(torch.abs(p))
-            b = 3.141592653589793 * torch.sign(p)
+            b = 3.141592653589793 * (1. - torch.sign(p)) / 2.
             return torch.cat([a, b], dim=1)
 
     m = CombiningState(*modules)

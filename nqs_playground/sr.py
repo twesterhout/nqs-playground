@@ -360,7 +360,7 @@ class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
 
             # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
             H_mean = torch.sum((local_energies_v * self.weight_v + local_energies_a * self.weight_a) * weights)
-            print(H_mean.item(), self.O_v_der.size(0), torch.min(self.p), torch.max(self.p))
+            print(H_mean.item(), self._modules[0].w1, self._modules[1].w2)
             #O_a = torch.einsum('i,ij->ij', 4 * self.p * (1 - 2 * self.p), self._jacobian[..., 1]) + \
             #      torch.einsum('i,ij->ij', 8 * self.p * (1 - self.p), self._jacobian[..., 0])
             #O_v = torch.einsum('i,ij->ij', 4 * self.p * (2 * self.p - 1), self._jacobian[..., 1]) + \
@@ -457,7 +457,6 @@ class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
                 u = torch.cholesky(OO_corr)
             except RuntimeError as e:
                 print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
-                print(OO_corr.diagonal()[:])
                 OO_corr.diagonal()[:] += diag_reg
                 u = torch.cholesky(OO_corr)
             x = torch.cholesky_solve(gradient.view([-1, 1]), u).squeeze()
@@ -700,6 +699,8 @@ class RunnerClassifier(Runner):
             
             self.p = torch.squeeze(self.phase(unpack(spins, self.basis.number_spins))).numpy()
             self.weights = self.weights / torch.sum(self.weights).item()
+            # self.logpsi = torch.squeeze(self.amplitude(unpack(spins, self.basis.number_spins))).numpy()
+            # print(self.p, self.logpsi, self.composite_state(unpack(spins, self.basis.number_spins)))
 
         '''
             to compute the local energies, one considers with the density matrix two contributions:
@@ -713,20 +714,19 @@ class RunnerClassifier(Runner):
         #  obtain just H_ii for all i in spins (part of the term (1))
         # this shoulw be later multiplied by w_a = 4 p_i (1 - p_i)
         local_energies_a = local_values_diagonal(spins, self.hamiltonian).numpy()[..., 0].real  # always real
-
+        print(local_energies_a)
 
         # the composive-state cooked-up network predicts [\log \varphi_i + \log |2 p_i - 1|, sign(2 p_i - 1)]
         # local_values outputs \sum_j H_ij [phi_j (2 p_j - 1)] / [phi_i (2 p_i - 1)]
         # this should be later multiplied by w_v = (2 p_i - 1) ** 2
         local_energies_v = local_values(
-            spins, self.hamiltonian, self.combined_state, batch_size=8192
+            spins, self.hamiltonian, self.composite_state, batch_size=8192
         )[..., 0].real  # always real
-
+        print(local_energies_v)
         # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
         weights_a = 4 * self.p * (1 - self.p)
         weights_v = (2. * self.p - 1) ** 2
         energies_weighted = local_energies_v * weights_v + local_energies_a * weights_a
-        print(local_energies_a.shape, local_energies_v.shape, weights_a.shape, weights_v.shape, self.weights.size())
         energy = np.dot(self.weights.numpy(), energies_weighted)
         variance = np.dot(self.weights.numpy(), np.abs(energies_weighted - energy) ** 2)
 
