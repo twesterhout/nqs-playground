@@ -42,7 +42,7 @@ from ._C import Heisenberg as _Heisenberg
 from ._C import SpinBasis
 from .core import forward_with_batches
 
-__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values", "local_values_slow"]
+__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values", "local_values_slow", "local_values_diagonal"]
 
 
 def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
@@ -160,6 +160,32 @@ def local_values(
         log_h_psi -= log_psi
         log_h_psi = log_h_psi.numpy().view(np.complex64)
         return np.exp(log_h_psi, out=log_h_psi)
+
+
+def local_values_diagonal(
+    spins,
+    hamiltonian: _Heisenberg,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    r"""Computes local values ``⟨s|H|s⟩`` for all ``s ∈ spins``.
+
+    :param spins: Spin configurations ``{s}``. Must be either a
+        ``numpy.ndarray`` of ``uint64`` or a ``torch.Tensor`` of ``int64``.
+    :param hamiltonian: Heisenberg Hamiltonian.
+    :param batch_size: Batch size to use internally for forward propagationn
+        through ``state``.
+    """
+    if isinstance(spins, np.ndarray):
+        if spins.dtype != np.uint64:
+            raise TypeError(
+                "spins must be either a numpy.ndarray of uint64 or a torch.Tensor "
+                "of int64; got a numpy.ndarray of {}".format(spins.dtype)
+            )
+        spins = torch.from_numpy(spins.view(np.int64))
+    with torch.no_grad():
+        # Computes log(⟨s|H|s⟩) for all s.
+        h_psi = _C.diag(spins, hamiltonian)
+        return h_psi
 
 
 def local_values_slow(

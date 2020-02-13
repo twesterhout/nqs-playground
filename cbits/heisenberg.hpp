@@ -137,7 +137,7 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         auto coeff = complex_type{0, 0};
         for (auto const [coupling, first, second] : edges()) {
             auto const not_aligned =
-                ((spin >> first) ^ (spin >> second)) & 0x01;
+                static_cast<int>(((spin >> first) ^ (spin >> second)) & 0x01);
             coeff += static_cast<real_type>(1 - 2 * not_aligned) * coupling;
         }
         return coeff;
