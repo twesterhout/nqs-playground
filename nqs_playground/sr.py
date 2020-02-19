@@ -249,7 +249,7 @@ class LogarithmicDerivatives:
         x = torch.cholesky_solve(vector.view([-1, 1]), u).squeeze()
         return x
 
-    def solve(self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-1, weights=None) -> Tensor:
+    def solve(self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-3, weights=None) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates
         ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O - ⟨O⟩)⟩⁻¹⟨H⟩``.
         """
@@ -350,21 +350,16 @@ class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
         self.__compute_jacobians()
         with torch.no_grad():
             ### now jacobian conlains in [..., 0] == d_k \log \varphi(j), [..., 1] = d_k \log p(j)
-            self.O_a_der = torch.einsum('i,ij->ij', (1 - 2 * self.p) / (1 - self.p), self._jacobian[..., 1]) + \
-                           2 * self._jacobian[..., 0]
-            self.O_v_der = torch.einsum('i,ij->ij', 4 * self.p / (2 * self.p - 1), self._jacobian[..., 1]) + \
-                           2 * self._jacobian[..., 0]
+            self.O_a_der = (torch.einsum('i,ij->ij', (1 - 2 * self.p) / (1 - self.p), self._jacobian[..., 1]) + \
+                           2 * self._jacobian[..., 0]) / 2.
+            self.O_v_der = (torch.einsum('i,ij->ij', 4 * self.p / (2 * self.p - 1), self._jacobian[..., 1]) + \
+                           2 * self._jacobian[..., 0]) / 2.
 
             # self.O_a_der * self.weight_a + self.O_v_der * self.weight_v = 2 * self.jacobian[..., 0]
-            self.O_mean = torch.einsum('i,ij->j', weights, 2 * self._jacobian[..., 0]) # it is faster to compute O_mean explicitly
+            self.O_mean = torch.einsum('i,ij->j', weights, 2 * self._jacobian[..., 0]) / 2. # it is faster to compute O_mean explicitly
 
             # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
             H_mean = torch.sum((local_energies_v * self.weight_v + local_energies_a * self.weight_a) * weights)
-            print(H_mean.item(), self._modules[0].w1, self._modules[1].w2)
-            #O_a = torch.einsum('i,ij->ij', 4 * self.p * (1 - 2 * self.p), self._jacobian[..., 1]) + \
-            #      torch.einsum('i,ij->ij', 8 * self.p * (1 - self.p), self._jacobian[..., 0])
-            #O_v = torch.einsum('i,ij->ij', 4 * self.p * (2 * self.p - 1), self._jacobian[..., 1]) + \
-            #      torch.einsum('i,ij->ij', 2 * (2 * self.p - 1) ** 2, self._jacobian[..., 0])
 
             OH_mean = torch.einsum('ij,i,i,i->j', self.O_a_der, local_energies_a, self.weight_a, weights) + \
                       torch.einsum('ij,i,i,i->j', self.O_v_der, local_energies_v, self.weight_v, weights)
@@ -624,6 +619,7 @@ class Runner:
         else:
             energy = np.mean(local_energies)
             variance = np.var(local_energies)
+
         self.tb_writer.add_scalar("SR/energy_real", energy.real, self._iteration)
         self.tb_writer.add_scalar("SR/energy_imag", energy.imag, self._iteration)
         self.tb_writer.add_scalar("SR/variance", variance, self._iteration)
@@ -679,7 +675,7 @@ class Runner:
 class RunnerClassifier(Runner):
     def __init__(self, config):
         super().__init__(config)
-        self.composite_state = combine_amplitude_and_sign_classifier(self.amplitude, self.phase)
+        self.composite_state = combine_amplitude_and_sign_classifier(self.amplitude, self.phase, number_spins = self.basis.number_spins)
 
     def monte_carlo(self):
         with torch.no_grad():  # for Classifier this part remains intact
@@ -696,11 +692,9 @@ class RunnerClassifier(Runner):
                 spins = self.basis.states
                 spins = torch.from_numpy(spins.view(np.int64))
                 self.weights = torch.squeeze(torch.exp(self.amplitude(unpack(spins, self.basis.number_spins))) ** 2)
-            
             self.p = torch.squeeze(self.phase(unpack(spins, self.basis.number_spins))).numpy()
             self.weights = self.weights / torch.sum(self.weights).item()
-            # self.logpsi = torch.squeeze(self.amplitude(unpack(spins, self.basis.number_spins))).numpy()
-            # print(self.p, self.logpsi, self.composite_state(unpack(spins, self.basis.number_spins)))
+            self.logpsi = torch.squeeze(self.amplitude(unpack(spins, self.basis.number_spins))).numpy()
 
         '''
             to compute the local energies, one considers with the density matrix two contributions:
@@ -714,7 +708,6 @@ class RunnerClassifier(Runner):
         #  obtain just H_ii for all i in spins (part of the term (1))
         # this shoulw be later multiplied by w_a = 4 p_i (1 - p_i)
         local_energies_a = local_values_diagonal(spins, self.hamiltonian).numpy()[..., 0].real  # always real
-        print(local_energies_a)
 
         # the composive-state cooked-up network predicts [\log \varphi_i + \log |2 p_i - 1|, sign(2 p_i - 1)]
         # local_values outputs \sum_j H_ij [phi_j (2 p_j - 1)] / [phi_i (2 p_i - 1)]
@@ -722,7 +715,7 @@ class RunnerClassifier(Runner):
         local_energies_v = local_values(
             spins, self.hamiltonian, self.composite_state, batch_size=8192
         )[..., 0].real  # always real
-        print(local_energies_v)
+
         # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
         weights_a = 4 * self.p * (1 - self.p)
         weights_v = (2. * self.p - 1) ** 2
