@@ -427,6 +427,35 @@ def combine_amplitude_and_phase(
     return m
 
 
+def combine_amplitude_and_sign_classifier(
+        *modules, number_spins: int,
+    use_jit: bool = True
+) -> torch.nn.Module:
+    r"""Combines two torch.nn.Modules representing amplitudes and signs of the
+    wavefunction coefficients into one model.
+    """
+    
+    class CombiningState(torch.nn.Module):
+        def __init__(self, amplitude, phase, number_spins):
+            super().__init__()
+            self.amplitude = amplitude
+            self.phase = phase
+            self.number_spins = number_spins
+
+        def forward(self, x):
+            x = torch.ops.tcm.unpack(x, self.number_spins)
+            log_phi = self.amplitude(x)
+            p = 2 * self.phase(x) - 1
+
+            a = log_phi + torch.log(torch.abs(p))
+            b = 3.141592653589793 * (1. - torch.sign(p)) / 2.
+            return torch.cat([a, b], dim=1)
+
+    m = CombiningState(*modules, number_spins)
+    if use_jit:
+        m = torch.jit.script(m)
+    return m
+
 # def _forward_with_batches(state, input, batch_size):
 #     n = input.shape[0]
 #     if n == 0:
