@@ -350,10 +350,13 @@ class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
         self.__compute_jacobians()
         with torch.no_grad():
             ### now jacobian conlains in [..., 0] == d_k \log \varphi(j), [..., 1] = d_k \log p(j)
-            self.O_a_der = (torch.einsum('i,ij->ij', (1 - 2 * self.p) / (1 - self.p), self._jacobian[..., 1]) + \
-                           2 * self._jacobian[..., 0]) / 2.
-            self.O_v_der = (torch.einsum('i,ij->ij', 4 * self.p / (2 * self.p - 1), self._jacobian[..., 1]) + \
-                           2 * self._jacobian[..., 0]) / 2.
+            safe_factor = (1 - 2 * self.p) / (1 - self.p)
+            safe_factor[self.p == 1.0] = 0
+            self.O_a_der = (torch.einsum('i,ij->ij', safe_factor, self._jacobian[..., 1]) + 2 * self._jacobian[..., 0]) / 2.
+            
+            safe_factor = 4 * self.p / (2 * self.p - 1)
+            safe_factor[self.p == 0.5] = 0
+            self.O_v_der = (torch.einsum('i,ij->ij', safe_factor, self._jacobian[..., 1]) + 2 * self._jacobian[..., 0]) / 2.
 
             # self.O_a_der * self.weight_a + self.O_v_der * self.weight_v = 2 * self.jacobian[..., 0]
             self.O_mean = torch.einsum('i,ij->j', weights, 2 * self._jacobian[..., 0]) / 2. # it is faster to compute O_mean explicitly
@@ -715,6 +718,7 @@ class RunnerClassifier(Runner):
         local_energies_v = local_values(
             spins, self.hamiltonian, self.composite_state, batch_size=8192
         )[..., 0].real  # always real
+        local_energies_v[self.p == 0.5] = 0.0
 
         # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
         weights_a = 4 * self.p * (1 - self.p)
