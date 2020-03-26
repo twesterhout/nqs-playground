@@ -30,18 +30,13 @@
 #include "random.hpp"
 #include "spin_basis.hpp"
 
+#include <boost/align/is_aligned.hpp>
+
 TCM_NAMESPACE_BEGIN
 
 namespace detail {
 
-template <class... Ints>
-constexpr auto flipped(uint64_t const spin, Ints const... is) noexcept
-    -> uint64_t
-{
-    return spin ^ (... | (uint64_t{1} << is));
-}
-
-constexpr auto find_nth_set(uint64_t const v, unsigned r) noexcept -> unsigned
+constexpr auto find_nth_one(uint64_t const v, unsigned r) noexcept -> unsigned
 {
     // Do a normal parallel bit count for a 64-bit integer,
     // but store all intermediate steps.
@@ -83,14 +78,68 @@ constexpr auto find_nth_set(uint64_t const v, unsigned r) noexcept -> unsigned
     return s;
 }
 
+inline auto find_nth_one(bits512 const& x, unsigned n) noexcept -> unsigned
+{
+    static_assert(std::is_same_v<unsigned long, uint64_t>,
+                  TCM_STATIC_ASSERT_BUG_MESSAGE);
+    for (auto i = 0U;; ++i) {
+        if (i == std::size(x.words)) { return 512U; }
+        auto const count =
+            static_cast<unsigned>(__builtin_popcountl(x.words[i]));
+        if (n <= count) { return 64U * i + find_nth_one(x.words[i], n); }
+        n -= count;
+    }
+}
+
+inline auto find_nth_zero(bits512 const& x, unsigned const n) noexcept
+    -> unsigned
+{
+    using std::begin, std::end;
+    bits512 y;
+    std::transform(begin(x.words), end(x.words), begin(y.words),
+                   [](auto const w) { return ~w; });
+    return find_nth_one(y, n);
+}
+
 } // namespace detail
 
 TCM_EXPORT
-MetropolisKernel::MetropolisKernel(std::shared_ptr<SpinBasis const> basis,
-                                   RandomGenerator& generator) noexcept
+MetropolisKernel::MetropolisKernel(std::shared_ptr<BasisBase const> basis,
+                                   RandomGenerator&                 generator)
     : _basis{std::move(basis)}, _generator{std::addressof(generator)}
-{}
+{
+    TCM_CHECK(_basis != nullptr, std::invalid_argument,
+              "basis must not be nullptr");
+}
 
+TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor x) const
+    -> std::tuple<torch::Tensor, torch::Tensor>
+{
+    auto       pin_memory = false;
+    auto const device     = x.device();
+    if (device.type() != torch::DeviceType::CPU) {
+        pin_memory = true;
+        x          = x.cpu();
+    }
+    auto x_info = obtain_tensor_info<bits512 const>(x, "x");
+    auto y      = torch::empty(
+        std::initializer_list<int64_t>{x_info.size(), 8L},
+        torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
+    auto norm = torch::empty(std::initializer_list<int64_t>{x_info.size()},
+                             torch::TensorOptions{}
+                                 .dtype(torch::kFloat32)
+                                 .pinned_memory(pin_memory));
+    kernel_cpu(x_info, obtain_tensor_info<bits512, false>(y),
+               obtain_tensor_info<float, false>(norm));
+    if (device.type() != torch::DeviceType::CPU) {
+        y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
+        norm =
+            norm.to(norm.options().device(device), /*non_blocking=*/pin_memory);
+    }
+    return {std::move(y), std::move(norm)};
+}
+
+#if 0
 TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor x) const
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
@@ -100,24 +149,69 @@ TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor x) const
                           x.dim()));
     TCM_CHECK_TYPE("x", x, torch::kInt64);
     TCM_CHECK_CONTIGUOUS("x", x);
-	auto pin_memory = false;
-	auto const device = x.device();
-    auto const n = x.numel();
-	if (device.type() != torch::DeviceType::CPU) { pin_memory = true; x = x.cpu(); }
-    auto y = torch::empty({n},
-		torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
-    auto norm = torch::empty({n},
-		torch::TensorOptions{}.dtype(torch::kFloat32).pinned_memory(pin_memory));
+    auto       pin_memory = false;
+    auto const device     = x.device();
+    auto const n          = x.numel();
+    if (device.type() != torch::DeviceType::CPU) {
+        pin_memory = true;
+        x          = x.cpu();
+    }
+    auto y = torch::empty(
+        {n},
+        torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
+    auto norm = torch::empty({n}, torch::TensorOptions{}
+                                      .dtype(torch::kFloat32)
+                                      .pinned_memory(pin_memory));
     kernel_cpu(
         static_cast<size_t>(n), reinterpret_cast<uint64_t const*>(x.data_ptr()),
         reinterpret_cast<uint64_t*>(y.data_ptr()), norm.data_ptr<float>());
-	if (device.type() != torch::DeviceType::CPU) {
-		y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
-		norm = norm.to(norm.options().device(device), /*non_blocking=*/pin_memory);
-	}
+    if (device.type() != torch::DeviceType::CPU) {
+        y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
+        norm =
+            norm.to(norm.options().device(device), /*non_blocking=*/pin_memory);
+    }
     return {std::move(y), std::move(norm)};
 }
+#endif
 
+auto MetropolisKernel::kernel_cpu(TensorInfo<bits512 const> const& src_info,
+                                  TensorInfo<bits512> const&       dst_info,
+                                  TensorInfo<float> const& norm_info) const
+    -> void
+{
+    auto const loop = [&](auto&& task) {
+        auto const* src  = src_info.data;
+        auto*       dst  = dst_info.data;
+        auto*       norm = norm_info.data;
+        for (auto i = int64_t{0}; i < src_info.size(); ++i,
+                  src += src_info.stride(), dst += dst_info.stride(),
+                  norm += norm_info.stride()) {
+            std::tie(*dst, *norm) = task(*src);
+        }
+    };
+    if (_basis->hamming_weight().has_value()) {
+        loop([this](auto const& x) -> std::tuple<bits512, float> {
+            auto const i = detail::find_nth_one(
+                x, random_bounded(*_basis->hamming_weight(), *_generator));
+            auto const j = detail::find_nth_zero(
+                x, random_bounded(_basis->number_spins()
+                                      - *_basis->hamming_weight(),
+                                  *_generator));
+            auto const [y, _, normalization] =
+                _basis->full_info(flipped(x, i, j));
+            return {y, static_cast<float>(normalization)};
+        });
+    }
+    else {
+        loop([this](auto const& x) -> std::tuple<bits512, float> {
+            auto const i = random_bounded(_basis->number_spins(), *_generator);
+            auto const [y, _, normalization] = _basis->full_info(flipped(x, i));
+            return {y, static_cast<float>(normalization)};
+        });
+    }
+}
+
+#if 0
 auto MetropolisKernel::kernel_cpu(size_t const                          n,
                                   SpinBasis::StateT const* TCM_RESTRICT src,
                                   SpinBasis::StateT* TCM_RESTRICT       dst,
@@ -152,5 +246,6 @@ auto MetropolisKernel::kernel_cpu(size_t const                          n,
         });
     }
 }
+#endif
 
 TCM_NAMESPACE_END

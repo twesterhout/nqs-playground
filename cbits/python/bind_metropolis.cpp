@@ -17,7 +17,7 @@ auto bind_metropolis(PyObject* _module) -> void
 #define DOC(str) trim(keep_alive, str)
 
     py::class_<MetropolisKernel>(m, "MetropolisKernel")
-        .def(py::init<std::shared_ptr<SpinBasis const>>(), DOC(R"EOF(
+        .def(py::init<std::shared_ptr<BasisBase const>>(), DOC(R"EOF(
             Constructs Metropolis transition kernel.
 
             :param basis: specifies the Hilbert space basis.)EOF"))
@@ -26,7 +26,7 @@ auto bind_metropolis(PyObject* _module) -> void
         .def(
             "__call__",
             [](MetropolisKernel const& self, torch::Tensor x) {
-                return self(x);
+                return self(std::move(x));
             },
             py::arg{"x"}.noconvert());
 

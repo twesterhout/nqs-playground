@@ -1,5 +1,4 @@
 #include "bind_polynomial_state.hpp"
-#include "../operators.hpp"
 #include "../polynomial_state.hpp"
 #include "../trim.hpp"
 
@@ -42,15 +41,24 @@ auto bind_polynomial_state(PyObject* _module) -> void
                                   hamiltonian.basis()->number_spins()));
     });
 
-    m.def("diag", [](torch::Tensor spins, Heisenberg const& hamiltonian) {
-        return diag(std::move(spins), hamiltonian);
-    }, DOC(R"EOF(
+    m.def("apply", [](torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
+                      torch::jit::script::Method forward) {
+        return apply(std::move(spins), polynomial,
+                     make_forward_function(std::move(forward), std::nullopt));
+    });
+
+    m.def(
+        "diag",
+        [](torch::Tensor spins, Heisenberg const& hamiltonian) {
+            return diag(std::move(spins), hamiltonian);
+        },
+        DOC(R"EOF(
         Computes diagonal elements ``⟨s|H|s⟩``.
 
-        :param spins: a 1D tensor of spin configurations for which to compute
-            diagonal matrix elements.
+        :param spins: a tensor of packed spin configurations for which to
+            compute diagonal matrix elements.
         :param hamiltonian: operator which matrix elements to compute.)EOF"),
-    py::arg{"spins"}, py::arg{"hamiltonian"});
+        py::arg{"spins"}, py::arg{"hamiltonian"});
 
 #undef DOC
 }

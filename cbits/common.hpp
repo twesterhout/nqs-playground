@@ -146,17 +146,10 @@ using aligned_vector =
     std::vector<T, boost::alignment::aligned_allocator<T, std::max<size_t>(
                                                               64, alignof(T))>>;
 
-class SpinVector;
-
-using RawForwardT =
-    stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
-                             /*capacity=*/32, /*alignment=*/8>;
-static_assert(sizeof(RawForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
-
-using ForwardT =
-    stdext::inplace_function<auto(gsl::span<SpinVector const>)->torch::Tensor,
-                             /*capacity=*/32, /*alignment=*/8>;
-static_assert(sizeof(ForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
+// using RawForwardT =
+//     stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
+//                              /*capacity=*/32, /*alignment=*/8>;
+// static_assert(sizeof(RawForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
 
 namespace v2 {
 using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,

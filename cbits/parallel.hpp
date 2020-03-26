@@ -129,4 +129,28 @@ struct omp_task_handler {
     }
 };
 
+template <class Function, class Int>
+auto omp_parallel_for(Function func, Int first, Int last, Int chunk_size)
+    -> void
+{
+    std::atomic_flag   error_flag    = ATOMIC_FLAG_INIT;
+    std::exception_ptr exception_ptr = nullptr;
+
+#pragma omp parallel for schedule(dynamic, chunk_size) default(none)           \
+    firstprivate(first, last, chunk_size)                                      \
+        shared(func, error_flag, exception_ptr)
+    for (auto i = first; i < last; ++i) {
+        try {
+            func(i);
+        }
+        catch (...) {
+            if (!error_flag.test_and_set()) {
+                exception_ptr = std::current_exception();
+            }
+        }
+    }
+
+    if (exception_ptr) { std::rethrow_exception(exception_ptr); }
+}
+
 TCM_NAMESPACE_END

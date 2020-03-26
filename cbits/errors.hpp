@@ -30,14 +30,7 @@
 
 #include "config.hpp"
 
-#if defined(TCM_GCC)
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wsign-conversion"
-#    pragma GCC diagnostic ignored "-Wsign-promo"
-#    pragma GCC diagnostic ignored "-Wswitch-default"
-#    pragma GCC diagnostic ignored "-Wctor-dtor-privacy"
-#    pragma GCC diagnostic ignored "-Wstrict-overflow"
-#elif defined(TCM_CLANG)
+#if defined(TCM_CLANG)
 #    pragma clang diagnostic push
 #    pragma clang diagnostic ignored "-Wmissing-noreturn"
 #    pragma clang diagnostic ignored "-Wsign-conversion"
@@ -45,9 +38,7 @@
 #    pragma clang diagnostic ignored "-Wundefined-func-template"
 #endif
 #include <fmt/format.h>
-#if defined(TCM_GCC)
-#    pragma GCC diagnostic pop
-#elif defined(TCM_CLANG)
+#if defined(TCM_CLANG)
 #    pragma clang diagnostic pop
 #endif
 
@@ -134,7 +125,7 @@ TCM_NAMESPACE_END
 
 #define TCM_CHECK_TYPE(name, arg, type)                                        \
     TCM_CHECK(arg.scalar_type() == type, std::domain_error,                    \
-              ::fmt::format("{} has wrong type: {}; expected {}" name,         \
+              ::fmt::format("{} has wrong type: {}; expected {}", name,        \
                             arg.scalar_type(), type))
 
 #define TCM_CHECK_CONTIGUOUS(name, arg)                                        \
@@ -161,4 +152,4 @@ template <> struct formatter<::torch::ScalarType> : formatter<string_view> {
     }
 };
 } // namespace fmt
-  // [torch::ScalarType] Formatting }}}
+// [torch::ScalarType] Formatting }}}

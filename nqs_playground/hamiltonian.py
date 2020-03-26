@@ -37,12 +37,17 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from . import _C
+from . import _C, SpinBasis
 from ._C import Heisenberg as _Heisenberg
-from ._C import SpinBasis
 from .core import forward_with_batches
 
-__all__ = ["Heisenberg", "read_hamiltonian", "diagonalise", "local_values", "local_values_slow"]
+__all__ = [
+    "Heisenberg",
+    "read_hamiltonian",
+    "diagonalise",
+    "local_values",
+    "local_values_slow",
+]
 
 
 def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
@@ -62,6 +67,9 @@ def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
             "largest index is {}".format(basis.number_spins, largest)
         )
     return _Heisenberg(specs, basis)
+
+
+Heisenberg.__doc__ = _Heisenberg.__init__.__doc__
 
 
 def read_hamiltonian(stream, basis) -> _Heisenberg:
@@ -155,7 +163,9 @@ def local_values(
         # TODO: add support for batch size
         # Computes log(⟨s|ψ⟩) for all s.
         if log_psi is None:
-            log_psi = forward_with_batches(state, spins, batch_size).to(device='cpu', non_blocking=True)
+            log_psi = forward_with_batches(state, spins, batch_size).to(
+                device="cpu", non_blocking=True
+            )
         log_h_psi = _C.apply(spins, hamiltonian, state._c._get_method("forward"))
         log_h_psi -= log_psi
         log_h_psi = log_h_psi.numpy().view(np.complex64)

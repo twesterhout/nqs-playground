@@ -44,7 +44,9 @@ from typing import List
 import numpy as np
 
 from ._benes import make_perm_fn
-from ._C import Symmetry as _Symmetry
+from ._C import SymmetryBase as _SymmetryBase
+from ._C import Symmetry64 as _Symmetry64
+from ._C import Symmetry512 as _Symmetry512
 
 
 class Symmetry:
@@ -85,8 +87,6 @@ class Symmetry:
         while not np.array_equal(x, identity):
             count += 1
             x = x[p]
-        # if count == 1:
-        #     warnings.warn("`permutation` is an identity mapping")
         return count
 
     @property
@@ -121,10 +121,21 @@ class Symmetry:
     def to_cxx(self):
         r"""Returns the C++ equivalent of this symmetry operator."""
         if self._network is None:
-            self._network = make_perm_fn(self._map)
-        return _Symmetry(
-            (self._network.left, self._network.right), self.sector, self.periodicity
-        )
+            self._network = self.__build_cxx_symmetry()
+        return self._network
+
+    def __build_cxx_symmetry(self):
+        if len(self._map) <= 64:
+            network = make_perm_fn(self._map, bits=64)
+            return _Symmetry64(
+                network.left, network.right, self.sector, self.periodicity
+            )
+        if len(self._map) <= 512:
+            network = make_perm_fn(self._map, bits=512)
+            return _Symmetry512(
+                network.left, network.right, self.sector, self.periodicity
+            )
+        raise ValueError("Systems larger than 512 spins are not yet supported")
 
     def __mul__(self, other):
         r"""Group operation."""
@@ -176,9 +187,9 @@ def _make_cyclic_group(symmetry: Symmetry) -> List[Symmetry]:
     return group
 
 
-def make_group(symmetries: List[Symmetry]) -> List[_Symmetry]:
+def make_group(symmetries: List[Symmetry], cxx=True) -> List[_SymmetryBase]:
     r"""Given a list of symmetries, extends this list into a group."""
-    group = set(sum((_make_cyclic_group(t) for t in symmetries), []))
+    group = dict.fromkeys(sum((_make_cyclic_group(t) for t in symmetries), []))
     while True:
         extra = []
         for x in group:
@@ -189,5 +200,7 @@ def make_group(symmetries: List[Symmetry]) -> List[_Symmetry]:
         if len(extra) == 0:
             break
         for g in extra:
-            group.add(g)
-    return [g.to_cxx() for g in group]
+            group[g] = None # .add(g)
+    if not cxx:
+        return list(group.keys())
+    return [g.to_cxx() for g in group.keys()]

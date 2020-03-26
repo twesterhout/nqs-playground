@@ -7,6 +7,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <torch/extension.h>
 
 TCM_NAMESPACE_BEGIN
 
@@ -48,12 +49,14 @@ auto bind_heisenberg(PyObject* _module) -> void
 
     py::class_<Heisenberg, std::shared_ptr<Heisenberg>>(m, "Heisenberg")
         .def(
-            py::init<Heisenberg::spec_type, std::shared_ptr<SpinBasis const>>(),
+            py::init<Heisenberg::spec_type, std::shared_ptr<BasisBase const>>(),
             DOC(R"EOF(
-            Constructs the Heisenberg Hamiltonian.
+            Constructs the Heisenberg Hamiltonian with given exchange couplings.
+            Full Hamiltonian is: ``∑Jᵢⱼ·σᵢ⊗σⱼ``, where ``σ`` are vector spin
+            operators.
 
             :param specs: is a list of couplings. Each element is a tuple
-                ``(cᵢⱼ, i, j)``. This defines a term ``cᵢⱼ·σᵢ⊗σⱼ``.
+                ``(Jᵢⱼ, i, j)``. This defines a term ``Jᵢⱼ·σᵢ⊗σⱼ``.
             :param basis: specifies the Hilbert space basis on which the
                 Hamiltonian is defined.)EOF"))
         .def_property_readonly(
@@ -76,7 +79,31 @@ auto bind_heisenberg(PyObject* _module) -> void
         .def("__call__", make_call_function<std::complex<float>>(),
              py::arg{"x"}.noconvert(), py::arg{"y"}.noconvert() = py::none())
         .def("__call__", make_call_function<std::complex<double>>(),
-             py::arg{"x"}.noconvert(), py::arg{"y"}.noconvert() = py::none());
+             py::arg{"x"}.noconvert(), py::arg{"y"}.noconvert() = py::none())
+        .def("to_csr", [](Heisenberg const& self) {
+            auto [values, indices] = self._to_sparse<double>();
+            auto const n           = values.size(0);
+            auto const csr_matrix =
+                py::module::import("scipy.sparse").attr("csr_matrix");
+            auto data = py::cast(values).attr("numpy")();
+            auto row_indices =
+                py::cast(torch::narrow(indices, /*dim=*/1, /*start=*/0,
+                                       /*length=*/1))
+                    .attr("squeeze")()
+                    .attr("numpy")();
+            auto col_indices =
+                py::cast(torch::narrow(indices, /*dim=*/1, /*start=*/1,
+                                       /*length=*/1))
+                    .attr("squeeze")()
+                    .attr("numpy")();
+            auto const* basis =
+                static_cast<SmallSpinBasis const*>(self.basis().get());
+            return csr_matrix(
+                std::make_tuple(data,
+                                std::make_tuple(row_indices, col_indices)),
+                std::make_tuple(basis->number_states(),
+                                basis->number_states()));
+        });
 
 #undef DOC
 }

@@ -26,13 +26,14 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "bind_cuda.hpp"
 #include "bind_heisenberg.hpp"
 #include "bind_jacobian.hpp"
 #include "bind_metropolis.hpp"
+#include "bind_polynomial.hpp"
 #include "bind_polynomial_state.hpp"
 #include "bind_spin_basis.hpp"
 #include "bind_symmetry.hpp"
-#include "bind_cuda.hpp"
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;
@@ -56,15 +57,8 @@ PYBIND11_MODULE(_C, m)
     bind_spin_basis(m.ptr());
     bind_heisenberg(m.ptr());
     bind_jacobian(m.ptr());
-    // bind_heisenberg(m);
-    // bind_explicit_state(m);
-    // bind_polynomial(m);
-    // bind_options(m);
-    // bind_chain_result(m);
-    // bind_sampling(m);
-    // bind_networks(m);
-    // bind_dataloader(m);
     bind_metropolis(m.ptr());
+    bind_polynomial(m.ptr());
     bind_polynomial_state(m.ptr());
     bind_cuda(m.ptr());
 }

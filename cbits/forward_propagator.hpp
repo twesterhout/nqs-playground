@@ -28,8 +28,8 @@
 
 #pragma once
 
+#include "bits512.hpp"
 #include "common.hpp"
-#include "config.hpp"
 #include "errors.hpp"
 #include "parallel.hpp"
 
@@ -58,7 +58,7 @@ struct TaskBuilder {
 
   private:
     uint64_t             _i;
-    uint64_t*            _spins_ptr;
+    bits512*             _spins_ptr;
     std::complex<float>* _coeffs_ptr;
     uint64_t             _batch_size;
     Task                 _next_task;
@@ -78,7 +78,7 @@ struct TaskBuilder {
     template <class R,
               class = std::enable_if_t<std::is_same<R, float>::value
                                        || std::is_same<R, double>::value>>
-    auto add(uint64_t const spin, std::complex<R> const coeff)
+    auto add(bits512 const& spin, std::complex<R> const coeff)
     {
         TCM_ASSERT(!full(), "buffer is full");
         _spins_ptr[_i]  = spin;
@@ -115,12 +115,12 @@ class Accumulator {
   private:
     struct state_type {
       private:
-        std::complex<float> _sum;
-        float               _scale;
+        std::complex<double> _sum;
+        double               _scale;
 
       public:
-        constexpr state_type(std::complex<float> const sum   = {0.0f, 0.0f},
-                             float const               scale = 0.0f) noexcept
+        constexpr state_type(std::complex<double> const sum   = {0.0f, 0.0f},
+                             double const               scale = 0.0f) noexcept
             : _sum{sum}, _scale{scale}
         {}
         constexpr state_type(state_type const&) noexcept = default;
@@ -141,9 +141,9 @@ class Accumulator {
             return *this;
         }
 
-        auto get_log() const noexcept -> std::complex<float>
+        auto get_log() const noexcept
         {
-            return _scale + std::log(_sum);
+            return static_cast<std::complex<float>>(_scale + std::log(_sum));
         }
     };
 
@@ -225,7 +225,7 @@ auto Accumulator::operator()(ForEach&& for_each) -> void
 {
     TCM_ASSERT(!_builder.full(), "precondition violated");
     _builder.start();
-    std::forward<ForEach>(for_each)([this](auto const spin, auto const coeff) {
+    std::forward<ForEach>(for_each)([this](auto const& spin, auto const coeff) {
         _builder.add(spin, coeff);
         if (_builder.full()) {
             drain_if_needed();

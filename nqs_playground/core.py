@@ -64,6 +64,17 @@ def with_file_like(f, mode, body):
             f.close()
 
 
+class Unpack(torch.nn.Module):
+    n: Final[int]
+
+    def __init__(self, n: int):
+        super().__init__()
+        self.n = n
+
+    def forward(self, x):
+        return torch.ops.tcm.unpack(x, self.n)
+
+
 class SetToTrain(object):
     """
     Temporary sets the module (i.e. a ``torch.nn.Module``) into training mode.
@@ -162,24 +173,18 @@ def forward_with_batches(f, xs, batch_size: int) -> torch.Tensor:
     return torch.cat(out, dim=0)
 
 
-
-
 class SpinDataset(torch.utils.data.IterableDataset):
     r"""Dataset wrapping spin configurations and corresponding values.
 
     :param spins: either a ``numpy.ndarray`` of ``uint64`` or a
         ``torch.Tensor`` of ``int64`` containing compact spin configurations.
     :param values: a ``torch.Tensor``.
-    :param number_spins: number of spins in the system. This is used to unpack
-        spin configurations.
     :param batch_size: batch size.
     :param shuffle: whether to shuffle the samples.
     :param device: device where the batches will be used.
     """
 
-    def __init__(
-        self, spins, values, number_spins, batch_size, shuffle=False, device=None
-    ):
+    def __init__(self, spins, values, batch_size, shuffle=False, device=None):
         if isinstance(spins, np.ndarray):
             if spins.dtype != np.uint64:
                 raise TypeError(
@@ -215,13 +220,6 @@ class SpinDataset(torch.utils.data.IterableDataset):
                 "".format(spins.size(), values.size())
             )
 
-        if number_spins <= 0:
-            raise ValueError(
-                "invalid number_spins: {}; expected a positive integer"
-                "".format(number_spins)
-            )
-        self.number_spins = number_spins
-
         if batch_size <= 0:
             raise ValueError(
                 "invalid batch_size: {}; expected a positive integer"
@@ -235,26 +233,26 @@ class SpinDataset(torch.utils.data.IterableDataset):
             device = torch.device(device)
 
         self.device = device
-        if self.device.type == "cuda":
-            self.values = self.values.pin_memory()
-
-        self.dataset = _C.v2.ChunkLoader(
-            _C.v2.SpinDataset(self.spins, self.values, self.number_spins),
-            chunk_size=self.batch_size * max(81920 // self.batch_size, 1),
-            shuffle=shuffle,
-            device=self.device,
-            pin_memory=self.device.type == "cuda",
-        )
+        self.spins = self.spins.to(self.device)
+        self.values = self.values.to(self.device)
+        self.shuffle = shuffle
 
     def __len__(self) -> int:
-        return self.spins.shape[0]
+        return (self.spins.size(0) + self.batch_size - 1) // self.batch_size
 
     def __iter__(self):
-        for xs, ys in self.dataset:
-            for mini_batch in zip(
-                torch.split(xs, self.batch_size), torch.split(ys, self.batch_size)
-            ):
-                yield mini_batch
+        print("__iter__: {}, {}".format(self.spins.size(), self.values.size()))
+        if self.shuffle:
+            indices = torch.randperm(self.spins.size(0), device=self.device)
+            spins = self.spins[indices]
+            values = self.values[indices]
+        else:
+            spins = self.spins
+            values = self.values
+        return zip(
+            torch.split(self.spins, self.batch_size),
+            torch.split(self.values, self.batch_size),
+        )
 
 
 def random_split(dataset, k, replacement=False, weights=None):
@@ -384,7 +382,7 @@ def combine_amplitude_and_sign(
 
 
 def combine_amplitude_and_phase(
-        *modules, number_spins: Optional[int], apply_log: bool = False, use_jit: bool = True
+    *modules, apply_log: bool = False, use_jit: bool = True
 ) -> torch.nn.Module:
     r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
     and phase into a single module representing the logarithm of the
@@ -398,23 +396,17 @@ def combine_amplitude_and_phase(
     :param use_jit: if ``True``, the returned module is a
         ``torch.jit.ScriptModule``.
     """
-    if number_spins is None:
-        number_spins = -1
 
     class CombiningState(torch.nn.Module):
         apply_log: Final[bool]
-        number_spins: Final[int]
 
         def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
             super().__init__()
             self.apply_log = apply_log
-            self.number_spins = number_spins
             self.amplitude = amplitude
             self.phase = phase
 
         def forward(self, x: torch.Tensor):
-            if self.number_spins > 0:
-                x = torch.ops.tcm.unpack(x, self.number_spins)
             a = self.amplitude(x)
             if self.apply_log:
                 a = torch.log_(a)
@@ -443,8 +435,8 @@ def combine_amplitude_and_phase(
 #     # assert torch.all(r == state(_C.unpack(input)))
 #     # return r
 #     return torch.cat(out, dim=0)
-# 
-# 
+#
+#
 # def local_energy(
 #     state: torch.jit.ScriptModule,
 #     hamiltonian: _C.v2.Heisenberg,
@@ -453,7 +445,7 @@ def combine_amplitude_and_phase(
 #     batch_size: int = 128,
 # ) -> np.ndarray:
 #     r"""Computes local estimators ⟨σ|H|ψ⟩/⟨σ|ψ⟩ for all σ.
-# 
+#
 #     :param state: wavefunction ``ψ``. ``state`` should be a function
 #         mapping ``R^{batch_size x in_features}`` to ``R^{batch_size x 2}``.
 #         Columns of the output are interpreted as real and imaginary parts of
@@ -465,7 +457,7 @@ def combine_amplitude_and_phase(
 #         ``complex64``.
 #     :param batch_size: batch size to use for forward propagation through
 #         ``state``.
-# 
+#
 #     :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
 #     """
 #     assert isinstance(state, torch.jit.ScriptModule)
@@ -488,7 +480,7 @@ def combine_amplitude_and_phase(
 #                     "to combine amplitude and phase networks?".format(log_values.dim())
 #                 )
 #             log_values = log_values.numpy().view(np.complex64)
-# 
+#
 #         log_H_values = (
 #             forward_with_batches(
 #                 _C.v2.PolynomialState(

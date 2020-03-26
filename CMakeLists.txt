@@ -173,7 +173,8 @@ if(NOT TARGET fmt::fmt)
     # Mark {fmt} include directories as system. Otherwise, we'd get a whole lot
     # of warnings...
     get_property(v TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
-    set_property(TARGET fmt PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${v})
+    set_property(TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+    target_include_directories(fmt SYSTEM BEFORE INTERFACE ${v})
 endif()
 
 # gsl-lite library
@@ -273,16 +274,25 @@ if(NOT TARGET Boost::boost)
     execute_process(COMMAND git submodule update --init -- external/boost
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     execute_process(COMMAND git submodule update --init -- libs/align
+                                                           libs/array
                                                            libs/assert
+                                                           libs/concept_check
                                                            libs/config
                                                            libs/container
                                                            libs/core
                                                            libs/detail
                                                            libs/integer
                                                            libs/intrusive
+                                                           libs/iterator
+                                                           libs/lexical_cast
+                                                           libs/math
                                                            libs/move
+                                                           libs/mpl
+                                                           libs/numeric/conversion
                                                            libs/pool
                                                            libs/predef
+                                                           libs/preprocessor
+                                                           libs/range
                                                            libs/smart_ptr
                                                            libs/static_assert
                                                            libs/throw_exception
@@ -292,16 +302,25 @@ if(NOT TARGET Boost::boost)
     add_library(Boost INTERFACE)
     target_include_directories(Boost SYSTEM INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/array/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/concept_check/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/container/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/integer/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/intrusive/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/iterator/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/lexical_cast/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/math/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/move/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/mpl/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/numeric/conversion/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/predef/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/preprocessor/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/range/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/smart_ptr/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/throw_exception/include
@@ -430,12 +449,14 @@ add_library(nqs SHARED
     cbits/spin_basis.cpp
     cbits/parallel.cpp
     cbits/pool.cpp
+    cbits/tensor_info.cpp
     cbits/trim.cpp
 )
 nqs_cbits_add_low_level_flags(nqs)
 target_compile_definitions(nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
+target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
 target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu)
 if(CMAKE_CUDA_COMPILER)
     target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
@@ -448,6 +469,7 @@ pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
     cbits/python/bind_heisenberg.cpp
     cbits/python/bind_metropolis.cpp
     cbits/python/bind_spin_basis.cpp
+    cbits/python/bind_polynomial.cpp
     cbits/python/bind_polynomial_state.cpp
     cbits/python/bind_jacobian.cpp
     cbits/python/bind_cuda.cpp

@@ -28,201 +28,114 @@
 
 #pragma once
 
-#include "config.hpp"
-#include "errors.hpp"
 #include "symmetry.hpp"
 
-#include <boost/align/aligned_allocator.hpp>
-#include <gsl/gsl-lite.hpp>
-
-#include <array>
 #include <optional>
-#include <tuple>
 #include <type_traits>
 #include <vector>
 
 TCM_NAMESPACE_BEGIN
 
-namespace detail {
+// BasisBase {{{
+class TCM_EXPORT BasisBase : public std::enable_shared_from_this<BasisBase> {
+  protected:
+    unsigned                _number_spins;
+    std::optional<unsigned> _hamming_weight;
 
-/// Checks whether Iterator is an iterator over objects of type T.
-template <class Iterator, class T>
-constexpr auto is_iterator_for() noexcept -> bool
+  public:
+    BasisBase(unsigned number_spins, std::optional<unsigned> hamming_weight);
+    BasisBase(BasisBase const&)     = delete;
+    BasisBase(BasisBase&&) noexcept = delete;
+    auto operator=(BasisBase const&) -> BasisBase& = delete;
+    auto operator=(BasisBase &&) -> BasisBase& = delete;
+
+    constexpr auto number_spins() const noexcept -> unsigned;
+    constexpr auto hamming_weight() const noexcept -> std::optional<unsigned>;
+
+    virtual auto full_info(bits512 const& x) const
+        -> std::tuple<bits512, std::complex<double>, double> = 0;
+
+    virtual ~BasisBase() = default;
+};
+
+constexpr auto BasisBase::number_spins() const noexcept -> unsigned
 {
-    return std::is_same<
-        std::remove_const_t<std::remove_reference_t<
-            typename std::iterator_traits<Iterator>::reference>>,
-        T>::value;
+    return _number_spins;
 }
 
-#if 0
-// find_representative {{{
-/// Given a symmetry group, returns the representative state of orbit of \p x.
-///
-/// Representative state is defined as the smallest integer in the orbit.
-template <class Iterator, class Sentinel,
-          class = std::enable_if_t<is_iterator_for<Iterator, Symmetry>()
-                                   && is_iterator_for<Sentinel, Symmetry>()>>
-constexpr auto find_representative(Iterator first, Sentinel last,
-                                   Symmetry::UInt const x) noexcept
-    -> Symmetry::UInt
+constexpr auto BasisBase::hamming_weight() const noexcept
+    -> std::optional<unsigned>
 {
-    auto repr = x;
-    for (; first != last; ++first) {
-        auto const y = (*first)(x);
-        if (y < repr) { repr = y; }
-    }
-    return repr;
-}
-
-template auto find_representative(Symmetry const* first, Symmetry const* last,
-                                  Symmetry::UInt x) noexcept -> Symmetry::UInt;
-template auto find_representative(Symmetry* first, Symmetry* last,
-                                  Symmetry::UInt x) noexcept -> Symmetry::UInt;
-// }}}
-#endif
-
-#if 0
-// find_normalisation {{{
-/// Given a symmetry group and a representative state \p x, finds the norm of
-/// the basis element corresponding to \p x. If the group is empty, then 1 is
-/// returned because there's effectively no basis transformation.
-template <class Iterator, class Sentinel,
-          class = std::enable_if_t<is_iterator_for<Iterator, Symmetry>()
-                                   && is_iterator_for<Sentinel, Symmetry>()>>
-constexpr auto find_normalisation(Iterator first, Sentinel last,
-                                  Symmetry::UInt const x,
-                                  std::true_type /*is representative?*/)
-    -> double
-{
-    static_assert(
-        std::is_same<typename std::iterator_traits<Iterator>::iterator_category,
-                     std::random_access_iterator_tag>::value,
-        TCM_STATIC_ASSERT_BUG_MESSAGE);
-    if (first == last) { return 1.0; }
-    auto const count = static_cast<unsigned>(std::distance(first, last));
-    auto       norm  = 0.0;
-    for (auto i = 0U; i < count; ++i, ++first) {
-        auto const y = (*first)(x);
-        TCM_ASSERT(y >= x, "x must be a representative state");
-        if (y == x) {
-            // We're actually interested in
-            // std::conj(first->eigenvalue()).real(), but Re[z*] == Re[z].
-            norm += first->eigenvalue().real();
-        }
-    }
-
-    // We need to detect the case when norm is not zero, but only because of
-    // inaccurate arithmetics. epsilon here is chosen somewhat arbitrarily...
-    constexpr auto epsilon = 1.0e-5;
-    if (std::abs(norm) <= epsilon) { norm = 0.0; }
-    TCM_CHECK(
-        norm >= 0.0, std::runtime_error,
-        fmt::format("state {} appears to have negative squared norm {} :/", x,
-                    norm));
-    return std::sqrt(norm / static_cast<double>(count));
+    return _hamming_weight;
 }
 // }}}
-#endif
 
-} // namespace detail
+// SmallSpinBasis {{{
 
 namespace detail {
 struct BasisCache;
 } // namespace detail
 
-// SpinBasis {{{
-class TCM_IMPORT SpinBasis : public std::enable_shared_from_this<SpinBasis> {
+class TCM_EXPORT SmallSpinBasis : public BasisBase {
   public:
-    using UInt   = Symmetry::UInt;
-    using StateT = UInt;
+    using UInt      = uint64_t;
+    using StateT    = UInt;
+    using SymmetryT = v2::Symmetry<64>;
 
   private:
-    std::vector<Symmetry>               _symmetries;
-    unsigned                            _number_spins;
-    std::optional<unsigned>             _hamming_weight;
+    std::vector<SymmetryT>              _symmetries;
     std::unique_ptr<detail::BasisCache> _cache;
 
   public:
-    SpinBasis(std::vector<Symmetry> symmetries, unsigned number_spins,
-              std::optional<unsigned> hamming_weight);
+    SmallSpinBasis(std::vector<SymmetryT> symmetries, unsigned number_spins,
+                   std::optional<unsigned> hamming_weight);
 
-    SpinBasis(SpinBasis const&)     = delete;
-    SpinBasis(SpinBasis&&) noexcept = delete;
-    auto operator=(SpinBasis const&) -> SpinBasis& = delete;
-    auto operator=(SpinBasis &&) -> SpinBasis& = delete;
+    SmallSpinBasis(SmallSpinBasis const&)     = delete;
+    SmallSpinBasis(SmallSpinBasis&&) noexcept = delete;
+    auto operator=(SmallSpinBasis const&) -> SmallSpinBasis& = delete;
+    auto operator=(SmallSpinBasis &&) -> SmallSpinBasis& = delete;
 
     // We actually want the desctructor to be implicitly defined, but then
     // the definition of BasisCache should be available. So we defer this step.
-    ~SpinBasis();
+    ~SmallSpinBasis() override;
 
-    // inline auto representative(StateT x) const noexcept -> StateT;
-    // inline auto normalisation(StateT x) const -> StateT;
-    auto full_info(StateT x) const
-        -> std::tuple<StateT, std::complex<double>, double>;
+    auto full_info(uint64_t x) const
+        -> std::tuple<uint64_t, std::complex<double>, double>;
 
-    constexpr auto number_spins() const noexcept -> unsigned;
-    constexpr auto hamming_weight() const noexcept -> std::optional<unsigned>;
+    auto full_info(bits512 const& x) const
+        -> std::tuple<bits512, std::complex<double>, double> override;
 
     auto is_real() const noexcept -> bool;
     auto build() -> void;
     auto states() const -> gsl::span<StateT const>;
     auto number_states() const -> uint64_t;
     auto index(StateT const x) const -> uint64_t;
-
-    using PickleStateT = std::tuple<
-        std::vector<Symmetry>, unsigned, std::optional<unsigned>,
-        std::optional<std::tuple<std::vector<StateT>,
-                                 std::vector<std::pair<uint64_t, uint64_t>>>>>;
-    // This function is terribly inefficient and may run out of memory. Use at
-    // your own risk!
-    auto        _state_as_tuple() const -> PickleStateT;
-    static auto _from_tuple_state(PickleStateT const&)
-        -> std::shared_ptr<SpinBasis>;
 }; // }}}
 
-// SpinBasis IMPLEMENTATION {{{
+// BigSpinBasis {{{
+class TCM_EXPORT BigSpinBasis : public BasisBase {
+  public:
+    using StateT    = bits512;
+    using SymmetryT = v2::Symmetry<512>;
 
-#if 0
-auto SpinBasis::normalisation(StateT x) const -> StateT
-{
-    using std::begin, std::end;
-    TCM_CHECK(representative(x) == x, std::runtime_error,
-              fmt::format("invalid state {}; expected a representative", x));
-    return detail::find_normalisation(begin(_symmetries), end(_symmetries), x,
-                                      std::true_type{});
-}
+  private:
+    std::vector<SymmetryT> _symmetries;
 
-auto SpinBasis::representative(StateT const x) const noexcept -> StateT
-{
-    using std::begin, std::end;
-    return detail::find_representative(begin(_symmetries), end(_symmetries), x);
-}
-#endif
+  public:
+    BigSpinBasis(std::vector<SymmetryT> symmetries, unsigned number_spins,
+                 std::optional<unsigned> hamming_weight);
 
-constexpr auto SpinBasis::number_spins() const noexcept -> unsigned
-{
-    return _number_spins;
-}
+    BigSpinBasis(BigSpinBasis const&) = delete;
+    BigSpinBasis(BigSpinBasis&&)      = delete;
+    auto operator=(BigSpinBasis const&) -> BigSpinBasis& = delete;
+    auto operator=(BigSpinBasis &&) -> BigSpinBasis& = delete;
 
-constexpr auto SpinBasis::hamming_weight() const noexcept
-    -> std::optional<unsigned>
-{
-    return _hamming_weight;
-}
+    ~BigSpinBasis() override;
 
-#if 0
-constexpr auto SpinBasis::_get_state() const noexcept
-    -> std::tuple<std::vector<Symmetry> const&, unsigned,
-                  std::optional<unsigned>,
-                  std::optional<detail::BasisCache> const&>
-{
-    return {_symmetries, _number_spins, _hamming_weight, _cache};
-}
-#endif
-// }}}
+    auto full_info(bits512 const& x) const
+        -> std::tuple<bits512, std::complex<double>, double> override;
 
-TCM_IMPORT auto expand_states(SpinBasis const& basis, torch::Tensor src,
-                              torch::Tensor states) -> torch::Tensor;
+    // auto is_real() const noexcept -> bool;
+}; // }}}
 
 TCM_NAMESPACE_END

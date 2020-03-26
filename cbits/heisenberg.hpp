@@ -1,4 +1,4 @@
-// Copyright (c) 2019, Tom Westerhout
+// Copyright (c) 2019-2020, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -47,7 +47,7 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
 
   private:
     spec_type                        _edges; ///< Graph edges
-    std::shared_ptr<SpinBasis const> _basis;
+    std::shared_ptr<BasisBase const> _basis;
     unsigned _max_index; ///< The greatest site index present in `_edges`.
                          ///< It is used to detect errors when one tries to
                          ///< apply the hamiltonian to a spin configuration
@@ -57,7 +57,7 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
 
   public:
     /// Constructs a hamiltonian given graph edges and couplings.
-    Heisenberg(spec_type edges, std::shared_ptr<SpinBasis const> basis);
+    Heisenberg(spec_type edges, std::shared_ptr<BasisBase const> basis);
 
     /// Copy and Move constructors/assignments
     Heisenberg(Heisenberg const&)     = default;
@@ -85,21 +85,22 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         return _edges;
     }
 
-    auto basis() const noexcept -> std::shared_ptr<SpinBasis const>
+    auto basis() const noexcept -> std::shared_ptr<BasisBase const>
     {
         return _basis;
     }
 
-    template <class Callback>
-    __attribute__((visibility("hidden"))) auto
-    operator()(SpinBasis::StateT const spin, Callback&& callback) const -> void
+  private:
+    template <class Basis, class StateT, class Callback>
+    auto call_impl(StateT const& spin, Callback&& callback) const -> void
     {
-        TCM_ASSERT(_edges.empty() || max_index() < _basis->number_spins(),
+        auto const* basis = static_cast<Basis const*>(_basis.get());
+        TCM_ASSERT(_edges.empty() || max_index() < basis->number_spins(),
                    fmt::format("`spin` is too short {}; expected >{}",
-                               _basis->number_spins(), max_index()));
-        auto const norm = std::get<2>(_basis->full_info(spin));
+                               basis->number_spins(), max_index()));
+        auto const norm = std::get<2>(basis->full_info(spin));
         TCM_CHECK(norm > 0.0, std::runtime_error,
-                  fmt::format("state {} does not belong to the basis", spin));
+                  fmt::format("state does not belong to the basis"));
         auto coeff = complex_type{0, 0};
         for (auto const [coupling, first, second] : edges()) {
             // Heisenberg hamiltonian works more or less like this:
@@ -112,14 +113,10 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
             // where K is the "kernel". We want to perform
             // |ψ⟩ += c * K|σᵢσⱼ⟩ for each edge (i, j).
             //
-            auto const not_aligned =
-                ((spin >> first) ^ (spin >> second)) & 0x01;
-            if (not_aligned) {
+            if (are_not_aligned(spin, first, second)) {
                 coeff -= coupling;
                 auto [branch_spin, branch_eigenvalue, branch_norm] =
-                    _basis->full_info(
-                        spin
-                        ^ ((uint64_t{1} << first) | (uint64_t{1} << second)));
+                    basis->full_info(flipped(spin, first, second));
                 if (branch_norm > 0.0) {
                     callback(branch_spin, 2.0 * coupling * branch_norm / norm
                                               * branch_eigenvalue);
@@ -132,12 +129,34 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         callback(spin, coeff);
     }
 
-    auto diag(SpinBasis::StateT const spin) const noexcept -> complex_type
+  public:
+    template <class Callback>
+    auto operator()(bits512 const& spin, Callback&& callback) const -> void
+    {
+        auto const& basis = *_basis;
+        if (typeid(basis) == typeid(SmallSpinBasis)) {
+            return call_impl<SmallSpinBasis>(spin,
+                                             std::forward<Callback>(callback));
+        }
+        if (typeid(basis) == typeid(BigSpinBasis)) {
+            return call_impl<BigSpinBasis>(spin,
+                                           std::forward<Callback>(callback));
+        }
+        TCM_ERROR(std::runtime_error,
+                  fmt::format(
+                      "invalid basis: {}; not yet supported by the Hamiltonian",
+                      typeid(basis).name()));
+    }
+
+    template <class StateT,
+              class = std::enable_if_t<
+                  std::is_same_v<StateT,
+                                 uint64_t> || std::is_same_v<StateT, bits512>>>
+    auto diag(StateT const& spin) const noexcept -> complex_type
     {
         auto coeff = complex_type{0, 0};
         for (auto const [coupling, first, second] : edges()) {
-            auto const not_aligned =
-                ((spin >> first) ^ (spin >> second)) & 0x01;
+            auto const not_aligned = are_not_aligned(spin, first, second);
             coeff += static_cast<real_type>(1 - 2 * not_aligned) * coupling;
         }
         return coeff;
@@ -146,6 +165,9 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
     template <class T, class = std::enable_if_t<
                            std::is_floating_point_v<T> || is_complex_v<T>>>
     auto operator()(gsl::span<T const> x, gsl::span<T> y) const -> void;
+
+    template <class T>
+    auto _to_sparse() const -> std::tuple<torch::Tensor, torch::Tensor>;
 };
 
 TCM_NAMESPACE_END

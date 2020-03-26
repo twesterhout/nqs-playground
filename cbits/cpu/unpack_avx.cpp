@@ -36,6 +36,15 @@ namespace detail {
         return broadcasted;
     }
 
+    TCM_FORCEINLINE auto _unpack_word(uint64_t x, float* out) TCM_NOEXCEPT
+        -> float*
+    {
+        for (auto i = 0; i < 8; ++i, out += 8, x >>= 8U) {
+            _unpack(static_cast<uint8_t>(x & 0xFF)).store(out);
+        }
+        return out;
+    }
+
     template <bool Unsafe>
     TCM_FORCEINLINE auto _unpack(uint64_t x, unsigned const number_spins,
                                  float* out) TCM_NOEXCEPT -> float*
@@ -72,8 +81,51 @@ namespace detail {
                           ", ")));
         return out;
     }
+
+    template <bool Unsafe>
+    TCM_FORCEINLINE auto _unpack(bits512 const& bits, unsigned const count,
+                                 float* out) TCM_NOEXCEPT -> float*
+    {
+        constexpr auto block = 64U;
+
+        auto i = 0U;
+        for (; i < count / block; ++i) {
+            out = _unpack_word(bits.words[i], out);
+        }
+        if (auto const rest = count % block; rest != 0) {
+            out = _unpack<Unsafe>(bits.words[i], rest, out);
+        }
+        return out;
+    }
 } // namespace detail
 
+template <class Bits, class Projection = detail::_IdentityProjection>
+auto unpack_impl(TensorInfo<Bits const> const& src_info,
+                 TensorInfo<float, 2> const&   dst_info,
+                 Projection                    proj = Projection{}) -> void
+{
+    if (TCM_UNLIKELY(src_info.size() == 0)) { return; }
+    TCM_CHECK(
+        dst_info.strides[0] == dst_info.sizes[1], std::invalid_argument,
+        fmt::format("unpack_cpu_avx does not support strided output tensors"));
+    auto const number_spins = static_cast<unsigned>(dst_info.sizes[1]);
+    auto const rest         = number_spins % 8;
+    auto const tail         = std::min<int64_t>(
+        ((8U - rest) + number_spins - 1U) / number_spins, src_info.size());
+    auto* src = src_info.data;
+    auto* dst = dst_info.data;
+    auto  i   = int64_t{0};
+    for (; i < src_info.size() - tail;
+         ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
+        detail::_unpack</*Unsafe=*/true>(proj(*src), number_spins, dst);
+    }
+    for (; i < src_info.size();
+         ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
+        detail::_unpack</*Unsafe=*/false>(proj(*src), number_spins, dst);
+    }
+}
+
+#if 0
 template <class Iterator, class Sentinel,
           class Projection = detail::_IdentityProjection>
 auto unpack(Iterator first, Sentinel last, unsigned const number_spins,
@@ -94,8 +146,22 @@ auto unpack(Iterator first, Sentinel last, unsigned const number_spins,
             detail::_unpack</*Unsafe=*/false>(proj(*first), number_spins, data);
     }
 }
+#endif
 // }}}
 
+template <class Bits>
+auto unpack_cpu_avx(TensorInfo<Bits const> const& src_info,
+                    TensorInfo<float, 2> const&   dst_info) -> void
+{
+    unpack_impl(src_info, dst_info);
+}
+
+template TCM_EXPORT auto unpack_cpu_avx(TensorInfo<uint64_t const> const&,
+                                        TensorInfo<float, 2> const&) -> void;
+template TCM_EXPORT auto unpack_cpu_avx(TensorInfo<bits512 const> const&,
+                                        TensorInfo<float, 2> const&) -> void;
+
+#if 0
 TCM_EXPORT auto unpack_cpu_avx(torch::Tensor spins, int64_t const number_spins,
                                torch::Tensor out) -> void
 {
@@ -103,6 +169,7 @@ TCM_EXPORT auto unpack_cpu_avx(torch::Tensor spins, int64_t const number_spins,
     auto const last  = first + spins.size(0);
     unpack(first, last, static_cast<unsigned>(number_spins), out);
 }
+#endif
 
 #if 0
 TCM_EXPORT auto unpack(torch::Tensor x, torch::Tensor indices,

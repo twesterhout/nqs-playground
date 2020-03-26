@@ -1,4 +1,5 @@
 from itertools import islice
+from random import randint
 from typing import Optional, Tuple, Callable
 
 import numpy as np
@@ -49,9 +50,7 @@ class Sampler:
 
     def bootstrap(self) -> Tuple[Tensor, Tensor, Tensor]:
         state = _prepare_initial_state(self.basis, self.batch_size)
-        norm = torch.tensor(
-            [self.basis.full_info(x)[2] for x in state], dtype=torch.float32
-        )
+        norm = self.basis.norm(state)
         if self.device.type != "cpu":
             state = state.to(self.device)
             norm = norm.to(self.device)
@@ -66,8 +65,6 @@ class Sampler:
             yield current
             proposed_state, proposed_norm = self.kernel(current[0])
             proposed_log_prob = self.log_prob_fn(proposed_state)
-            if proposed_log_prob.dim() == 2:
-                proposed_log_prob.squeeze(dim=1)
             current = _step(current, (proposed_state, proposed_norm, proposed_log_prob))
 
 
@@ -124,12 +121,17 @@ def _sample_using_metropolis(
     log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions
 ):
     kernel = MetropolisKernel(basis)
-    sampler = Sampler(kernel, lambda x: 2 * log_ψ(x), batch_size=options.number_chains, device=options.device)
+    sampler = Sampler(
+        kernel,
+        lambda x: 2 * log_ψ(x),
+        batch_size=options.number_chains,
+        device=options.device,
+    )
 
     shape = (options.number_samples, options.number_chains)
-    states = torch.empty(shape, dtype=torch.int64, device=options.device)
+    states = torch.empty(shape + (8,), dtype=torch.int64, device=options.device)
     log_prob = torch.empty(shape, dtype=torch.float32, device=options.device)
-    assert states.stride(-1) == 1 and log_prob.stride(-1) == 1
+    assert states.is_contiguous() and log_prob.is_contiguous()
     for i, (x, _, y) in enumerate(
         islice(
             sampler,
@@ -140,7 +142,7 @@ def _sample_using_metropolis(
     ):
         states[i] = x
         log_prob[i] = y
-    return states.flatten(), log_prob.flatten()
+    return states.view(-1, 8), log_prob.view(-1), None
 
 
 def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
@@ -208,12 +210,19 @@ def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: Sampling
         log_prob = probabilities[cpu_indices].to(device=device, dtype=torch.float32)
         log_prob = torch.log_(log_prob)
         states = xs[cpu_indices.to(device)]
-    return states, log_prob
+    states = torch.cat(
+        [
+            states.unsqueeze(dim=1),
+            torch.zeros(states.size(0), 7, device=device, dtype=torch.int64),
+        ],
+        dim=1,
+    )
+    return states, log_prob, None
 
 
 def sample_some(
     log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions, mode="exact"
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
     with torch.no_grad(), torch.jit.optimized_execution(True):
         if mode == "exact":
             return _sample_exactly(log_ψ, basis, options)
@@ -332,13 +341,15 @@ def test():
     return _sample_using_metropolis(m, basis, options)
 
 
-@torch.jit.script
+# @torch.jit.script
 def _step(
     current: Tuple[Tensor, Tensor, Tensor], proposed: Tuple[Tensor, Tensor, Tensor]
 ) -> Tuple[Tensor, Tensor, Tensor]:
     r"""Internal function of the Sampler."""
     state, norm, log_prob = current
     proposed_state, proposed_norm, proposed_log_prob = proposed
+    if proposed_log_prob.dim() == 2:
+        proposed_log_prob = proposed_log_prob.squeeze(dim=1)
     r = torch.rand(state.size(0)) * proposed_norm / norm
     t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - log_prob))
     state[t] = proposed_state[t]
@@ -348,14 +359,13 @@ def _step(
 
 
 def _random_spin_configuration(n: int, hamming_weight: Optional[int] = None) -> int:
-    assert 0 <= n and n <= 64, "invalid number of spins"
     if hamming_weight is not None:
         assert 0 <= hamming_weight and hamming_weight <= n, "invalid hamming weight"
         bits = ["1"] * hamming_weight + ["0"] * (n - hamming_weight)
         np.random.shuffle(bits)
         return int("".join(bits), base=2)
     else:
-        return int(np.random.randint(0, 1 << n, dtype=np.uint64))
+        return randint(0, 1 << n - 1)
 
 
 def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
@@ -365,17 +375,24 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
         raise ValueError(
             "invalid batch size: {}; expected a positive integer".format(batch_size)
         )
-    if basis.number_spins > 64:
-        raise ValueError("such long spin configurations are not yet supported")
     # First, we generate a bunch of representatives, and then sample uniformly
     # from them.
     states = set()
     for _ in range(max(2 * batch_size, 10000)):
         spin = _random_spin_configuration(basis.number_spins, basis.hamming_weight)
         states.add(basis.full_info(spin)[0])
-    states = np.array(list(states), dtype=np.uint64)
-    batch = np.random.choice(states, size=batch_size, replace=True)
-    return torch.from_numpy(batch.view(np.int64))
+
+    def to_array(x, out):
+        for i in range(8):
+            out[i] = x & 0xFFFFFFFFFFFFFFFF
+            x >>= 64
+
+    states = list(states)
+    out = torch.empty((batch_size, 8), dtype=torch.int64)
+    batch = out.numpy().view(np.uint64)
+    for i, index in enumerate(torch.randperm(len(states))[:batch_size]):
+        to_array(states[index], batch[i])
+    return out
 
 
 @torch.jit.script

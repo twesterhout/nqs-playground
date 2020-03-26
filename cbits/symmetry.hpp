@@ -28,8 +28,10 @@
 
 #pragma once
 
-#include "config.hpp"
+#include "bits512.hpp"
 #include "errors.hpp"
+
+#include <gsl/gsl-lite.hpp>
 
 #include <array>
 #include <complex>
@@ -37,25 +39,6 @@
 #include <type_traits>
 
 TCM_NAMESPACE_BEGIN
-
-// Permutations {{{
-namespace detail {
-
-/// Rounds an integer up to the next power of 2. If \p is already a power of 2,
-/// then \p x itself is returned.
-///
-/// https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-constexpr auto round_up_pow_2(unsigned x) noexcept -> unsigned
-{
-    x--;
-    x |= x >> 1U;
-    x |= x >> 2U;
-    x |= x >> 4U;
-    x |= x >> 8U;
-    x |= x >> 16U;
-    x++;
-    return x;
-}
 
 /// Returns base-2 logarithm of \p x rounded down to the nearest integer.
 ///
@@ -74,83 +57,147 @@ constexpr auto log2(unsigned x) noexcept -> unsigned
 
 /// Performs one step of the Butterfly network. It exchanges bits with distance
 /// \p d between them if the corresponding bits in the mask \p m are set.
-template <class UInt, class = std::enable_if_t<std::is_integral<UInt>::value
-                                               && !std::is_signed<UInt>::value>>
-constexpr auto bit_permute_step(UInt const x, UInt const m, unsigned d) noexcept
-    -> UInt
+constexpr auto bit_permute_step(uint64_t const x, uint64_t const m,
+                                unsigned const d) noexcept -> uint64_t
 {
     auto const y = (x ^ (x >> d)) & m;
     return x ^ y ^ (y << d);
 }
 
 /// Forward propagates `x` through a butterfly network specified by `masks`.
-template <class UInt, size_t N>
-constexpr auto bfly(UInt x, std::array<UInt, N> const& masks) noexcept -> UInt
+constexpr auto bfly(uint64_t x, std::array<uint64_t, 6> const& masks) noexcept
+    -> uint64_t
 {
-    static_assert(N <= log2(std::numeric_limits<UInt>::digits),
-                  TCM_STATIC_ASSERT_BUG_MESSAGE);
-    for (auto i = 0U; i < N; ++i) {
+    for (auto i = 0U; i < log2(64); ++i) {
         x = bit_permute_step(x, masks[i], 1U << i);
     }
     return x;
 }
 
 /// Backward propagates `x` through a butterfly network specified by `masks`.
-template <class UInt, size_t N>
-constexpr auto ibfly(UInt x, std::array<UInt, N> const& masks) noexcept -> UInt
+constexpr auto ibfly(uint64_t x, std::array<uint64_t, 6> const& masks) noexcept
+    -> uint64_t
 {
-    static_assert(N <= log2(std::numeric_limits<UInt>::digits),
-                  TCM_STATIC_ASSERT_BUG_MESSAGE);
-    for (auto i = static_cast<unsigned>(N);
-         i-- > 0U;) { // Iterates backwards from N - 1 to 0
+    for (auto i = log2(64U); i-- > 0U;) { // Iterates backwards from N - 1 to 0
         x = bit_permute_step(x, masks[i], 1U << i);
     }
     return x;
 }
 
-template <class UInt> struct TCM_IMPORT BenesNetwork {
-    static_assert(std::is_integral<UInt>::value && !std::is_signed<UInt>::value,
-                  "UInt must be an unsigned integral type.");
+/// Implements one step of the Butterfly network.
+///
+/// TODO: This implementation is probably quite slow. Profile & optimize it!
+template <unsigned Shift>
+TCM_FORCEINLINE constexpr auto
+inplace_bit_permute_step(bits512& x, bits512 const& m) noexcept -> void
+{
+    // auto const y = (x ^ (x >> d)) & m;
+    // return x ^ y ^ (y << d);
 
-    // NOTE: DO NOT CHANGE THE ORDER OF MASKS!
-    //
-    // This particular order is used in Symmetry's constructor.
-    using MasksT = std::array<UInt, log2(std::numeric_limits<UInt>::digits)>;
-    MasksT fwd;
-    MasksT bwd;
-
-    constexpr auto operator()(UInt const x) const noexcept -> UInt
-    {
-        return ibfly(bfly(x, fwd), bwd);
+    // This is the simplest possible implementation. We process `x` in words
+    // (i.e. 64 bits). Hence, we have two different cases:
+    bits512 y = {};
+    if constexpr (Shift < 64U) {
+        // y := (x ^ (x >> d)) & m
+        {
+            constexpr auto upper = [](auto const w) { return w >> Shift; };
+            constexpr auto lower = [](auto const w) {
+                return (w & ((1UL << Shift) - 1UL)) << (64U - Shift);
+            };
+            for (auto i = 0; i < 7; ++i) {
+                y.words[i] =
+                    (x.words[i] ^ (lower(x.words[i + 1]) | upper(x.words[i])))
+                    & m.words[i];
+            }
+            y.words[7] = (x.words[7] ^ upper(x.words[7])) & m.words[7];
+        }
+        // x := x ^ y ^ (y << d)
+        {
+            constexpr auto upper = [](auto const w) { return w << Shift; };
+            constexpr auto lower = [](auto const w) {
+                return w >> (64U - Shift);
+            };
+            x.words[0] ^= y.words[0] ^ upper(y.words[0]);
+            for (auto i = 1; i < 8; ++i) {
+                x.words[i] ^=
+                    y.words[i] ^ (upper(y.words[i]) | lower(y.words[i - 1]));
+            }
+        }
     }
-};
+    else {
+        static_assert(Shift % 64U == 0);
+        static_assert(Shift / 64U < 8);
+        constexpr auto Delta = Shift / 64U;
+        // y := (x ^ (x >> d)) & m
+        {
+            for (auto i = 0U; i < 8U - Delta; ++i) {
+                y.words[i] = (x.words[i] ^ x.words[i + Delta]) & m.words[i];
+            }
+            for (auto i = 8U - Delta; i < 8U; ++i) {
+                y.words[i] = (x.words[i] ^ 0UL) & m.words[i];
+            }
+        }
+        // x := x ^ y ^ (y << d)
+        {
+            for (auto i = 0U; i < Delta; ++i) {
+                x.words[i] ^= (y.words[i] ^ 0UL);
+            }
+            for (auto i = Delta; i < 8U; ++i) {
+                x.words[i] ^= y.words[i] ^ y.words[i - Delta];
+            }
+        }
+    }
+}
 
-} // namespace detail
-// }}}
+/// Forward propagates `x` through a butterfly network specified by `masks`.
+constexpr auto bfly(bits512& x, std::array<bits512, 9> const& masks) noexcept
+    -> void
+{
+#define STEP(i) inplace_bit_permute_step<(1U << i)>(x, masks[i])
+    STEP(0);
+    STEP(1);
+    STEP(2);
+    STEP(3);
+    STEP(4);
+    STEP(5);
+    STEP(6);
+    STEP(7);
+    STEP(8);
+#undef STEP
+}
 
-// Symmetry {{{
-struct TCM_IMPORT Symmetry {
-  public:
-    using UInt = uint64_t;
+/// Backward propagates `x` through a butterfly network specified by `masks`.
+constexpr auto ibfly(bits512& x, std::array<bits512, 9> const& masks) noexcept
+    -> void
+{
+#define STEP(i) inplace_bit_permute_step<(1U << i)>(x, masks[i])
+    STEP(8);
+    STEP(7);
+    STEP(6);
+    STEP(5);
+    STEP(4);
+    STEP(3);
+    STEP(2);
+    STEP(1);
+    STEP(0);
+#undef STEP
+}
 
+// SymmetryBase {{{
+struct TCM_IMPORT SymmetryBase {
   private:
-    detail::BenesNetwork<UInt> _permute;
-    unsigned                   _sector;
-    unsigned                   _periodicity;
+    unsigned             _sector;
+    unsigned             _periodicity;
+    std::complex<double> _eigenvalue;
 
   public:
-    Symmetry(detail::BenesNetwork<UInt> permute, unsigned sector,
-             unsigned periodicity);
+    SymmetryBase(unsigned sector, unsigned periodicity);
 
-    Symmetry(Symmetry const&) noexcept = default;
-    Symmetry(Symmetry&&) noexcept      = default;
-    auto operator=(Symmetry const&) noexcept -> Symmetry& = default;
-    auto operator=(Symmetry&&) noexcept -> Symmetry& = default;
+    SymmetryBase(SymmetryBase const&) noexcept = default;
+    SymmetryBase(SymmetryBase&&) noexcept      = default;
+    auto operator=(SymmetryBase const&) noexcept -> SymmetryBase& = default;
+    auto operator=(SymmetryBase&&) noexcept -> SymmetryBase& = default;
 
-    constexpr auto operator()(UInt const x) const noexcept -> UInt
-    {
-        return _permute(x);
-    }
     constexpr auto sector() const noexcept { return _sector; }
     constexpr auto periodicity() const noexcept { return _periodicity; }
     constexpr auto phase() const noexcept -> double
@@ -159,19 +206,124 @@ struct TCM_IMPORT Symmetry {
     }
     auto eigenvalue() const noexcept -> std::complex<double>
     {
-        auto const arg = -2.0 * M_PI * phase();
-        return std::complex<double>{std::cos(arg), std::sin(arg)};
-    }
-
-    using PickleStateT = std::tuple<typename detail::BenesNetwork<UInt>::MasksT,
-                                    typename detail::BenesNetwork<UInt>::MasksT,
-                                    unsigned, unsigned>;
-
-    // Used to implement pickle support.
-    constexpr auto _state_as_tuple() const noexcept -> PickleStateT
-    {
-        return {_permute.fwd, _permute.bwd, _sector, _periodicity};
+        return _eigenvalue;
+        // auto const arg = -2.0 * M_PI * phase();
+        // return std::complex<double>{std::cos(arg), std::sin(arg)};
     }
 }; // }}}
+
+namespace v2 {
+
+template <unsigned Bits> struct Symmetry;
+
+template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
+  public:
+    using StateT = uint64_t;
+
+  private:
+    std::array<uint64_t, 6> _fwd;
+    std::array<uint64_t, 6> _bwd;
+
+  public:
+    Symmetry(std::array<uint64_t, 6> const& forward,
+             std::array<uint64_t, 6> const& backward, unsigned sector,
+             unsigned periodicity);
+
+    Symmetry(Symmetry const&) noexcept = default;
+    Symmetry(Symmetry&&) noexcept      = default;
+    auto operator=(Symmetry const&) noexcept -> Symmetry& = default;
+    auto operator=(Symmetry&&) noexcept -> Symmetry& = default;
+
+    constexpr auto operator()(uint64_t const x) const noexcept -> uint64_t
+    {
+        return ibfly(bfly(x, _fwd), _bwd);
+    }
+};
+
+template <> struct TCM_EXPORT Symmetry<512> : public SymmetryBase {
+  public:
+    using StateT = bits512;
+
+  private:
+    std::array<bits512, 9> _fwd;
+    std::array<bits512, 9> _bwd;
+
+  public:
+    Symmetry(std::array<bits512, 9> const& forward,
+             std::array<bits512, 9> const& backward, unsigned sector,
+             unsigned periodicity);
+
+    Symmetry(Symmetry const&) noexcept = default;
+    Symmetry(Symmetry&&) noexcept      = default;
+    auto operator=(Symmetry const&) noexcept -> Symmetry& = default;
+    auto operator=(Symmetry&&) noexcept -> Symmetry& = default;
+
+    constexpr auto operator()(bits512 const& x) const noexcept -> bits512
+    {
+        auto y = x;
+        bfly(y, _fwd);
+        ibfly(y, _bwd);
+        return y;
+    }
+};
+
+} // namespace v2
+
+TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<64> const> symmetries,
+                          uint64_t                          spin)
+    -> std::tuple</*representative=*/uint64_t,
+                  /*eigenvalue=*/std::complex<double>, /*norm=*/double>;
+
+TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<512> const> symmetries,
+                          bits512 const&                     spin)
+    -> std::tuple</*representative=*/bits512,
+                  /*eigenvalue=*/std::complex<double>, /*norm=*/double>;
+
+template <class... UInts>
+TCM_FORCEINLINE constexpr auto flipped(uint64_t const x, UInts... is) noexcept
+    -> uint64_t
+{
+    return x ^ (... | (1UL << is));
+}
+
+template <class UInt, class = std::enable_if_t<std::is_unsigned_v<UInt>>>
+TCM_FORCEINLINE constexpr auto are_not_aligned(uint64_t const spin,
+                                               UInt const     i,
+                                               UInt const j) noexcept -> bool
+{
+    return ((spin >> i) ^ (spin >> j)) & 0x01;
+}
+
+namespace detail {
+TCM_FORCEINLINE constexpr auto flipped_impl(bits512&) noexcept -> void {}
+template <class... UInts>
+TCM_FORCEINLINE /*constexpr*/ auto flipped_impl(bits512& x, unsigned const i,
+                                                UInts... is) noexcept -> void
+{
+    auto const chunk = i / 64U;
+    auto const rest  = i % 64U;
+    x.words[chunk] ^= (1UL << rest);
+    flipped_impl(x, is...);
+}
+} // namespace detail
+
+template <class... UInts>
+TCM_FORCEINLINE /*constexpr*/ auto flipped(bits512 const& x,
+                                           UInts... is) noexcept -> bits512
+{
+    auto y = x;
+    detail::flipped_impl(y, is...);
+    return y;
+}
+
+template <class UInt, class = std::enable_if_t<std::is_unsigned_v<UInt>>>
+TCM_FORCEINLINE constexpr auto are_not_aligned(bits512 const& spin,
+                                               UInt const     i,
+                                               UInt const j) noexcept -> bool
+{
+    auto const fst = spin.words[i / UInt{64}] >> (i % UInt{64});
+    auto const snd = spin.words[j / UInt{64}] >> (j % UInt{64});
+    return (fst ^ snd) & 0x01;
+}
 
 TCM_NAMESPACE_END

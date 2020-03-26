@@ -1,12 +1,16 @@
 #include "forward_propagator.hpp"
 #include "heisenberg.hpp"
+#include "polynomial.hpp"
 
 TCM_NAMESPACE_BEGIN
 
-TCM_IMPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
+TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
                       v2::ForwardT psi) -> torch::Tensor;
 
-TCM_IMPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
+TCM_EXPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
+                      v2::ForwardT psi) -> torch::Tensor;
+
+TCM_EXPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
     -> torch::Tensor;
 
 #if 0

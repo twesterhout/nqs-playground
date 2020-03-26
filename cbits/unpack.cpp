@@ -10,27 +10,23 @@
 
 TCM_NAMESPACE_BEGIN
 
-TCM_EXPORT auto unpack(torch::Tensor spins, int64_t const number_spins)
+template <class Bits>
+auto unpack_impl(TensorInfo<Bits const> const& spins,
+                 int64_t const number_spins, c10::Device const device)
     -> torch::Tensor
 {
     TCM_CHECK(
         number_spins > 0, std::domain_error,
         fmt::format("invalid number_spins: {}; expected a positive integer",
                     number_spins));
-    TCM_CHECK_TYPE("spins", spins, torch::kInt64);
-    auto shape = spins.sizes();
-    TCM_CHECK(shape.size() == 1 || (shape.size() == 2 && shape[1] == 1),
-              std::domain_error,
-              fmt::format("spins has wrong shape: [{}]; expected a vector",
-                          fmt::join(shape, ", ")));
-    TCM_CHECK(shape[0] * spins.stride(0) < std::numeric_limits<int32_t>::max(),
-              std::domain_error, fmt::format("spins tensor is too big"));
-    auto device = spins.device();
-    auto out    = torch::empty(
-        std::initializer_list<int64_t>{shape[0], number_spins},
+    auto out = torch::empty(
+        std::initializer_list<int64_t>{spins.size(), number_spins},
         torch::TensorOptions{}.device(device).dtype(torch::kFloat32));
+    auto out_info =
+        TensorInfo<float, 2>{static_cast<float*>(out.data_ptr()),
+                             out.sizes().data(), out.strides().data()};
     switch (device.type()) {
-    case c10::DeviceType::CPU: cpu::unpack_cpu(spins, out); break;
+    case c10::DeviceType::CPU: cpu::unpack_cpu(spins, out_info); break;
 #if defined(TCM_USE_CUDA)
     case c10::DeviceType::CUDA: gpu::unpack_cuda(spins, out); break;
 #endif
@@ -47,6 +43,26 @@ TCM_EXPORT auto unpack(torch::Tensor spins, int64_t const number_spins)
     }
     } // end switch
     return out;
+}
+
+TCM_EXPORT auto unpack(torch::Tensor spins, int64_t const number_spins)
+    -> torch::Tensor
+{
+    auto const shape  = spins.sizes();
+    auto const device = spins.device();
+    switch (shape.size()) {
+    case 1:
+        return unpack_impl(obtain_tensor_info<uint64_t const>(spins, "spins"),
+                           number_spins, device);
+    case 2:
+        return unpack_impl(obtain_tensor_info<bits512 const>(spins, "spins"),
+                           number_spins, device);
+    default:
+        TCM_ERROR(std::domain_error,
+                  fmt::format("spins has wrong shape: [{}]; expected either a "
+                              "one- or two-dimensional tensor",
+                              fmt::join(shape, ", ")));
+    }
 }
 
 static auto torch_script_operators = torch::RegisterOperators{}.op(

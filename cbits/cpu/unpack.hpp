@@ -1,15 +1,19 @@
-#include "../config.hpp"
+#include "../bits512.hpp"
+#include "../tensor_info.hpp"
 #include <torch/types.h>
 
 TCM_NAMESPACE_BEGIN
 namespace cpu {
 
-TCM_IMPORT auto unpack_cpu_generic(torch::Tensor spins, int64_t number_spins,
-                                   torch::Tensor out) -> void;
-TCM_IMPORT auto unpack_cpu_avx(torch::Tensor spins, int64_t number_spins,
-                               torch::Tensor out) -> void;
+template <class Bits>
+TCM_EXPORT auto unpack_cpu_avx(TensorInfo<Bits const> const& spins,
+                               TensorInfo<float, 2> const&   out) -> void;
 
-TCM_IMPORT auto unpack_cpu(torch::Tensor spins, torch::Tensor out) -> void;
+TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const> const& spins,
+                           TensorInfo<float, 2> const&       out) -> void;
+
+TCM_EXPORT auto unpack_cpu(TensorInfo<bits512 const> const& spins,
+                           TensorInfo<float, 2> const&      out) -> void;
 
 } // namespace cpu
 TCM_NAMESPACE_END

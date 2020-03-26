@@ -29,23 +29,24 @@
 #pragma once
 
 #include "random.hpp"
+#include "symmetry.hpp"
+#include "tensor_info.hpp"
 #include <gsl/gsl-lite.hpp>
 #include <torch/types.h>
 #include <memory>
 
 TCM_NAMESPACE_BEGIN
 
-class SpinBasis;
+class BasisBase;
 
 class TCM_IMPORT MetropolisKernel {
   private:
-    std::shared_ptr<SpinBasis const> _basis;
+    std::shared_ptr<BasisBase const> _basis;
     gsl::not_null<RandomGenerator*>  _generator;
 
   public:
-    MetropolisKernel(
-        std::shared_ptr<SpinBasis const> basis,
-        RandomGenerator& generator = global_random_generator()) noexcept;
+    MetropolisKernel(std::shared_ptr<BasisBase const> basis,
+                     RandomGenerator& generator = global_random_generator());
 
     MetropolisKernel(MetropolisKernel const&)     = default;
     MetropolisKernel(MetropolisKernel&&) noexcept = default;
@@ -55,15 +56,15 @@ class TCM_IMPORT MetropolisKernel {
     auto operator()(torch::Tensor x) const
         -> std::tuple<torch::Tensor, torch::Tensor>;
 
-    auto basis() const noexcept -> std::shared_ptr<SpinBasis const>
+    auto basis() const noexcept -> std::shared_ptr<BasisBase const>
     {
         return _basis;
     }
 
   private:
-    inline auto kernel_cpu(size_t n, uint64_t const* TCM_RESTRICT src,
-                           uint64_t* TCM_RESTRICT dst,
-                           float* TCM_RESTRICT    norm) const -> void;
+    inline auto kernel_cpu(TensorInfo<bits512 const> const& src_info,
+                           TensorInfo<bits512> const&       dst_info,
+                           TensorInfo<float> const& norm_info) const -> void;
 };
 
 TCM_NAMESPACE_END
