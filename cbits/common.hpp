@@ -29,16 +29,17 @@
 #pragma once
 
 #include "config.hpp"
-#include "errors.hpp"
+// #include "errors.hpp"
 #include <boost/align/aligned_allocator.hpp>
-#include <boost/align/is_aligned.hpp>
-#include <gsl/gsl-lite.hpp>
+// #include <boost/align/is_aligned.hpp>
+// #include <gsl/gsl-lite.hpp>
 #include <SG14/inplace_function.h>
-#include <c10/core/CPUAllocator.h>
+// #include <c10/core/CPUAllocator.h>
 #include <torch/types.h>
 
-#include <immintrin.h>
-#include <algorithm>
+// #include <immintrin.h>
+#include <complex>
+#include <type_traits>
 #include <vector>
 
 TCM_NAMESPACE_BEGIN
@@ -47,6 +48,7 @@ using torch::nullopt;
 using torch::optional;
 
 // -------------------------------- [SIMD] --------------------------------- {{{
+#if 0
 namespace detail {
 /// Horizontally adds elements of a float4 vector.
 ///
@@ -69,9 +71,11 @@ TCM_FORCEINLINE auto hadd(__m256 const v) noexcept -> float
     return hadd(vlow);
 }
 } // namespace detail
+#endif
 // -------------------------------- [SIMD] --------------------------------- }}}
 
 // ------------------------- [detail::make_tensor] ------------------------- {{{
+#if 0
 namespace detail {
 template <class T> struct ToScalarType {
     static_assert(!std::is_same<T, T>::value, "Type not (yet) supported.");
@@ -111,6 +115,7 @@ auto make_tensor(Ints... dims) -> torch::Tensor
     return out;
 }
 } // namespace detail
+#endif
 // ------------------------- [detail::make_tensor] ------------------------- }}}
 
 #if 0

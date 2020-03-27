@@ -1,4 +1,4 @@
-// Copyright (c) 2019, Tom Westerhout
+// Copyright (c) 2020, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -106,8 +106,8 @@ constexpr auto murmurhash3_x64_128(uint64_t const (&words)[8],
     uint64_t h2 = seed;
 
     for (auto i = 0; i < size / 16; ++i) {
-        uint64_t k1 = words[i * 2 + 0];
-        uint64_t k2 = words[i * 2 + 1];
+        auto k1 = words[i * 2 + 0];
+        auto k2 = words[i * 2 + 1];
 
         k1 *= c1;
         k1 = rotl64(k1, 31);

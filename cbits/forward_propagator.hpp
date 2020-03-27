@@ -33,6 +33,7 @@
 #include "errors.hpp"
 #include "parallel.hpp"
 
+#include <gsl/gsl-lite.hpp>
 #include <torch/types.h>
 
 #include <queue>

@@ -31,6 +31,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import gc
 import pathlib
 from typing import List, Optional, Tuple
 import numpy as np
@@ -101,15 +102,18 @@ def read_hamiltonian(stream, basis) -> _Heisenberg:
             stream.close()
 
 
-def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None):
+def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None, tol=0):
     r"""Diagonalises the hamiltonian.
 
     :param hamiltonian: Heisenberg Hamiltonian to diagonalise.
     :param k: number eigenstates to calculate.
     :param dtype: which data type to use.
+    :param tol: relative accuracy for eigenvalues (stopping criterion). The
+        default value of 0 implies machine precision.
     """
     import numpy as np
     import scipy.sparse.linalg
+    import psutil
 
     hamiltonian.basis.build()
     n = hamiltonian.basis.number_states
@@ -127,10 +131,29 @@ def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None):
     else:
         dtype = np.float64 if hamiltonian.is_real else np.complex128
 
-    op = scipy.sparse.linalg.LinearOperator(
-        shape=(n, n), matvec=hamiltonian, dtype=dtype
+    def matvec(x):
+        gc.collect()
+        return hamiltonian(x)
+
+    def number_lanczos_vectors():
+        free = psutil.virtual_memory().free
+        usage = np.dtype(dtype).itemsize * n
+        need = 20 * usage
+        if need > free:
+            import warnings
+            count = (2 * free // 3) // usage
+            warnings.warn(
+                "Not enough memory to store the default=20 Lanczos vectors. "
+                "Need ~{:.1f}GB, but have only ~{:.1f}GB. Will use {} Lanczos "
+                "vectors instead.".format(need / 1024 ** 3, free / 1024 ** 3, count)
+            )
+            return count
+        return None
+
+    op = scipy.sparse.linalg.LinearOperator(shape=(n, n), matvec=matvec, dtype=dtype)
+    return scipy.sparse.linalg.eigsh(
+        op, k=k, ncv=number_lanczos_vectors(), which="SA", tol=tol
     )
-    return scipy.sparse.linalg.eigsh(op, k=k, which="SA")
 
 
 def local_values(
