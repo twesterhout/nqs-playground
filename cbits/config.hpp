@@ -56,6 +56,9 @@
 #if defined(BOOST_CLANG)
 #    define TCM_CLANG BOOST_CLANG
 #endif
+#if defined(__CUDACC__)
+#   define TCM_NVCC
+#endif
 
 #if defined(TCM_GCC) || defined(TCM_CLANG)
 #    define TCM_HOT __attribute__((hot))
@@ -94,6 +97,16 @@
                  #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
 #else
 #    define TCM_ASSERT(cond, msg) static_cast<void>(0)
+#endif
+
+#if defined(TCM_NVCC)
+#   define TCM_HOST __host__
+#   define TCM_DEVICE __device__
+#   define TCM_GLOBAL __global__
+#else
+#   define TCM_HOST
+#   define TCM_DEVICE
+#   define TCM_GLOBAL
 #endif
 
 TCM_NAMESPACE_BEGIN

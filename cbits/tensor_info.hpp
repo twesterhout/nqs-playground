@@ -31,27 +31,54 @@
 #include "config.hpp"
 #include <torch/types.h>
 #include <utility>
+#include <type_traits>
 
 TCM_NAMESPACE_BEGIN
+
+namespace detail {
+#if __cplusplus >=  201402L
+using std::index_sequence;
+using std::make_index_sequence;
+#else
+
+template <std::size_t...>
+struct index_sequence {};
+
+template <std::size_t N, std::size_t... Rest>
+struct make_index_sequence_impl : public make_index_sequence_impl<N - 1, N - 1, Rest...> {};
+
+template <std::size_t... Indices>
+struct make_index_sequence_impl<0, Indices...> {
+    using type = index_sequence<Indices...>;
+};
+
+template <std::size_t N>
+using make_index_sequence = typename make_index_sequence_impl<N>::type;
+#endif
+} // namespace detail
 
 template <typename T, size_t Dims = 1, typename Index = int64_t>
 struct TensorInfo {
     constexpr TensorInfo() noexcept
-        : TensorInfo{std::make_index_sequence<Dims>{}}
+        : TensorInfo{detail::make_index_sequence<Dims>{}}
     {}
 
     constexpr TensorInfo(T* _data, Index const _sizes[Dims],
                          Index const _strides[Dims]) noexcept
-        : TensorInfo{_data, _sizes, _strides, std::make_index_sequence<Dims>{}}
+        : TensorInfo{_data, _sizes, _strides, detail::make_index_sequence<Dims>{}}
     {}
 
     constexpr TensorInfo(TensorInfo const&) noexcept = default;
     constexpr TensorInfo(TensorInfo&&) noexcept      = default;
-    constexpr auto operator=(TensorInfo const&) noexcept
-        -> TensorInfo&     = default;
-    constexpr auto operator=(TensorInfo&&) noexcept -> TensorInfo& = default;
+#if defined(TCM_NVCC) // For some reason constexpr and noexcept default assignments don't work with nvcc...
+    TensorInfo& operator=(TensorInfo const&) = default;
+    TensorInfo& operator=(TensorInfo&&) = default;
+#else
+    constexpr TensorInfo& operator=(TensorInfo const&) noexcept = default;
+    constexpr TensorInfo& operator=(TensorInfo&&) noexcept = default;
+#endif
 
-    template <class = std::enable_if_t<!std::is_const_v<T>>>
+    template <class D = void, class = typename std::enable_if<std::is_same<D, D>::value && !std::is_const<T>::value>::type>
     operator TensorInfo<T const, Dims, Index>() const noexcept
     {
         return {data, sizes, strides};
@@ -59,26 +86,26 @@ struct TensorInfo {
 
   private:
     template <size_t... Is>
-    constexpr TensorInfo(std::index_sequence<Is...> /*unused*/) noexcept
+    constexpr TensorInfo(detail::index_sequence<Is...> /*unused*/) noexcept
         : data{nullptr}, sizes{(Is, Index{0})...}, strides{(Is, Index{0})...}
     {}
 
     template <size_t... Is>
     constexpr TensorInfo(T* _data, Index const _sizes[Dims],
                          Index const _strides[Dims],
-                         std::index_sequence<Is...> /*unused*/) noexcept
+                         detail::index_sequence<Is...> /*unused*/) noexcept
         : data{_data}, sizes{_sizes[Is]...}, strides{_strides[Is]...}
     {}
 
   public:
-    template <class = std::enable_if_t<Dims == 1>>
-    constexpr auto size() const noexcept
+    template <class D = void, class = typename std::enable_if<std::is_same<D, D>::value && Dims == 1>::type>
+    constexpr auto size() const noexcept -> Index
     {
         return sizes[0];
     }
 
-    template <class = std::enable_if_t<Dims == 1>>
-    constexpr auto stride() const noexcept
+    template <class D = void, class = typename std::enable_if<std::is_same<D, D>::value && Dims == 1>::type>
+    constexpr auto stride() const noexcept -> Index
     {
         return strides[0];
     }

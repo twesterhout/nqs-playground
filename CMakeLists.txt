@@ -403,7 +403,7 @@ if(CMAKE_CUDA_COMPILER)
     	--compiler-options "-W -Wall -Wextra")
     set_property(TARGET nqs_gpu
         PROPERTY POSITION_INDEPENDENT_CODE ON)
-    target_link_libraries(nqs_gpu PUBLIC Boost::boost torch)
+    target_link_libraries(nqs_gpu PUBLIC Boost::boost fmt::fmt torch)
 endif()
 
 
@@ -436,6 +436,7 @@ target_link_libraries(nqs_cpu PRIVATE nqs_cpu_avx)
 # General Python independent code
 ###############################################################################
 add_library(nqs SHARED
+    cbits/bits512.cpp
     cbits/errors.cpp
     cbits/metropolis.cpp
     cbits/jacobian.cpp

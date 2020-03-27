@@ -73,6 +73,12 @@ def test_apply():
     spins = torch.cat([spins.view(-1, 1), torch.zeros((spins.size(0), 7), dtype=torch.int64)], dim=1)
     predicted = _C.apply(spins, _C.Polynomial(hamiltonian, roots), log_psi._c._get_method("forward"))
     assert torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6)
+    if torch.cuda.is_available():
+        spins = spins.cuda()
+        log_psi.cuda()
+        predicted = _C.apply(spins, _C.Polynomial(hamiltonian, roots), log_psi._c._get_method("forward"))
+        predicted = predicted.cpu()
+        assert torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6)
 
 test_apply()
 
