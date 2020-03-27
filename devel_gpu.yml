@@ -1,0 +1,20 @@
+name: devel_gpu
+channels:
+  - defaults
+  - anaconda
+dependencies:
+  - python
+  - pip
+  - numpy
+  - scipy
+  - numba
+  - _pytorch_select ==0.2
+  - pytorch
+  - tensorboard
+  - anaconda-client
+  - conda-build
+  - conda-verify
+  - gcc_linux-64
+  - gxx_linux-64
+  - cmake
+  - ninja

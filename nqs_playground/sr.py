@@ -49,7 +49,12 @@ if torch.has_cuda:
     from torch._utils import ExceptionWrapper
 
 import nqs_playground
-from nqs_playground.core import forward_with_batches, combine_amplitude_and_phase
+from nqs_playground.core import (
+    forward_with_batches,
+    combine_amplitude_and_phase,
+    combine_amplitude_and_sign_classifier,
+)
+
 from nqs_playground import (
     _C,
     SamplingOptions,
@@ -59,6 +64,7 @@ from nqs_playground import (
     jacobian_cpu,
     jacobian_cuda,
     local_values,
+    local_values_diagonal,
     local_values_slow,
 )
 
@@ -250,7 +256,7 @@ class LogarithmicDerivatives:
         return x
 
     def solve(
-        self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-2, weights=None
+        self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-3, weights=None
     ) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates
         ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O - ⟨O⟩)⟩⁻¹⟨H⟩``.
@@ -387,6 +393,200 @@ def load_exact(ground_state):
         if ground_state.ndim > 1:
             raise ValueError("ground state must be a vector")
     return ground_state.squeeze().astype(np.complex64)
+
+
+class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
+    def __compute_jacobians(self):
+        r"""Initialises :attr:`_real` and :attr:`_imag` with Jacobians of log
+        amplitudes and phases respectively. Repeated calls to
+        ``__compute_jacobian`` will do nothing.
+
+        .. note:: When running on GPU, ``jacobian`` function will automatically
+                  use all available GPUs on the system.
+        """
+        if self._real is not None and self._imag is not None:
+            return
+        if self._inputs.device.type == "cpu":
+            self._derlogphi = jacobian_cpu(
+                self._modules[0], self._inputs
+            )  # \partial\log\varphi_i
+            self._n_phi_weights = self._derlogphi.size(1)
+
+            self._derp = jacobian_cpu(self._modules[1], self._inputs)  # \partial p_i
+            self._jacobian = torch.zeros(
+                [self._derlogphi.size(0), self._n_phi_weights + self._derp.size(1), 2]
+            )
+
+            self.p = torch.squeeze(self._modules[1](self._inputs))
+            self._jacobian[:, : self._n_phi_weights, 0] = self._derlogphi
+            self._jacobian[:, self._n_phi_weights :, 1] = torch.einsum(
+                "ij,i->ij", self._derp, 1.0 / self.p
+            )
+
+            self.weight_a = 4.0 * self.p * (1.0 - self.p)
+            self.weight_v = (2.0 * self.p - 1.0) ** 2
+        else:
+            raise NotImplementedError()
+
+    def __remove_singularity(self, matrix: Tensor, eps: float = 1e-4) -> Tensor:
+        r"""Removes singularities from ``matrix``. Application of this function to
+        covariance matrix essentially means that we exclude some variational
+        parameters from optimization.
+        """
+        # obtains all indices i for which matrix[i, i] < eps
+        indices = torch.nonzero(matrix.diagonal().abs() < eps).squeeze(dim=1)
+        matrix.index_fill_(0, indices, 0.0)  # sets matrix[i, :] = 0.0 for all i
+        matrix.index_fill_(1, indices, 0.0)  # sets matrix[:, i] = 0.0 for all i
+        matrix.diagonal().index_fill_(0, indices, 1.0)  # sets matrix[i, i] = 1.0
+        return matrix
+
+    def gradient(
+        self,
+        local_energies_v: np.ndarray,
+        local_energies_a: np.ndarray,
+        weights=np.ndarray,
+        compute_jacobian=True,
+    ) -> Tensor:
+        r"""Computes the gradient of ``⟨H⟩`` with respect to neural network
+        parameters given local energies ``{⟨s|H|ψ⟩/⟨s|ψ⟩ | s ~ |ψ|²}``.
+        """
+        if not compute_jacobian:
+            raise NotImplementedError()
+
+        self.__compute_jacobians()
+        with torch.no_grad():
+            ### now jacobian conlains in [..., 0] == d_k \log \varphi(j), [..., 1] = d_k \log p(j)
+            self.O_a_der = (
+                torch.einsum(
+                    "i,ij->ij", (1 - 2 * self.p) / (1 - self.p), self._jacobian[..., 1]
+                )
+                + 2 * self._jacobian[..., 0]
+            ) / 2.0
+            self.O_v_der = (
+                torch.einsum(
+                    "i,ij->ij", 4 * self.p / (2 * self.p - 1), self._jacobian[..., 1]
+                )
+                + 2 * self._jacobian[..., 0]
+            ) / 2.0
+
+            # self.O_a_der * self.weight_a + self.O_v_der * self.weight_v = 2 * self.jacobian[..., 0]
+            self.O_mean = (
+                torch.einsum("i,ij->j", weights, 2 * self._jacobian[..., 0]) / 2.0
+            )  # it is faster to compute O_mean explicitly
+
+            # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
+            H_mean = torch.sum(
+                (local_energies_v * self.weight_v + local_energies_a * self.weight_a)
+                * weights
+            )
+
+            OH_mean = torch.einsum(
+                "ij,i,i,i->j", self.O_a_der, local_energies_a, self.weight_a, weights
+            ) + torch.einsum(
+                "ij,i,i,i->j", self.O_v_der, local_energies_v, self.weight_v, weights
+            )
+
+            OH_correlator = OH_mean - self.O_mean * H_mean
+
+            return OH_correlator
+
+    def __solve_part(
+        self,
+        matrix: Tensor,
+        vector: Tensor,
+        scale_inv_reg: Optional[float],
+        diag_reg: Optional[float],
+    ) -> Tensor:
+        r"""Calculates ``matrix⁻¹·vector``, i.e. solves the linear system."""
+        if scale_inv_reg is not None and diag_reg is not None:
+            raise ValueError("scale_inv_reg and diag_reg are mutually exclusive")
+
+        matrix = self.__remove_singularity(matrix)
+        # The following is an implementation of Eq. (6.51) and (6.52)
+        # from "Quantum Monte Carlo Approaches for Correlated Systems"
+        # by F.Becca & S.Sorella.
+        if scale_inv_reg is not None:
+            # diag <- sqrt(diag(|S|))
+            diag = torch.sqrt(torch.abs(torch.diagonal(matrix)))
+            vector_pc = vector / diag
+            # S_pc[m, n] <- S[m, n] / sqrt(diag[m] * diag[n])
+            inv_diag = 1.0 / diag
+            matrix_pc = torch.einsum("i,ij,j->ij", inv_diag, matrix, inv_diag)
+            # regularizes the preconditioned matrix
+            matrix_pc.diagonal()[:] += scale_inv_reg
+            # solves the linear system
+            try:
+                u = torch.cholesky(matrix_pc)
+            except RuntimeError as e:
+                print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
+                matrix_pc.diagonal()[:] += scale_inv_reg
+                u = torch.cholesky(matrix_pc)
+            x = torch.cholesky_solve(vector_pc.view([-1, 1]), u).squeeze()
+            x *= inv_diag
+            return x
+        # The simpler approach
+        if diag_reg is not None:
+            matrix.diagonal()[:] += diag_reg
+        try:
+            u = torch.cholesky(matrix)
+        except RuntimeError as e:
+            print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
+            matrix.diagonal()[:] += diag_reg
+            u = torch.cholesky(matrix)
+        x = torch.cholesky_solve(vector.view([-1, 1]), u).squeeze()
+        return x
+
+    def solve(
+        self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-2, weights=None
+    ) -> Tensor:
+        r"""Given the gradient of ``⟨H⟩``, calculates
+        ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O - ⟨O⟩)⟩⁻¹⟨H⟩``.
+        """
+        if scale_inv_reg is not None and diag_reg is not None:
+            raise ValueError("scale_inv_reg and diag_reg are mutually exclusive")
+        with torch.no_grad():
+            OO_corr = (
+                torch.einsum(
+                    "i,i,ij,ik->jk", weights, self.weight_a, self.O_a_der, self.O_a_der
+                )
+                + torch.einsum(
+                    "i,i,ij,ik->jk", weights, self.weight_v, self.O_v_der, self.O_v_der
+                )
+            ) - torch.einsum("i,j->ij", self.O_mean, self.O_mean)
+            OO_corr = self.__remove_singularity(OO_corr)
+
+            if scale_inv_reg is not None:
+                # diag <- sqrt(diag(|S|))
+                diag = torch.sqrt(torch.abs(torch.diagonal(OO_corr)))
+                vector_pc = gradient / diag
+                # S_pc[m, n] <- S[m, n] / sqrt(diag[m] * diag[n])
+                inv_diag = 1.0 / diag
+                matrix_pc = torch.einsum("i,ij,j->ij", inv_diag, OO_corr, inv_diag)
+                # regularizes the preconditioned matrix
+                matrix_pc.diagonal()[:] += scale_inv_reg
+                # solves the linear system
+                try:
+                    u = torch.cholesky(matrix_pc)
+                except RuntimeError as e:
+                    print(
+                        "Warning :: {} Retrying with bigger diagonal shift...".format(e)
+                    )
+                    matrix_pc.diagonal()[:] += scale_inv_reg
+                    u = torch.cholesky(matrix_pc)
+                x = torch.cholesky_solve(vector_pc.view([-1, 1]), u).squeeze()
+                x *= inv_diag
+                return x
+            # The simpler approach
+            if diag_reg is not None:
+                OO_corr.diagonal()[:] += diag_reg
+            try:
+                u = torch.cholesky(OO_corr)
+            except RuntimeError as e:
+                print("Warning :: {} Retrying with bigger diagonal shift...".format(e))
+                OO_corr.diagonal()[:] += diag_reg
+                u = torch.cholesky(OO_corr)
+            x = torch.cholesky_solve(gradient.view([-1, 1]), u).squeeze()
+            return x
 
 
 class Runner:
@@ -530,6 +730,89 @@ class Runner:
         self._iteration += 1
 
 
+class RunnerClassifier(Runner):
+    def __init__(self, config):
+        super().__init__(config)
+        self.composite_state = combine_amplitude_and_sign_classifier(
+            self.amplitude, self.phase, number_spins=self.basis.number_spins
+        )
+
+    def monte_carlo(self):
+        with torch.no_grad():  # for Classifier this part remains intact
+            if not self.config.full_basis:
+                spins, _ = sample_some(
+                    lambda x: self.amplitude(unpack(x, self.basis.number_spins)),
+                    self.basis,
+                    self.sampling_options,
+                    mode="exact",
+                )
+
+                self.weights = 1.0 * torch.ones(len(spins)) / len(spins)
+            else:
+                spins = self.basis.states
+                spins = torch.from_numpy(spins.view(np.int64))
+                self.weights = torch.squeeze(
+                    torch.exp(self.amplitude(unpack(spins, self.basis.number_spins)))
+                    ** 2
+                )
+            self.p = torch.squeeze(
+                self.phase(unpack(spins, self.basis.number_spins))
+            ).numpy()
+            self.weights = self.weights / torch.sum(self.weights).item()
+            self.logpsi = torch.squeeze(
+                self.amplitude(unpack(spins, self.basis.number_spins))
+            ).numpy()
+
+        """
+            to compute the local energies, one considers with the density matrix two contributions:
+                1) <4 p_i (1 - p_i) H_ii>_i; 
+                2) <(2 p_i - 1) / phi_i [\sum_j H_ij \phi_j (2 p_j - 1)]>_i
+            the (1) contribution is the diagonal term is done in Tom's Heisenberg hamiltonian
+            the (2) contribution: Tom can predict \sum H_ij \phi_j, so I need to forge the networks that will 
+                                  predict |\phi_j (2 p_j - 1)| and its sign (non-differentiable) +/-
+        """
+
+        #  obtain just H_ii for all i in spins (part of the term (1))
+        # this shoulw be later multiplied by w_a = 4 p_i (1 - p_i)
+        local_energies_a = (
+            local_values_diagonal(spins, self.hamiltonian).numpy()[..., 0].real
+        )  # always real
+
+        # the composive-state cooked-up network predicts [\log \varphi_i + \log |2 p_i - 1|, sign(2 p_i - 1)]
+        # local_values outputs \sum_j H_ij [phi_j (2 p_j - 1)] / [phi_i (2 p_i - 1)]
+        # this should be later multiplied by w_v = (2 p_i - 1) ** 2
+        local_energies_v = local_values(
+            spins, self.hamiltonian, self.composite_state, batch_size=8192
+        )[
+            ..., 0
+        ].real  # always real
+
+        # \sum_j H_ij (2 p_i - 1) (2 p_j - 1) phi_j / phi_i + H_ii * 4 p_i (1 - p_i)
+        weights_a = 4 * self.p * (1 - self.p)
+        weights_v = (2.0 * self.p - 1) ** 2
+        energies_weighted = local_energies_v * weights_v + local_energies_a * weights_a
+        energy = np.dot(self.weights.numpy(), energies_weighted)
+        variance = np.dot(self.weights.numpy(), np.abs(energies_weighted - energy) ** 2)
+
+        self.tb_writer.add_scalar("SR/energy", energy.real, self._iteration)
+        self.tb_writer.add_scalar("SR/variance", variance, self._iteration)
+
+        # if self.compute_overlap is not None:
+        #    raise NotImplementedError()
+
+        logarithmic_derivatives = LogarithmicDerivativesClassifier(
+            (self.amplitude, self.phase), unpack(spins, self.basis.number_spins)
+        )
+        force = logarithmic_derivatives.gradient(
+            torch.from_numpy(local_energies_v),
+            torch.from_numpy(local_energies_a),
+            self.weights,
+        )
+        self.tb_writer.add_scalar("SR/grad", torch.norm(force), self._iteration)
+        delta = logarithmic_derivatives.solve(force, weights=self.weights)
+        return force, delta
+
+
 Config = namedtuple(
     "Config",
     [
@@ -540,6 +823,8 @@ Config = namedtuple(
         "number_samples",
         "number_chains",
         "optimiser",
+        "classifier",
+        "full_basis",
         ## OPTIONAL
         "device",
         "exact",
@@ -553,7 +838,11 @@ Config = namedtuple(
 
 
 def run(config):
-    runner = Runner(config)
+    if config.classifier:
+        runner = RunnerClassifier(config)
+    else:
+        runner = Runner(config)
+
     for i in range(config.epochs):
         runner.step()
 
