@@ -1,9 +1,7 @@
 #include "config.hpp"
 #include "errors.hpp"
-#include <taskflow/taskflow.hpp>
 
-#include <ATen/Parallel.h>
-
+// #include <ATen/Parallel.h>
 #include <omp.h>
 
 #if 1
@@ -19,8 +17,6 @@
 #endif
 
 TCM_NAMESPACE_BEGIN
-
-auto global_executor() noexcept -> tf::Executor&;
 
 #if 1
 // Copyright (c) 2012 Jakob Progsch, Václav Zeman

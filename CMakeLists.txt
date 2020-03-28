@@ -62,16 +62,6 @@ if(UNIX AND CMAKE_GENERATOR STREQUAL "Ninja")
 endif()
 
 
-# list(APPEND CMAKE_PREFIX_PATH
-#     "$ENV{CONDA_PREFIX}/lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages/torch")
-# message(STATUS "${CMAKE_PREFIX_PATH}")
-
-
-# add_library(Torch INTERFACE)
-# set(TORCH_PREFIX "$ENV{CONDA_PREFIX}/lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages/torch")
-# target_include_directories(Torch SYSTEM INTERFACE ${TORCH_PREFIX})
-# target_compile_options()
-
 # Torch
 if(TRUE)
     # This requires at least CMake 3.12
@@ -152,16 +142,9 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
 endfunction()
 
 add_library(nqs_cbits_Common INTERFACE)
-# TODO: The following is rather unportable and should be fixed...
-# target_compile_options(nqs_cbits_Common
-#     INTERFACE -mmmx
-#               -msse -msse2 -msse3 -msse4.1 -msse4.2
-#               -mavx -march=ivybridge -mtune=native)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
 endif()
-# target_compile_options(nqs_cbits_Common INTERFACE ${TCM_WARNING_FLAGS})
-# target_include_directories(nqs_cbits_Common SYSTEM INTERFACE $ENV{CONDA_PREFIX}/include)
 
 # {fmt} library
 if(NOT TARGET fmt::fmt)
@@ -259,15 +242,15 @@ if(NOT TARGET SG14)
 endif()
 
 # ThreadPool
-if(NOT TARGET ThreadPool)
-    find_package(Threads REQUIRED)
-    execute_process(COMMAND git submodule update --init -- external/ThreadPool
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    add_library(ThreadPool INTERFACE)
-    target_include_directories(ThreadPool
-        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
-    target_link_libraries(ThreadPool INTERFACE Threads::Threads)
-endif()
+# if(NOT TARGET ThreadPool)
+#     find_package(Threads REQUIRED)
+#     execute_process(COMMAND git submodule update --init -- external/ThreadPool
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+#     add_library(ThreadPool INTERFACE)
+#     target_include_directories(ThreadPool
+#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+#     target_link_libraries(ThreadPool INTERFACE Threads::Threads)
+# endif()
 
 # Boost libraries (some header-only parts)
 if(NOT TARGET Boost::boost)
@@ -342,15 +325,15 @@ endif()
 find_package(OpenMP REQUIRED)
 
 # Taskflow
-if(NOT TARGET Taskflow)
-    find_package(Threads REQUIRED)
-    execute_process(COMMAND git submodule update --init -- external/cpp-taskflow
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    add_library(Taskflow INTERFACE)
-    target_include_directories(Taskflow
-        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-taskflow)
-    target_link_libraries(Taskflow INTERFACE Threads::Threads)
-endif()
+# if(NOT TARGET Taskflow)
+#     find_package(Threads REQUIRED)
+#     execute_process(COMMAND git submodule update --init -- external/cpp-taskflow
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+#     add_library(Taskflow INTERFACE)
+#     target_include_directories(Taskflow
+#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-taskflow)
+#     target_link_libraries(Taskflow INTERFACE Threads::Threads)
+# endif()
 
 # Sleef
 if(FALSE)
@@ -379,11 +362,8 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               fmt::fmt
               gsl::gsl-lite
               flat_hash_map
-              # ska_sort
               Boost::boost
               SG14
-              ThreadPool
-              Taskflow
               OpenMP::OpenMP_CXX
 )
 
@@ -393,16 +373,11 @@ set(nqs_cbits_HEADERS)
 # Library of CUDA specific kernels
 ###############################################################################
 if(CMAKE_CUDA_COMPILER)
-    add_library(nqs_gpu STATIC
+    add_library(nqs_gpu OBJECT
         cbits/gpu/unpack.hpp
         cbits/gpu/unpack.cu)
-    target_compile_definitions(nqs_gpu PUBLIC
-        _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
-    # TODO: Fix warnings
-    target_compile_options(nqs_gpu PRIVATE
-    	--compiler-options "-W -Wall -Wextra")
-    set_property(TARGET nqs_gpu
-        PROPERTY POSITION_INDEPENDENT_CODE ON)
+    nqs_cbits_add_low_level_flags(nqs_gpu)
+    target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
     target_link_libraries(nqs_gpu PUBLIC Boost::boost fmt::fmt torch)
 endif()
 
@@ -410,24 +385,22 @@ endif()
 ###############################################################################
 # Library of CPU specific kernels
 ###############################################################################
-add_library(nqs_cpu STATIC
+add_library(nqs_cpu OBJECT
     cbits/cpu/unpack.hpp
     cbits/cpu/unpack.cpp)
-target_compile_definitions(nqs_cpu PUBLIC
-    _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+nqs_cbits_add_low_level_flags(nqs_cpu)
 target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
-set_property(TARGET nqs_cpu PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 # Efficient AVX implementation
-add_library(nqs_cpu_avx STATIC
+add_library(nqs_cpu_avx OBJECT
     cbits/cpu/unpack.hpp
     cbits/cpu/unpack_avx.cpp)
-target_compile_definitions(nqs_cpu_avx PUBLIC
-    _GLIBCXX_USE_CXX11_ABI=${TCM_USE_CXX11_ABI})
+nqs_cbits_add_low_level_flags(nqs_cpu_avx)
 target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
-set_property(TARGET nqs_cpu_avx PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost vectorclass)
 target_compile_options(nqs_cpu_avx PRIVATE
     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
+
 # And use it
 target_link_libraries(nqs_cpu PRIVATE nqs_cpu_avx)
 

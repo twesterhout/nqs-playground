@@ -101,7 +101,7 @@ auto TaskBuilder::Task::operator()() const
     auto       output     = this->psi(spins);
     auto const batch_size = this->spins.size(0);
     TCM_CHECK_SHAPE("output tensor", output, {batch_size, 2});
-    TCM_CHECK_CONTIGUOUS("output tensor", output);
+    // TCM_CHECK_CONTIGUOUS("output tensor", output);
     auto real = torch::narrow(output, /*dim=*/1, /*start=*/0, /*length=*/1);
     auto imag = torch::narrow(output, /*dim=*/1, /*start=*/1, /*length=*/1);
 
@@ -121,27 +121,23 @@ auto TaskBuilder::Task::operator()() const
     results.reserve(this->counts.size());
 
     TCM_ASSERT(!counts.empty(), "");
+    auto const iteration = [this, &results, &output](auto const _j, auto const _offset) {
+        auto const slice = [this, _j, _offset](auto const& t) {
+            return torch::narrow(t, /*dim=*/0, /*start=*/_offset,
+                                 /*length=*/static_cast<int64_t>(this->counts[_j]));
+        };
+        auto const r = this->counts[_j] > 0
+                     ? dotu(slice(this->coeffs), slice(output))
+                     : std::complex<float>{0.0f, 0.0f};
+        results.push_back(r);
+    };
     auto offset = int64_t{0};
     auto j      = size_t{0};
-    for (; j < this->counts.size() - 1; offset += this->counts[j++]) {
-        auto r = counts[j] > 0
-                     ? dotu(torch::narrow(coeffs, /*dim=*/0,
-                                          /*start=*/offset,
-                                          /*length=*/counts[j]),
-                            torch::narrow(output, /*dim=*/0, /*start=*/offset,
-                                          /*length=*/counts[j]))
-                     : std::complex<float>{0.0f, 0.0f};
-        results.push_back(r);
+    for (; j < this->counts.size() - 1; offset += static_cast<int64_t>(this->counts[j++])) {
+        iteration(j, offset);
     }
-    if (!(counts[j] == 0 && offset != batch_size)) {
-        auto r = counts[j] > 0
-                     ? dotu(torch::narrow(coeffs, /*dim=*/0,
-                                          /*start=*/offset,
-                                          /*length=*/counts[j]),
-                            torch::narrow(output, /*dim=*/0, /*start=*/offset,
-                                          /*length=*/counts[j]))
-                     : std::complex<float>{0.0f, 0.0f};
-        results.push_back(r);
+    if (!(this->counts[j] == 0 && offset != batch_size)) {
+        iteration(j, offset);
     }
 
     return {scale, complete, std::move(results)};

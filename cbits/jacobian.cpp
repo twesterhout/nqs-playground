@@ -51,13 +51,17 @@ namespace {
     auto get_parameters(torch::jit::script::Module const& module,
                         bool recurse = true) -> torch::autograd::variable_list
     {
-        auto list = module.parameters(/*recurse=*/recurse);
-        return torch::autograd::variable_list{begin(list), end(list)};
+        torch::autograd::variable_list parameters;
+        parameters.reserve(32);
+        for (auto p : module.parameters(recurse)) {
+            parameters.emplace_back(std::move(p));
+        }
+        return parameters;
     }
 } // namespace
 #endif
 
-auto get_number_parameters(torch::autograd::variable_list const& parameters)
+inline auto get_number_parameters(torch::autograd::variable_list const& parameters)
     -> int64_t
 {
     return std::accumulate(

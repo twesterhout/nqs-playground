@@ -2,12 +2,6 @@
 
 TCM_NAMESPACE_BEGIN
 
-auto global_executor() noexcept -> tf::Executor&
-{
-    static tf::Executor executor;
-    return executor;
-}
-
 #if 1
 TCM_EXPORT ThreadPool::ThreadPool()
     : worker{}, tasks{}, queue_mutex{}, condition{}, stop{false}
