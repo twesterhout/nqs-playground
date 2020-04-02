@@ -390,6 +390,7 @@ add_library(nqs_cpu OBJECT
     cbits/cpu/unpack.cpp)
 nqs_cbits_add_low_level_flags(nqs_cpu)
 target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
+target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
 
 # Efficient AVX implementation
 add_library(nqs_cpu_avx OBJECT
@@ -397,12 +398,10 @@ add_library(nqs_cpu_avx OBJECT
     cbits/cpu/unpack_avx.cpp)
 nqs_cbits_add_low_level_flags(nqs_cpu_avx)
 target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost vectorclass)
+target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost)
+target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
 target_compile_options(nqs_cpu_avx PRIVATE
     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
-
-# And use it
-target_link_libraries(nqs_cpu PRIVATE nqs_cpu_avx)
 
 
 ###############################################################################
@@ -431,7 +430,7 @@ target_compile_definitions(nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
 target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu)
+target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu nqs_cpu_avx)
 if(CMAKE_CUDA_COMPILER)
     target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
     target_link_libraries(nqs PUBLIC nqs_gpu)
