@@ -377,7 +377,7 @@ TCM_EXPORT auto SmallSpinBasis::is_real() const noexcept -> bool
 {
     using std::begin, std::end;
     return std::all_of(begin(_symmetries), end(_symmetries), [](auto const& s) {
-        return s.sector() == 0 || s.periodicity() == 2 * s.sector();
+        return s.eigenvalue().imag() == 0;
     });
 }
 
@@ -426,6 +426,14 @@ TCM_EXPORT auto BigSpinBasis::full_info(bits512 const& x) const
     -> std::tuple<bits512, std::complex<double>, double>
 {
     return ::TCM_NAMESPACE::full_info(_symmetries, x);
+}
+
+TCM_EXPORT auto BigSpinBasis::is_real() const noexcept -> bool
+{
+    using std::begin, std::end;
+    return std::all_of(begin(_symmetries), end(_symmetries), [](auto const& s) {
+        return s.eigenvalue().imag() == 0;
+    });
 }
 // }}}
 

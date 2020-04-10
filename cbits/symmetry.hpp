@@ -326,4 +326,68 @@ TCM_FORCEINLINE constexpr auto are_not_aligned(bits512 const& spin,
     return (fst ^ snd) & 0x01;
 }
 
+template <class UInt>
+TCM_FORCEINLINE constexpr auto gather_bits(uint64_t const spin, UInt const i,
+                                           UInt const j) noexcept -> unsigned
+{
+    auto const fst = (spin >> i) & 1U;
+    auto const snd = (spin >> j) & 1U;
+    // ============================= IMPORTANT ==============================
+    // The order is REALLY important here. This is done to adhere to the
+    // definition of cronecker product, i.e. that
+    //
+    //     kron(A, B) =  A00 B     A01 B     A02 B  ...
+    //                   A10 B     A11 B     A12 B  ...
+    //                    .
+    //                    .
+    //                    .
+    //
+    // In other words, if you change it to `(snd << 1U) | fst` shit will break
+    // in really difficult to track ways...
+    return (fst << 1U) | snd;
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto gather_bits(bits512 const& spin, UInt const i,
+                                           UInt const j) noexcept -> unsigned
+{
+    auto const fst = (spin.words[i / UInt{64}] >> (i % UInt{64})) & 1U;
+    auto const snd = (spin.words[j / UInt{64}] >> (j % UInt{64})) & 1U;
+    return (fst << 1U) | snd;
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto set_bit_to(uint64_t& bits, UInt const i,
+                                          bool const value) noexcept -> void
+{
+    bits = (bits & ~(uint64_t{1} << i)) | (uint64_t{value} << i);
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto set_bit_to(bits512& bits, UInt const i,
+                                          bool const value) noexcept -> void
+{
+    set_bit_to(bits.words[i / UInt{64}], i % UInt{64}, value);
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto scatter_bits(uint64_t spin, unsigned const bits,
+                                            UInt const i, UInt const j) noexcept
+    -> uint64_t
+{
+    set_bit_to(spin, i, (bits >> 1U) & 1U);
+    set_bit_to(spin, j, bits & 1U);
+    return spin;
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto scatter_bits(bits512 spin, unsigned const bits,
+                                            UInt const i, UInt const j) noexcept
+    -> bits512
+{
+    set_bit_to(spin, i, (bits >> 1U) & 1U);
+    set_bit_to(spin, j, bits & 1U);
+    return spin;
+}
+
 TCM_NAMESPACE_END

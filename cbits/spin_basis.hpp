@@ -54,6 +54,7 @@ class TCM_EXPORT BasisBase : public std::enable_shared_from_this<BasisBase> {
 
     virtual auto full_info(bits512 const& x) const
         -> std::tuple<bits512, std::complex<double>, double> = 0;
+    virtual auto is_real() const noexcept -> bool            = 0;
 
     virtual ~BasisBase() = default;
 };
@@ -105,7 +106,8 @@ class TCM_EXPORT SmallSpinBasis : public BasisBase {
     auto full_info(bits512 const& x) const
         -> std::tuple<bits512, std::complex<double>, double> override;
 
-    auto is_real() const noexcept -> bool;
+    auto is_real() const noexcept -> bool override;
+
     auto build() -> void;
     auto states() const -> gsl::span<StateT const>;
     auto number_states() const -> uint64_t;
@@ -135,7 +137,7 @@ class TCM_EXPORT BigSpinBasis : public BasisBase {
     auto full_info(bits512 const& x) const
         -> std::tuple<bits512, std::complex<double>, double> override;
 
-    // auto is_real() const noexcept -> bool;
+    auto is_real() const noexcept -> bool override;
 }; // }}}
 
 TCM_NAMESPACE_END

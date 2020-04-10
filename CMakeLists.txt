@@ -417,7 +417,7 @@ add_library(nqs SHARED
     cbits/polynomial_state.cpp
     cbits/random.cpp
     cbits/unpack.cpp
-    # cbits/operators.cpp
+    cbits/operator.cpp
     cbits/symmetry.cpp
     cbits/spin_basis.cpp
     cbits/parallel.cpp
@@ -438,15 +438,15 @@ endif()
 
 
 pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
-    cbits/python/bind_symmetry.cpp
+    cbits/python/init.cpp
+    cbits/python/bind_jacobian.cpp
     cbits/python/bind_heisenberg.cpp
     cbits/python/bind_metropolis.cpp
-    cbits/python/bind_spin_basis.cpp
+    cbits/python/bind_operator.cpp
     cbits/python/bind_polynomial.cpp
     cbits/python/bind_polynomial_state.cpp
-    cbits/python/bind_jacobian.cpp
-    cbits/python/bind_cuda.cpp
-    cbits/python/init.cpp
+    cbits/python/bind_spin_basis.cpp
+    cbits/python/bind_symmetry.cpp
 )
 # pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
 #     cbits/nqs.cpp
