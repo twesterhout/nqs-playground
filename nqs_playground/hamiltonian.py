@@ -45,9 +45,10 @@ from .core import forward_with_batches
 __all__ = [
     "Heisenberg",
     "read_hamiltonian",
+    "load_hamiltonian",
     "diagonalise",
     "local_values",
-    "local_values_slow",
+    # "local_values_slow",
     "local_values_diagonal",
 ]
 
@@ -101,6 +102,28 @@ def read_hamiltonian(stream, basis) -> _Heisenberg:
     finally:
         if new_fd:
             stream.close()
+
+
+def load_hamiltonian(config) -> _Heisenberg:
+    r"""Constructs the Heisenberg Hamiltonian for the simulation. If ``config``
+    already contains a constructed _C.Heisenberg object, we simply use it.
+    Otherwise, we assume that ``config`` is a path to the file specifying edges
+    and couplings. We construct a graph based on it and create a basis with no
+    symmetries, but fixed magnetisation.
+    """
+    hamiltonian = config.hamiltonian
+    if isinstance(hamiltonian, _Heisenberg):
+        return hamiltonian
+    if not isinstance(hamiltonian, str):
+        raise TypeError(
+            "config.hamiltonian has wrong type: {}; must be either a "
+            "'_C.Heisenberg' or a 'str' path to Heisenberg Hamiltonian "
+            "specification.".format(type(hamiltonian))
+        )
+    # The following notices that we didn't specify a basis and will try
+    # to construct one automatically
+    hamiltonian = nqs_playground.read_hamiltonian(hamiltonian, basis=None)
+    return hamiltonian
 
 
 def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None, tol=0):

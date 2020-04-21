@@ -17,6 +17,25 @@ class Sampler:
     approximate the target distribution.
     """
 
+    class State:
+        def __init__(self, state, norm, log_prob):
+            self.state = state
+            self.norm = norm
+            self.log_prob = log_prob
+            self.accepted = torch.zeros(state.size(0), dtype=torch.int64, device=state.device)
+            self.steps = 0
+
+        def _step(self, proposed_state, proposed_norm, proposed_log_prob):
+            if proposed_log_prob.dim() == 2:
+                proposed_log_prob = proposed_log_prob.squeeze(dim=1)
+            r = torch.rand(self.state.size(0)) * proposed_norm / self.norm
+            t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - self.log_prob))
+            self.state[t] = proposed_state[t]
+            self.norm[t] = proposed_norm[t]
+            self.log_prob[t] = proposed_log_prob[t]
+            self.accepted += t
+            self.steps += 1
+
     def __init__(
         self,
         transition_kernel: Callable[[Tensor], Tuple[Tensor, Tensor]],
@@ -47,6 +66,7 @@ class Sampler:
         self.basis = self.kernel.basis
         self.log_prob_fn = log_prob_fn
         self.batch_size = batch_size
+        self._current = None
 
     def bootstrap(self) -> Tuple[Tensor, Tensor, Tensor]:
         state = _prepare_initial_state(self.basis, self.batch_size)
@@ -57,15 +77,20 @@ class Sampler:
         log_prob = self.log_prob_fn(state)
         if log_prob.dim() == 2:
             log_prob = log_prob.squeeze(dim=1)
-        return state, norm, log_prob
+        return Sampler.State(state, norm, log_prob)
 
     def __iter__(self):
-        current = self.bootstrap()
+        self._current = self.bootstrap()
         while True:
-            yield current
-            proposed_state, proposed_norm = self.kernel(current[0])
+            yield self._current
+            proposed_state, proposed_norm = self.kernel(self._current.state)
             proposed_log_prob = self.log_prob_fn(proposed_state)
-            current = _step(current, (proposed_state, proposed_norm, proposed_log_prob))
+            self._current._step(proposed_state, proposed_norm, proposed_log_prob)
+
+    @property
+    def acceptance_rate(self):
+        return self._current.accepted.to(dtype=torch.float64, device="cpu") / self._current.steps
+
 
 
 class SamplingOptions:
@@ -132,7 +157,7 @@ def _sample_using_metropolis(
     states = torch.empty(shape + (8,), dtype=torch.int64, device=options.device)
     log_prob = torch.empty(shape, dtype=torch.float32, device=options.device)
     assert states.is_contiguous() and log_prob.is_contiguous()
-    for i, (x, _, y) in enumerate(
+    for i, current in enumerate(
         islice(
             sampler,
             options.number_discarded * basis.number_spins,
@@ -140,9 +165,9 @@ def _sample_using_metropolis(
             basis.number_spins,
         )
     ):
-        states[i] = x
-        log_prob[i] = y
-    return states.view(-1, 8), log_prob.view(-1), None
+        states[i] = current.state
+        log_prob[i] = current.log_prob
+    return states, log_prob, sampler.acceptance_rate
 
 
 def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
@@ -217,7 +242,8 @@ def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: Sampling
         ],
         dim=1,
     )
-    return states, log_prob, None
+    shape = (options.number_samples, options.number_chains)
+    return states.view(*shape, 8), log_prob.view(*shape), None
 
 
 def sample_some(
@@ -342,20 +368,21 @@ def test():
 
 
 # @torch.jit.script
-def _step(
-    current: Tuple[Tensor, Tensor, Tensor], proposed: Tuple[Tensor, Tensor, Tensor]
-) -> Tuple[Tensor, Tensor, Tensor]:
-    r"""Internal function of the Sampler."""
-    state, norm, log_prob = current
-    proposed_state, proposed_norm, proposed_log_prob = proposed
-    if proposed_log_prob.dim() == 2:
-        proposed_log_prob = proposed_log_prob.squeeze(dim=1)
-    r = torch.rand(state.size(0)) * proposed_norm / norm
-    t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - log_prob))
-    state[t] = proposed_state[t]
-    norm[t] = proposed_norm[t]
-    log_prob[t] = proposed_log_prob[t]
-    return state, norm, log_prob
+# def _step(
+#     current: Tuple[Tensor, Tensor, Tensor, Tensor], proposed: Tuple[Tensor, Tensor, Tensor]
+# ) -> Tuple[Tensor, Tensor, Tensor]:
+#     r"""Internal function of the Sampler."""
+#     state, norm, log_prob, count = current
+#     proposed_state, proposed_norm, proposed_log_prob = proposed
+#     if proposed_log_prob.dim() == 2:
+#         proposed_log_prob = proposed_log_prob.squeeze(dim=1)
+#     r = torch.rand(state.size(0)) * proposed_norm / norm
+#     t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - log_prob))
+#     state[t] = proposed_state[t]
+#     norm[t] = proposed_norm[t]
+#     log_prob[t] = proposed_log_prob[t]
+#     count += t
+#     return state, norm, log_prob, count
 
 
 def _random_spin_configuration(n: int, hamming_weight: Optional[int] = None) -> int:

@@ -29,6 +29,20 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+__all__ = [
+    "with_file_like",
+    "Unpack",
+    "forward_with_batches",
+    "SpinDataset",
+    "combine_amplitude_and_sign",
+    "combine_amplitude_and_sign_classifier",
+    "combine_amplitude_and_phase",
+    "load_model",
+    "load_device",
+    "load_optimiser",
+    "_get_device"
+]
+
 import os
 import sys
 import tempfile
@@ -37,6 +51,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
+from torch import Tensor
 
 try:
     from typing_extensions import Final
@@ -151,7 +166,7 @@ class SetToEval(object):
             self._module.train()
 
 
-def forward_with_batches(f, xs, batch_size: int) -> torch.Tensor:
+def forward_with_batches(f, xs, batch_size: int) -> Tensor:
     r"""Applies ``f`` to all ``xs`` propagating no more than ``batch_size``
     samples at a time. ``xs`` is split into batches along the first dimension
     (i.e. dim=0). ``f`` must return a torch.Tensor.
@@ -255,68 +270,7 @@ class SpinDataset(torch.utils.data.IterableDataset):
         )
 
 
-def random_split(dataset, k, replacement=False, weights=None):
-    r"""Randomly splits dataset into two parts.
-
-    :param dataset: a tuple of NumPy arrays or Torch tensors.
-    :param k: either a ``float`` or an ``int`` specifying the size of the first
-        part. If ``k`` is a ``float``, then it must lie in ``[0, 1]`` and is
-        understood as a fraction of the whole dataset. If ``k`` is an ``int``,
-        then it specifies the number of elements.
-    :param weights: specifies how elements for the first part are chosen. If
-        ``None``, uniform sampling is used. Otherwise elements are sampled from
-        a multinomial distribution with probabilities proportional to ``weights``.
-    """
-    if not all(
-        (isinstance(x, np.ndarray) or isinstance(x, torch.Tensor) for x in dataset)
-    ):
-        raise ValueError("dataset should be a tuple of NumPy arrays or Torch tensors")
-    n = dataset[0].shape[0]
-    if not all((x.shape[0] == n for x in dataset)):
-        raise ValueError(
-            "all elements of dataset should have the same size along the first dimension"
-        )
-
-    if isinstance(k, float):
-        if k < 0.0 or k > 1.0:
-            raise ValueError("k should be in [0, 1]; got k={}".format(k))
-        k = round(k * n)
-    elif isinstance(k, int):
-        if k < 0 or k > n:
-            raise ValueError("k should be in [0, {}]; got k={}".format(n, k))
-    else:
-        raise ValueError("k must be either an int or a float; got {}".format(type(k)))
-
-    with torch.no_grad():
-        if weights is None:
-            # Uniform sampling
-            if replacement:
-                indices = torch.randint(n, size=k)
-            else:
-                indices = torch.randperm(n)[:k]
-        else:
-            # Sampling with specified weights
-            if len(weights) <= (1 << 24):
-                indices = torch.multinomial(
-                    weights, num_samples=k, replacement=replacement
-                )
-            else:
-                weights = weights.to(torch.float64)
-                weights /= torch.sum(weights)
-                indices = np.random.choice(
-                    len(weights), size=k, replace=replacement, p=weights
-                )
-
-        remaining_indices = np.setdiff1d(
-            np.arange(n), indices, assume_unique=not replacement
-        )
-        return [
-            tuple(x[indices] for x in dataset),
-            tuple(x[remaining_indices] for x in dataset),
-        ]
-
-
-def import_network(filename: str):
+def _import_network(filename: str):
     r"""Loads ``Net`` class defined in Python source file ``filename``."""
     import importlib
 
@@ -381,9 +335,7 @@ def combine_amplitude_and_sign(
     return m
 
 
-def combine_amplitude_and_phase(
-    *modules, apply_log: bool = False, use_jit: bool = True
-) -> torch.nn.Module:
+def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Module:
     r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
     and phase into a single module representing the logarithm of the
     wavefunction.
@@ -398,18 +350,13 @@ def combine_amplitude_and_phase(
     """
 
     class CombiningState(torch.nn.Module):
-        apply_log: Final[bool]
-
         def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
             super().__init__()
-            self.apply_log = apply_log
             self.amplitude = amplitude
             self.phase = phase
 
-        def forward(self, x: torch.Tensor):
+        def forward(self, x: Tensor) -> Tensor:
             a = self.amplitude(x)
-            if self.apply_log:
-                a = torch.log_(a)
             b = self.phase(x)
             return torch.cat([a, b], dim=1)
 
@@ -448,116 +395,77 @@ def combine_amplitude_and_sign_classifier(
         m = torch.jit.script(m)
     return m
 
-# def _forward_with_batches(state, input, batch_size):
-#     n = input.shape[0]
-#     if n == 0:
-#         raise ValueError("input should not be empty")
-#     system_size = len(_C.unsafe_get(input, 0))
-#     i = 0
-#     out = []
-#     while i + batch_size <= n:
-#         out.append(state(_C.unpack(input[i : i + batch_size])))
-#         i += batch_size
-#     if i != n:  # Remaining part
-#         out.append(state(_C.unpack(input[i:]).view(-1, system_size)))
-#     # r = torch.cat(out, dim=0)
-#     # assert torch.all(r == state(_C.unpack(input)))
-#     # return r
-#     return torch.cat(out, dim=0)
-#
-#
-# def local_energy(
-#     state: torch.jit.ScriptModule,
-#     hamiltonian: _C.v2.Heisenberg,
-#     spins: np.ndarray,
-#     log_values: Optional[np.ndarray] = None,
-#     batch_size: int = 128,
-# ) -> np.ndarray:
-#     r"""Computes local estimators ⟨σ|H|ψ⟩/⟨σ|ψ⟩ for all σ.
-#
-#     :param state: wavefunction ``ψ``. ``state`` should be a function
-#         mapping ``R^{batch_size x in_features}`` to ``R^{batch_size x 2}``.
-#         Columns of the output are interpreted as real and imaginary parts of
-#         ``log(⟨σ|ψ⟩)``.
-#     :param hamiltonian: Hamiltonian ``H``.
-#     :param spins: spin configurations ``σ``. Should be a non-empty NumPy array
-#         of compact spin configurations.
-#     :param log_values: pre-computed ``log(⟨σ|ψ⟩)``. Should be a NumPy array of
-#         ``complex64``.
-#     :param batch_size: batch size to use for forward propagation through
-#         ``state``.
-#
-#     :return: local energies ⟨σ|H|ψ⟩/⟨σ|ψ⟩ as a NumPy array of ``complex64``.
-#     """
-#     assert isinstance(state, torch.jit.ScriptModule)
-#     assert isinstance(hamiltonian, _C.v2.Heisenberg)
-#     if len(spins) == 0:
-#         return numpy.array([], dtype=np.complex64)
-#     with torch.no_grad(), torch.jit.optimized_execution(True):
-#         device = next(state.parameters()).device
-#         if log_values is None:
-#             number_spins = hamiltonian.basis.number_spins
-#             log_values = forward_with_batches(
-#                 lambda x: state(_C.v2.unpack(x, number_spins).to(device)).cpu(),
-#                 spins,
-#                 batch_size,
-#             )
-#             if log_values.dim() != 2:
-#                 raise ValueError(
-#                     "state should return the logarithm of the wavefunction, but"
-#                     "output tensor has dimension {}; did you by accident forget"
-#                     "to combine amplitude and phase networks?".format(log_values.dim())
-#                 )
-#             log_values = log_values.numpy().view(np.complex64)
-#
-#         log_H_values = (
-#             forward_with_batches(
-#                 _C.v2.PolynomialState(
-#                     _C.v2.Polynomial(hamiltonian, [0.0]),
-#                     state._c._get_method("forward"),
-#                     batch_size,
-#                     device,
-#                 ),
-#                 spins,
-#                 batch_size=batch_size // 4,
-#             )
-#             .numpy()
-#             .view(np.complex64)
-#         )
-#         return np.exp(log_H_values - log_values).squeeze(axis=1)
+
+def load_model(model, number_spins=None) -> torch.jit.ScriptModule:
+    r"""Loads a model for a simulation. If ``model`` is already a
+    ``torch.jit.ScriptModule`` nothing is done. If ``model`` is just a
+    ``torch.nn.Module`` we compile it to TorchScript. Otherwise ``model`` is
+    assumed to be a path to TorchScript archive or a Python module.
+    """
+    # model is already a ScriptModule, nothing to be done.
+    if isinstance(model, torch.jit.ScriptModule):
+        return model
+    # model is a Module, so we just compile it.
+    elif isinstance(model, torch.nn.Module):
+        return torch.jit.script(model)
+    # model is a string
+    # If model is a Python script, we import the Net class from it,
+    # construct the model, and JIT-compile it. Otherwise, we assume
+    # that the user wants to continue the simulation and has provided a
+    # path to serialised TorchScript module. We simply load it.
+    _, extension = os.path.splitext(os.path.basename(model))
+    if extension == ".py":
+        if number_spins is None:
+            raise ValueError(
+                "cannot construct the network imported from {}, because "
+                "the number of spins is not given".format(model)
+            )
+        return torch.jit.script(_import_network(name)(number_spins))
+    return torch.jit.load(model)
 
 
-# def make_monte_carlo_options(config, number_spins: int) -> _C._Options:
-#     if number_spins <= 0:
-#         raise ValueError(
-#             "invalid number spins: {}; expected a positive integer".format(number_spins)
-#         )
-#     sweep_size = config.sweep_size if config.sweep_size is not None else number_spins
-#     number_discarded = (
-#         config.number_discarded
-#         if config.number_discarded is not None
-#         else config.number_samples // 10
-#     )
-#     magnetisation = (
-#         config.magnetisation if config.magnetisation is not None else number_spins % 2
-#     )
-#     return _C._Options(
-#         number_spins=number_spins,
-#         magnetisation=magnetisation,
-#         number_chains=config.number_chains,
-#         number_samples=config.number_samples,
-#         sweep_size=sweep_size,
-#         number_discarded=number_discarded,
-#     )
+def load_optimiser(optimiser, parameters) -> torch.optim.Optimizer:
+    if isinstance(optimiser, str):
+        # NOTE: Yes, this is unsafe, but terribly convenient!
+        optimiser = eval(optimiser)
+    if not isinstance(optimiser, torch.optim.Optimizer):
+        # assume that optimiser is a lambda
+        optimiser = optimiser(parameters)
+    return optimiser
 
 
-# def sample_exact(
-#     state: torch.jit.ScriptModule, options: _C._Options, batch_size: int = 256
-# ) -> Tuple[np.ndarray, torch.Tensor]:
-#     spins = _C.all_spins(options.number_spins, options.magnetisation)
-#     num_samples = options.number_samples * options.number_chains
-#     with torch.no_grad(), torch.jit.optimized_execution(True):
-#         values = _forward_with_batches(state, spins, batch_size)
-#         weights = _log_amplitudes_to_probabilities(values).squeeze(dim=1)
-#         indices = torch.multinomial(weights, num_samples=num_samples, replacement=True)
-#         return spins[indices.numpy()], values[indices]
+def load_device(config) -> torch.device:
+    r"""Determines which device to use for the simulation. We support
+    specifying the device as either 'torch.device' (for cases when you e.g.
+    have multiple GPUs and want to use some particular one) or as a string with
+    device type (i.e. either "gpu" or "cpu").
+    """
+    device = config.device
+    if isinstance(device, (str, bytes)):
+        device = torch.device(device)
+    elif not isinstance(device, torch.device):
+        raise TypeError(
+            "config.device has wrong type: {}; must be either a "
+            "'torch.device' or a 'str'".format(type(device))
+        )
+    return device
+
+def _get_device(obj) -> Optional[torch.device]:
+    return __get_a_var(obj).device
+
+def __get_a_var(obj):
+    if isinstance(obj, Tensor):
+        return obj
+    if isinstance(obj, torch.nn.Module):
+        for result in obj.parameters():
+            if isinstance(result, Tensor):
+                return result
+    if isinstance(obj, list) or isinstance(obj, tuple):
+        for result in map(get_a_var, obj):
+            if isinstance(result, Tensor):
+                return result
+    if isinstance(obj, dict):
+        for result in map(get_a_var, obj.items()):
+            if isinstance(result, Tensor):
+                return result
+    return None
