@@ -1,19 +1,21 @@
-name: devel_gpu
+name: nqs_dev
 channels:
   - defaults
-  - anaconda
 dependencies:
   - python
   - pip
+  # Dependencies for Python code
   - numpy
   - scipy
   - numba
   - _pytorch_select ==0.2
   - pytorch
   - tensorboard
+  # Tool for generation of Conda packages
   - anaconda-client
   - conda-build
   - conda-verify
+  # Stuff to compile the package locally
   - gcc_linux-64
   - gxx_linux-64
   - cmake
