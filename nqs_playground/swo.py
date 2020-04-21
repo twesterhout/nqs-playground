@@ -52,26 +52,25 @@ TrainingOptions = namedtuple(
         # Patience for early stopping. If validation loss does not decrease for
         # patience epochs, training loop is terminated.
         "patience",
-        # A function which given a torch.jit.ScriptModule returns a
+        # A function which given a list of parameters returns a
         # torch.optim.Optimizer to be used for training.
         "optimiser",
         # Batch size for validation dataset. Is is a good idea to pick a pretty
         # big size here to eliminate Python overhead as much as possible.
         "val_batch_size",
+        # Directory where to put TensorBoard events file, checkpoints and other
+        # data related to the training procedure.
         "output",
     ],
     # Some sane defaults
     defaults=[
-        256,  # train_batch_size
-        3,  # max_epochs
-        0.80,  # train_fraction
+        64,  # train_batch_size
+        20,  # max_epochs
+        1.0, # train_fraction
         10,  # patience
-        None,
-        # lambda m: torch.optim.RMSprop(
-        #     m.parameters(), lr=1e-3, weight_decay=1e-6
-        # ),  # optimiser
+        lambda p: torch.optim.RMSprop(p, lr=1e-4),  # optimiser
         4096,  # val_batch_size
-        None,
+        None, # output
     ],
 )
 
@@ -127,26 +126,16 @@ Config = namedtuple(
 )
 
 
-# @torch.jit.script
+@torch.jit.script
 def overlap_loss_fn(
-    predicted: Tensor, expected: Tensor, weights: Tensor  # ] = None
+    predicted: Tensor, expected: Tensor, weights: Tensor
 ) -> Tensor:
-    r"""
-        ∑ψφ = 10
+    r"""Computes the loss function which maximises weighted overlap between
+    predicted and expected (overlap := ∑ weightsᵢ predictedᵢ expectedᵢ).
     """
-    if not torch.all(predicted >= 0):
-        print("predicted: ", predicted)
-    if not torch.all(expected >= 0):
-        print("expected: ", expected)
     assert torch.all(predicted >= 0) and torch.all(expected >= 0)
     predicted = predicted.squeeze()
     expected = expected.squeeze()
-    # if weights is None:
-    #     quotient = expected / predicted
-    #     return 1 - torch.sum(quotient) ** 2 / torch.norm(
-    #         quotient
-    #     ) ** 2 / predicted.size(0)
-    # else:
     weights = weights.squeeze()
     dot = torch.sum(weights * predicted * expected)
     norm_predicted = torch.dot(weights, predicted ** 2)
@@ -155,14 +144,18 @@ def overlap_loss_fn(
 
 
 class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
+    r"""This class differs from ``torch.nn.CrossEntropyLoss`` in one way:
+    ``forward`` accepts an extra argument ``weights``.
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def forward(self, inputs, targets, weights=None):
-        r = super().forward(inputs, targets)
-        # print("loss: {}, {}, {} -> {}".format(inputs[:10], targets[:10], weights, r))
-        # print("loss: {}, {}, {} -> {}".format(inputs.size(), targets.size(), weights, r))
-        return r
+        r"""
+
+        .. warning:: ``weights`` argument is currently ignored.
+        """
+        return super().forward(inputs, targets)
 
 
 @torch.jit.script
@@ -202,15 +195,18 @@ class _OverlapMetric:
         self._norm_predicted += predicted
         self._norm_expected += expected
 
-    def compute(self):
+    def compute(self) -> float:
         return abs(self._dot) / math.sqrt(self._norm_predicted * self._norm_expected)
 
 
 class _FidelityMetric(_OverlapMetric):
+    r"""A metric for computing "error" in overlap, i.e. it returns ``1 - overlap²``.
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def compute(self):
+    def compute(self) -> float:
         return 1 - super().compute() ** 2
 
 
@@ -242,8 +238,7 @@ class _AccuracyMetric:
 
 
 class _LossMetric:
-    r"""An Ignite metric for computing overlap of with the target state.
-    """
+    r"""A metric for computing average loss."""
 
     def __init__(self, loss_fn, output_transform=lambda x: x):
         self.output_transform = output_transform
@@ -421,7 +416,8 @@ class ManualTrainer:
             },
         }[self.target]
 
-    def _run_once_on_dataset(self, global_step: int) -> int:
+    def _run_once_on_dataset(self, epoch: int, global_step: int) -> int:
+        timer = time.time()
         self.model.train()
         for batch in self._train_loader:
             self._optimiser.zero_grad()
@@ -433,6 +429,8 @@ class ManualTrainer:
                 self._tb_writer.add_scalar("training/loss", loss.item(), global_step)
             self._optimiser.step()
             global_step += 1
+        timer = time.time() - timer
+        self._tb_writer.add_scalar("training/time_per_epoch", timer, epoch)
         return global_step
 
     def _run_metrics_on_dataset(self, metrics, loader):
@@ -450,15 +448,21 @@ class ManualTrainer:
             return dict((name, metric.compute()) for name, metric in metrics.items())
 
     def _run_eval_on_dataset(self, epoch):
+        timer = time.time()
         results = self._run_metrics_on_dataset(self._eval_metrics, self._eval_loader)
         for name, value in results.items():
             self._tb_writer.add_scalar("validation/{}".format(name), value, epoch)
+        timer = time.time() - timer
+        self._tb_writer.add_scalar("validation/time_per_epoch", timer, epoch)
         return results
 
     def _run_test_on_dataset(self, epoch):
+        timer = time.time()
         results = self._run_metrics_on_dataset(self._test_metrics, self._test_loader)
         for name, value in results.items():
             self._tb_writer.add_scalar("test/{}".format(name), value, epoch)
+        timer = time.time() - timer
+        self._tb_writer.add_scalar("test/time_per_epoch", timer, epoch)
         return results
 
     def _when_to_eval(self):
@@ -475,26 +479,25 @@ class ManualTrainer:
         should_eval = self._when_to_eval()
         should_test = self._when_to_test()
 
-        if 0 in should_test:
-            self._run_test_on_dataset(0)
-        if 0 in should_eval:
-            r = self._run_eval_on_dataset(0)
-            if self.target is Target.SIGN and r.get("accuracy", 0) == 1:
-                return
-        iteration = 0
-
-        for epoch in range(1, self.config.max_epochs + 1):
-            start = time.time()
-            iteration = self._run_once_on_dataset(iteration)
-            self._tb_writer.add_scalar(
-                "training/time_per_epoch", time.time() - start, epoch
-            )
+        def evaluate(epoch):
             if epoch in should_test:
-                self._run_test_on_dataset(epoch)
+                self._run_test_on_dataset(0)
             if epoch in should_eval:
-                r = self._run_eval_on_dataset(epoch)
+                r = self._run_eval_on_dataset(0)
                 if self.target is Target.SIGN and r.get("accuracy", 0) == 1:
-                    break
+                    return True
+            return False
+
+        should_stop_early = evaluate(0)
+        if should_stop_early:
+            return
+
+        iteration = 0
+        for epoch in range(1, self.config.max_epochs + 1):
+            iteration = self._run_once_on_dataset(epoch, iteration)
+            should_stop_early = evaluate(epoch)
+            if should_stop_early:
+                break
 
     def run(self):
         self._train_loader = TensorIterableDataset(
@@ -690,23 +693,6 @@ class Runner(object):
             self.config.sign(self._iteration),
             test_dataset=test_dataset,
         )
-        # train(
-        #     "amplitude",
-        #     self.amplitude,
-        #     dataset,
-        #     basis,
-        #     "{}/{}/amplitude".format(self.config.output, self._iteration),
-        #     self.config.amplitude,
-        # )
-        # basis = self.config.hamiltonian.basis
-        # train(
-        #     "sign",
-        #     self.sign,
-        #     dataset,
-        #     basis,
-        #     "{}/{}/sign".format(self.config.output, self._iteration),
-        #     self.config.sign,
-        # )
         torch.jit.save(
             self.amplitude,
             "{}/{}/amplitude.pt".format(self.config.output, self._iteration),
