@@ -219,6 +219,12 @@ template <unsigned Bits> struct Symmetry;
 template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
   public:
     using StateT = uint64_t;
+    using _PickleStateT = std::tuple<
+        unsigned,
+        unsigned,
+        std::array<uint64_t, 6>,
+        std::array<uint64_t, 6>
+    >;
 
   private:
     std::array<uint64_t, 6> _fwd;
@@ -238,6 +244,9 @@ template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
     {
         return ibfly(bfly(x, _fwd), _bwd);
     }
+
+    auto _internal_state() const noexcept -> _PickleStateT;
+    static auto _from_internal_state(_PickleStateT const&) -> Symmetry;
 };
 
 template <> struct TCM_EXPORT Symmetry<512> : public SymmetryBase {

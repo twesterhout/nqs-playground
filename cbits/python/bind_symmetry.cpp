@@ -89,7 +89,11 @@ auto bind_symmetry(PyObject* _module) -> void
              py::arg{"periodicity"})
         .def("__call__", &v2::Symmetry<64>::operator(), DOC(R"EOF(
              Shuffles bits of ``x`` according to the underlying permutation.)EOF"),
-             py::arg{"x"});
+             py::arg{"x"})
+        .def(py::pickle(
+            [](v2::Symmetry<64> const& self) { return self._internal_state(); },
+            &v2::Symmetry<64>::_from_internal_state
+        ));
 
     py::class_<v2::Symmetry<512>, SymmetryBase>(m, "Symmetry512", DOC(R"EOF(
         Implementation of symmetry operators which is used when the number of

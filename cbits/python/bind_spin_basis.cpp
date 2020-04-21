@@ -128,7 +128,25 @@ auto bind_spin_basis(PyObject* _module) -> void
         .def("index", &SmallSpinBasis::index, DOC(R"EOF(
              Given a representative state ``x``, returns its index in the array
              of representatives (i.e. ``self.states``).)EOF"),
-             py::arg{"x"});
+             py::arg{"x"})
+        .def("index", [](SmallSpinBasis const& self, torch::Tensor spins) {
+                auto spins_info = obtain_tensor_info<uint64_t const>(spins);
+                auto out =
+                    torch::empty({spins_info.size()},
+                                 torch::TensorOptions{}.dtype(torch::kInt64));
+                auto out_info =
+                    obtain_tensor_info<uint64_t, /*Checks=*/false>(out);
+                for (auto i = 0L; i < spins_info.size(); ++i) {
+                    out_info.data[i * out_info.stride()] =
+                        self.index(spins_info.data[i * spins_info.stride()]);
+                }
+                return out;
+             },
+             py::arg{"xs"})
+        .def(py::pickle(
+            [](SmallSpinBasis const& self) { return self._internal_state(); },
+            &SmallSpinBasis::_from_internal_state
+        ));
 
     py::class_<BigSpinBasis, BasisBase, std::shared_ptr<BigSpinBasis>>(
         m, "BigSpinBasis")

@@ -30,6 +30,17 @@ Symmetry<64>::Symmetry(std::array<uint64_t, 6> const& forward,
     : SymmetryBase{sector, periodicity}, _fwd{forward}, _bwd{backward}
 {}
 
+auto Symmetry<64>::_internal_state() const noexcept -> _PickleStateT
+{
+    return std::make_tuple(sector(), periodicity(), _fwd, _bwd);
+}
+
+auto Symmetry<64>::_from_internal_state(_PickleStateT const& state) -> Symmetry<64>
+{
+    return Symmetry<64>{
+        std::get<2>(state), std::get<3>(state), std::get<0>(state), std::get<1>(state)};
+}
+
 Symmetry<512>::Symmetry(std::array<bits512, 9> const& forward,
                         std::array<bits512, 9> const& backward,
                         unsigned const sector, unsigned const periodicity)
