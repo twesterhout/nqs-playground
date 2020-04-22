@@ -76,9 +76,10 @@ def jacobian_simple(module: torch.nn.Module, inputs: Tensor) -> Tensor:
         torch.cat([dw.flatten() for dw in dws], out=out[i])
     return out
 
-def jacobian_cpu(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
+def jacobian_cpu(module: torch.jit.ScriptModule, inputs: Tensor,
+        num_threads: int = -1) -> Tensor:
     r"""Jacobian computation on CPU."""
-    return _jacobian(module._c, inputs, num_threads=-1)
+    return _jacobian(module._c, inputs, num_threads=num_threads)
 
 def jacobian_cuda(module: torch.jit.ScriptModule, inputs: Tensor,
                   devices: Optional[List[torch.device]] = None,

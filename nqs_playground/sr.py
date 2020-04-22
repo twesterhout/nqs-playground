@@ -29,13 +29,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import argparse
 from collections import namedtuple
-from contextlib import contextmanager
-import json
-import math
 import os
-import pickle
 import time
 from typing import Dict, List, Tuple, Optional, Union
 
@@ -48,7 +43,6 @@ if torch.has_cuda:
     import threading
     from torch._utils import ExceptionWrapper
 
-import nqs_playground
 from nqs_playground import *
 
 Config = namedtuple(
@@ -64,13 +58,14 @@ Config = namedtuple(
         "optimiser",
         ## OPTIONAL
         "classifier",
+        "regularisation",
         "device",
         "exact",
         "sampling_mode",
         "sweep_size",
         "number_discarded",
     ],
-    defaults=[False, "cpu", None, "monte_carlo", None, None],
+    defaults=[False, {"scale_inv_reg": 1e-3}, "cpu", None, "monte_carlo", None, None],
 )
 
 
@@ -233,7 +228,7 @@ class LogarithmicDerivatives:
         return x
 
     def solve(
-        self, gradient: Tensor, scale_inv_reg=None, diag_reg=1e-3, weights=None
+        self, gradient: Tensor, weights, scale_inv_reg=None, diag_reg=None
     ) -> Tensor:
         r"""Given the gradient of ``⟨H⟩``, calculates
         ``S⁻¹⟨H⟩ = ⟨(O - ⟨O⟩)†(O - ⟨O⟩)⟩⁻¹⟨H⟩``.
@@ -606,7 +601,8 @@ class Runner:
             (self.amplitude, self.phase), spins
         )
         force = logarithmic_derivatives.gradient(local_energies, weights)
-        delta = logarithmic_derivatives.solve(force, weights=weights)
+        delta = logarithmic_derivatives.solve(force, weights=weights,
+                **self.config.regularisation)
 
         self.tb_writer.add_scalar("SR/energy_real", energy.real, self._iteration)
         self.tb_writer.add_scalar("SR/energy_imag", energy.imag, self._iteration)
