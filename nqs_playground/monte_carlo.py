@@ -101,6 +101,7 @@ class SamplingOptions:
         number_samples: int,
         number_chains: int = 1,
         number_discarded: Optional[int] = None,
+        sweep_size: Optional[int] = None,
         device: Optional[torch.device] = None,
     ):
         r"""Initialises the options.
@@ -113,6 +114,8 @@ class SamplingOptions:
             in the beginning of each Markov chain (i.e. how long should the
             thermalisation procedure be). If specified, must be a positive
             integer. Otherwise, 10% of ``number_samples`` is used.
+        :param sweep_size:
+        :param device:
         """
         self.number_samples = int(number_samples)
         if self.number_samples <= 0:
@@ -135,6 +138,12 @@ class SamplingOptions:
                 )
         else:
             self.number_discarded = self.number_samples // 10
+        if sweep_size is not None and sweep_size <= 0:
+            raise ValueError(
+                "invalid sweep_size: {}; expected a positive integer"
+                "".format(number_chains)
+            )
+        self.sweep_size = sweep_size
         if device is None:
             device = "cpu"
         if not isinstance(device, torch.device):
@@ -157,12 +166,13 @@ def _sample_using_metropolis(
     states = torch.empty(shape + (8,), dtype=torch.int64, device=options.device)
     log_prob = torch.empty(shape, dtype=torch.float32, device=options.device)
     assert states.is_contiguous() and log_prob.is_contiguous()
+    sweep_size = options.sweep_size if options.sweep_size is not None else basis.number_spins
     for i, current in enumerate(
         islice(
             sampler,
-            options.number_discarded * basis.number_spins,
-            (options.number_discarded + options.number_samples) * basis.number_spins,
-            basis.number_spins,
+            options.number_discarded * sweep_size,
+            (options.number_discarded + options.number_samples) * sweep_size,
+            sweep_size,
         )
     ):
         states[i] = current.state
