@@ -36,7 +36,7 @@ auto TaskBuilder::prepare(v2::ForwardT fn, c10::Device const device) -> void
         /*coeffs=*/std::move(coeffs),
         /*counts=*/std::vector<uint64_t>{std::initializer_list<uint64_t>{0UL}},
         /*device=*/device,
-        /*complete=*/true};
+        /*complete=*/false};
     _i         = 0;
     _spins_ptr = static_cast<bits512*>(_next_task.spins.data_ptr());
     _coeffs_ptr =
