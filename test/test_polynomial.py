@@ -80,5 +80,46 @@ def test_apply():
         predicted = predicted.cpu()
         assert torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6)
 
+def _site_positions(shape):
+    L_x, L_y = shape
+    sites = np.arange(L_x * L_y, dtype=np.int32)
+    x = sites % L_x
+    y = sites // L_x
+    return sites, x, y
+
+def _make_hamiltonian(shape, basis):
+    sites, x, y = _site_positions(shape)
+    L_x, L_y = shape
+
+    j1_edges = []
+    if L_x > 1:
+        j1_edges += list(zip(sites, (x + 1) % L_x + L_x * y))
+    if L_y > 1:
+        j1_edges += list(zip(sites, x + L_x * ((y + 1) % L_y)))
+    return Heisenberg([(1, *e) for e in j1_edges], basis)
+
+
+def test_buggy_apply():
+    import pickle
+
+    basis = with_file_like("ED/with/basis_5x5.pickle", "rb", pickle.load)
+    hamiltonian = _make_hamiltonian((5, 5), basis)
+    roots = [-40.0, -15.0, 10.0, 40.0]
+
+    amplitude = torch.jit.load("SWO/5x5/6/199/amplitude.pt")
+    sign = torch.jit.load("SWO/5x5/6/199/sign.pt")
+    combined_state = combine_amplitude_and_sign(amplitude, sign, apply_log=False, out_dim=2)
+    log_ψ = combined_state._c._get_method("forward")
+
+    spins = torch.load("test_data_spins.pickle")
+    # expected = SlowPolynomialState(hamiltonian, roots, log_ψ)(spins[:100, 0])
+    # torch.save(expected, "test_data_expected.pickle")
+    expected = torch.load("test_data_expected.pickle")
+    print(expected[:10])
+    predicted = _C.apply(spins[:10], _C.Polynomial(hamiltonian, roots), log_ψ)
+    print(predicted)
+
+
 test_apply()
+# test_buggy_apply()
 
