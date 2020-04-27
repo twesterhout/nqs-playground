@@ -123,6 +123,7 @@ TCM_EXPORT auto obtain_tensor_info<uint64_t, true>(torch::Tensor x,
 
 TRIVIAL_IMPLEMENTATION(float, torch::kFloat32)
 TRIVIAL_IMPLEMENTATION(double, torch::kFloat64)
+TRIVIAL_IMPLEMENTATION(int64_t, torch::kInt64)
 
 ADD_CONST_OVERLOADS(float)
 ADD_CONST_OVERLOADS(double)

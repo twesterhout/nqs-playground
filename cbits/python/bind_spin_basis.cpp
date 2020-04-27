@@ -128,7 +128,7 @@ auto bind_spin_basis(PyObject* _module) -> void
         .def("index", &SmallSpinBasis::index, DOC(R"EOF(
              Given a representative state ``x``, returns its index in the array
              of representatives (i.e. ``self.states``).)EOF"),
-             py::arg{"x"})
+             py::arg{"x"}.noconvert())
         .def("index", [](SmallSpinBasis const& self, torch::Tensor spins) {
                 auto spins_info = obtain_tensor_info<uint64_t const>(spins);
                 auto out =
@@ -142,7 +142,7 @@ auto bind_spin_basis(PyObject* _module) -> void
                 }
                 return out;
              },
-             py::arg{"xs"})
+             py::arg{"xs"}.noconvert())
         .def(py::pickle(
             [](SmallSpinBasis const& self) { return self._internal_state(); },
             &SmallSpinBasis::_from_internal_state

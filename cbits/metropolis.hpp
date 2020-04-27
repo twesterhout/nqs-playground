@@ -67,4 +67,40 @@ class TCM_IMPORT MetropolisKernel {
                            TensorInfo<float> const& norm_info) const -> void;
 };
 
+class TCM_IMPORT ProposalGenerator {
+  private:
+    std::shared_ptr<BasisBase const> _basis;
+    gsl::not_null<RandomGenerator*>  _generator;
+
+  public:
+    ProposalGenerator(std::shared_ptr<BasisBase const> basis,
+                      RandomGenerator& generator = global_random_generator());
+
+    auto operator()(torch::Tensor x) const
+        -> std::tuple<torch::Tensor, std::vector<int64_t>>;
+
+    auto basis() const noexcept -> std::shared_ptr<BasisBase const>
+    {
+        return _basis;
+    }
+
+  private:
+    auto generate(bits512 const& src, std::vector<bits512>& dst) const -> void;
+};
+
+auto _pick_next_state_index(torch::Tensor jump_rates, std::vector<int64_t> const& counts,
+    c10::optional<torch::Tensor> out = c10::nullopt) -> torch::Tensor;
+
+auto _calculate_jump_rates(torch::Tensor current_log_prob,
+                           torch::Tensor proposed_log_prob,
+                           std::vector<int64_t> const& counts,
+                           torch::Device target_device)
+    -> std::tuple<torch::Tensor, torch::Tensor>;
+
+auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void;
+
+auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
+    torch::Tensor sizes, torch::Tensor current_state, torch::Tensor current_log_prob,
+    torch::Tensor times, float thin_rate) -> bool;
+
 TCM_NAMESPACE_END
