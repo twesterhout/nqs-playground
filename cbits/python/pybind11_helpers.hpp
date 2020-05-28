@@ -28,9 +28,12 @@
 
 #pragma once
 
+#include "../common.hpp"
 #include "../symmetry.hpp"
 
 #include <pybind11/pybind11.h>
+#include <torch/extension.h>
+#include <torch/script.h>
 
 namespace pybind11 {
 namespace detail {
@@ -121,6 +124,68 @@ namespace detail {
             }
             return number.release();
         }
+    };
+
+    template <> struct type_caster<::TCM_NAMESPACE::v2::ForwardT> {
+      public:
+        auto load(handle src, bool convert) -> bool
+        {
+            if (src.is_none()) {
+                // Defer accepting None to other overloads (if we aren't in convert mode):
+                if (!convert) return false;
+                return true;
+            }
+
+            // We are dealing with torch.jit.ScriptMethod
+            if (type_caster<torch::jit::script::Method> method_caster;
+                method_caster.load(src, convert)) {
+                value = [f = cast_op<torch::jit::script::Method>(
+                             std::move(method_caster))](auto x) mutable {
+                    return f({std::move(x)}).toTensor();
+                };
+                return true;
+            }
+
+            // We are dealing with torch.jit.ScriptModule
+            if (type_caster<torch::jit::script::Module> module_caster;
+                module_caster.load(src, convert)) {
+                auto module = cast_op<torch::jit::script::Module>(
+                    std::move(module_caster));
+                auto method = module.get_method("forward");
+                // This relies on the fact that Module and Method have reference
+                // semantics.
+                value = [parent = std::move(module),
+                         f      = std::move(method)](auto x) mutable {
+                    return f({std::move(x)}).toTensor();
+                };
+                return true;
+            }
+
+            // We are dealing with a Python function
+            if (!isinstance<function>(src)) return false;
+            auto func = reinterpret_borrow<function>(src);
+
+            // The following idea is taken from pybind11/functional.h. It
+            // ensures that GIL is held during functor destruction
+            struct func_handle {
+                function f;
+                func_handle(function&& f_) : f(std::move(f_)) {}
+                ~func_handle()
+                {
+                    gil_scoped_acquire acq;
+                    function           kill_f(std::move(f));
+                }
+            };
+
+            value = [handle = func_handle{std::move(func)}](auto x) {
+                gil_scoped_acquire acq;
+                return handle.f(std::move(x)).template cast<torch::Tensor>();
+            };
+            return true;
+        }
+
+        PYBIND11_TYPE_CASTER(::TCM_NAMESPACE::v2::ForwardT,
+                             _("Callable[[Tensor], Tensor]"));
     };
 } // namespace detail
 } // namespace pybind11
