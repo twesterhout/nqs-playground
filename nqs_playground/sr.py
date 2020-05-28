@@ -84,6 +84,14 @@ def _remove_singularity(matrix: Tensor, eps: float = 1e-4) -> Tensor:
     return matrix
 
 
+@torch.jit.script
+def _solve_using_SVD(matrix: Tensor, vector: Tensor, rcond: float) -> Tensor:
+    u, s, v = torch.svd(matrix)
+    s_inv = torch.where(s > rcond * torch.max(s),
+        torch.reciprocal(s),
+        torch.scalar_tensor(0, dtype=s.dtype, device=s.device))
+    return v.mv(s_inv.mul_(u.t().mv(vector)))
+
 class LogarithmicDerivatives:
     def __init__(
         self,
@@ -201,6 +209,8 @@ class LogarithmicDerivatives:
         r"""Calculates ``matrix⁻¹·vector``, i.e. solves the linear system."""
         if scale_inv_reg is not None and diag_reg is not None:
             raise ValueError("scale_inv_reg and diag_reg are mutually exclusive")
+
+        return _solve_using_SVD(matrix, vector, rcond=1e-4)
 
         matrix = _remove_singularity(matrix)
         # The following is an implementation of Eq. (6.51) and (6.52)
