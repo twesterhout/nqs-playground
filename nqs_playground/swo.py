@@ -11,10 +11,6 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
-import ignite
-from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
-import ignite.contrib.handlers.tqdm_logger
-
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
@@ -26,12 +22,19 @@ except ImportError:
     # polyfill from `torch.jit`.
     from torch.jit import Final
 
-from tqdm import tqdm
-
 from nqs_playground import *
 import nqs_playground._C as _C
 from nqs_playground.core import SpinDataset, forward_with_batches
 from nqs_playground.sr import load_exact, load_optimiser
+
+try:
+    from loguru import logger
+    info = logger.info
+except ImportError:
+    import logging
+
+    def info(*args, **kwargs):
+        logging.info(str.format(*args, **kwargs))
 
 # torch.set_num_interop_threads(1)
 # np.random.seed(123)
@@ -48,9 +51,6 @@ TrainingOptions = namedtuple(
         # Fraction of the dataset to use for training. The remaining part will
         # be used as validation dataset for regularisation techniques such as
         # early stopping.
-        "train_fraction",
-        # Patience for early stopping. If validation loss does not decrease for
-        # patience epochs, training loop is terminated.
         "patience",
         # A function which given a list of parameters returns a
         # torch.optim.Optimizer to be used for training.
@@ -66,7 +66,6 @@ TrainingOptions = namedtuple(
     defaults=[
         64,  # train_batch_size
         20,  # max_epochs
-        1.0, # train_fraction
         10,  # patience
         lambda p: torch.optim.RMSprop(p, lr=1e-4),  # optimiser
         4096,  # val_batch_size
@@ -151,10 +150,8 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
         super().__init__(*args, **kwargs)
 
     def forward(self, inputs, targets, weights=None):
-        r"""
-
-        .. warning:: ``weights`` argument is currently ignored.
-        """
+        if weights is not None:
+            raise NotImplementedError()
         return super().forward(inputs, targets)
 
 
@@ -247,16 +244,40 @@ class _LossMetric:
         self._count = None
 
     def reset(self):
-        self._sum = 0
-        self._count = 0
+        self._sum = 0.0
+        self._count = 0.0
 
     def update(self, output):
         n = output[0].size(0)
-        self._sum += self.loss_fn(*self.output_transform(output)) * n
+        self._sum += self.loss_fn(*self.output_transform(output)).item() * n
         self._count += n
 
     def compute(self):
         return self._sum / self._count
+
+class _MeanVarMetric:
+    def __init__(self, output_transform=lambda x: x):
+        self.output_transform = output_transform
+        self.reset()
+
+    def reset(self):
+        self._n = 0
+        self._μ = 0.0
+        self._M2 = 0.0
+
+    def update(self, output):
+        output = self.output_transform(output)
+        self._n += 1
+        δ = output - self._μ
+        self._μ += (δ - self._μ) / self._n
+        self._M2 += (output - self._μ) * δ
+
+    def compute(self):
+        if self._n == 0:
+            return float("nan"), float("nan"), float("nan")
+        if self._n == 1:
+            return self._μ, 0.0, float("nan")
+        return self._μ, self._M2 / self._n, self._M2 / (self._n - 1)
 
 
 class TensorIterableDataset(torch.utils.data.IterableDataset):
@@ -336,6 +357,7 @@ class ManualTrainer:
                 return torch.exp(self.module(x) - self.scale)
 
         with torch.no_grad():
+            info("Computing normalisation on the training dataset...")
             model.eval()
             # We assume that dataset is a tuple of tensors where the first
             # tensor contains inputs. Forward propagating the full training
@@ -352,6 +374,7 @@ class ManualTrainer:
             torch.exp_(ys)
             self.train_dataset = self.train_dataset + (ys,)
         # Store the original model "just in case"
+        info("Constructing new model predicting amplitudes...")
         self.__original_model = model
         model = _ExpModel(model, scale)
         if isinstance(self.__original_model, torch.jit.ScriptModule):
@@ -373,6 +396,7 @@ class ManualTrainer:
                 "dataset must be a tuple of Tensors; received {} instead"
                 "".format(type(dataset)))
         # fmt: on
+        info("Preprocessing dataset...")
         with torch.no_grad():
             xs, _ys = dataset
             if self.target is Target.SIGN:
@@ -419,18 +443,22 @@ class ManualTrainer:
     def _run_once_on_dataset(self, epoch: int, global_step: int) -> int:
         timer = time.time()
         self.model.train()
+        acc = _MeanVarMetric()        
         for batch in self._train_loader:
             self._optimiser.zero_grad()
             inputs, *other = batch
             outputs = self.model(inputs)
             loss = self._loss_fn(outputs, *other)
+            acc.update(loss.item())
             loss.backward()
-            if self.debug:
-                self._tb_writer.add_scalar("training/loss", loss.item(), global_step)
             self._optimiser.step()
             global_step += 1
+        mean, _, variance = acc.compute()
+        std = math.sqrt(max(variance, 0.0))
         timer = time.time() - timer
-        self._tb_writer.add_scalar("training/time_per_epoch", timer, epoch)
+        self._tb_writer.add_scalar("training/loss_mean", mean, epoch)
+        self._tb_writer.add_scalar("training/loss_std", std, epoch)
+        info("Loop over data in {:.2f} seconds, loss: {} ± {}", timer, mean, std)
         return global_step
 
     def _run_metrics_on_dataset(self, metrics, loader):
@@ -447,22 +475,24 @@ class ManualTrainer:
                     m.update((outputs, *other))
             return dict((name, metric.compute()) for name, metric in metrics.items())
 
-    def _run_eval_on_dataset(self, epoch):
-        timer = time.time()
+    def _run_eval_on_dataset(self, epoch, verbose):
+        if verbose:
+            info("Running evaluators on training dataset...")
         results = self._run_metrics_on_dataset(self._eval_metrics, self._eval_loader)
+        if verbose:
+            info("Metrics: {}", results)
         for name, value in results.items():
             self._tb_writer.add_scalar("validation/{}".format(name), value, epoch)
-        timer = time.time() - timer
-        self._tb_writer.add_scalar("validation/time_per_epoch", timer, epoch)
         return results
 
-    def _run_test_on_dataset(self, epoch):
-        timer = time.time()
+    def _run_test_on_dataset(self, epoch, verbose):
+        if verbose:
+            info("Running evaluators on test dataset...")
         results = self._run_metrics_on_dataset(self._test_metrics, self._test_loader)
+        if verbose:
+            info("Metrics: {}", results)
         for name, value in results.items():
-            self._tb_writer.add_scalar("test/{}".format(name), value, epoch)
-        timer = time.time() - timer
-        self._tb_writer.add_scalar("test/time_per_epoch", timer, epoch)
+            self._tb_writer.add_scalar("testing/{}".format(name), value, epoch)
         return results
 
     def _when_to_eval(self):
@@ -480,10 +510,11 @@ class ManualTrainer:
         should_test = self._when_to_test()
 
         def evaluate(epoch):
+            verbose = epoch == 0 or epoch == self.config.max_epochs
             if epoch in should_test:
-                self._run_test_on_dataset(0)
+                self._run_test_on_dataset(epoch, verbose)
             if epoch in should_eval:
-                r = self._run_eval_on_dataset(0)
+                r = self._run_eval_on_dataset(epoch, verbose)
                 if self.target is Target.SIGN and r.get("accuracy", 0) == 1:
                     return True
             return False
@@ -572,14 +603,17 @@ class Runner(object):
         self.config = config
         self.amplitude, self.sign = self.config.model
         self.sampling_options = SamplingOptions(
-            self.config.number_samples, self.config.number_chains
+            self.config.number_samples,
+            self.config.number_chains,
+            self.config.number_discarded,
+            self.config.sweep_size,
         )
         self.exact = load_exact(self.config.exact)
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
         self._iteration = 0
 
     def compute_statistics(self):
-        tqdm.write("Computing statistics for {}...".format(self._iteration))
+        info("Computing statistics for {}...", self._iteration)
         if self.exact is None:
             return None
 
@@ -602,6 +636,7 @@ class Runner(object):
             Hy -= energy * y
             variance = np.linalg.norm(Hy) ** 2
 
+            info("overlap: {}, energy: {:.5e}, variance: {:.2e}", overlap, energy.real, variance)
             self.tb_writer.add_scalar("overlap", overlap, self._iteration)
             self.tb_writer.add_scalar("energy_real", energy.real, self._iteration)
             self.tb_writer.add_scalar("energy_imag", energy.imag, self._iteration)
@@ -627,25 +662,27 @@ class Runner(object):
             return values
 
     def monte_carlo(self):
-        tqdm.write("Monte Carlo sampling from |ψ|²...", end="")
+        info("Monte Carlo sampling from |ψ|²...")
         start = time.time()
 
         self.amplitude.eval()
         self.sign.eval()
-        spins, _, _ = sample_some(
+        spins, _, acceptance = sample_some(
             self.amplitude,
             self.config.hamiltonian.basis,
             self.sampling_options,
             mode="exact",
         )
-        acceptance = 1.0
+        spins = spins.view(-1, 8)
+        if acceptance is not None:
+            acceptance = torch.mean(acceptance)
+        else:
+            acceptance = 1.0
+        info("Applying polynomial...")
         values = self.apply_polynomial(spins)
 
         stop = time.time()
-        tqdm.write(
-            " Done in {:.2f} seconds. ".format(stop - start)
-            + "Acceptance {:.2f}%".format(100 * acceptance)
-        )
+        info("Done in {:.2f} seconds. Acceptance {:.2f}%", stop - start, 100 * acceptance)
         return spins, values
 
     def load_checkpoint(self, i: int):
