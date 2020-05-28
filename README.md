@@ -65,6 +65,7 @@ from source. Luckily, with Conda, it is very simple.
    # or cmake -GNinja -DCMAKE_BUILD_TYPE=Debug .. if you want the debug version
    # with all asserts etc.
    cmake --build . --target install
+   cd ..
    ```
    This should install two files: `libnqs.so` shared library and
    `_C.cpython-...-x86_64-linux-gnu.so` Python extension into the
