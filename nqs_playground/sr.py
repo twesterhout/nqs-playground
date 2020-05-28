@@ -583,6 +583,72 @@ class Runner:
             variance = np.var(local_values)
         return energy, variance
 
+    def autocorrelation_function(self, local_energ):
+
+        # An attempt to implement autocorrelation function analysis
+
+        reshaped_local_energies = [[local_energ[iloop + jloop*self.config.number_chains] for jloop in range(self.config.number_samples) ] for iloop in range(self.config.number_chains)]
+        chain_length = len(reshaped_local_energies[0])     
+        chain_energies = [(sum(reshaped_local_energies[iloop])/len(reshaped_local_energies[iloop]))[0] for iloop in range(len(reshaped_local_energies))]            
+        chain_mean = sum(chain_energies)/len(chain_energies)
+        chain_variance = sum((i - chain_mean) ** 2 for i in chain_energies) / len(chain_energies) 
+
+        # Variogram
+
+        time_beginning = time.time()
+
+        variogram = np.array([])
+        autocorrelation = np.array([])
+        
+        for iloop in range(len(reshaped_local_energies)):
+
+            Vt_aux = np.array([])
+
+            for t in range(1, chain_length):
+
+                difference_array = np.real(np.array(reshaped_local_energies[iloop][t:chain_length]) - np.array(reshaped_local_energies[iloop][0:chain_length-t]))
+                Vt = 1/(chain_length -t) * np.einsum('i,i', difference_array.flatten(), difference_array.flatten())
+                Vt_aux = np.append(Vt_aux, Vt)
+
+            if iloop == 0:
+                variogram = Vt_aux
+            else:
+                variogram = np.vstack((variogram, Vt_aux))
+
+        # Variance
+
+            var_plus = 1/chain_length *sum((np.real(reshaped_local_energies[iloop] - chain_energies[iloop]))**2)
+
+            if iloop == 0:
+                autocorrelation = 1-Vt_aux/(2.*var_plus)
+            else:
+                autocorrelation = np.vstack((autocorrelation, 1-Vt_aux/(2.*var_plus)))
+
+        autocorrelation = autocorrelation.transpose()
+
+        time_end = time.time()
+
+        print('Extra time = ', time_end - time_beginning)
+
+        with open('chain_energies_real.txt', 'a') as f1:
+            for item in chain_energies[:-1]:
+                f1.write("%s " % np.real(item))
+            f1.write("%s \n" % np.real(chain_energies[-1]))
+
+        with open('chain_energies_imag.txt', 'a') as f1:
+            for item in chain_energies[:-1]:
+                f1.write("%s " % np.imag(item))
+            f1.write("%s \n" % np.imag(chain_energies[-1]))
+
+        with open('chain_energies_variance.txt', 'a') as f1:
+            f1.write("%s \n" % np.real(chain_variance))
+
+        with open('autocorrelations'+str(int(time.clock()))+'.txt', 'a') as f1:
+            for outer_item in autocorrelation[:-1]:
+                for inner_item in outer_item:
+                    f1.write("%s " % inner_item)
+                f1.write("%s \n" % outer_item[-1])
+
     def monte_carlo(self):
         # First of all, do Monte Carlo sampling
         with torch.no_grad():
@@ -605,6 +671,9 @@ class Runner:
             log_prob = None
 
         local_energies = local_values(spins, self.hamiltonian, self.combined_state)
+
+        self.autocorrelation_function(self, local_energies)
+
         energy, variance = self._energy_and_variance(local_energies, weights)
         overlap = self.compute_overlap()
         logarithmic_derivatives = LogarithmicDerivatives(
