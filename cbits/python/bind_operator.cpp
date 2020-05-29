@@ -78,16 +78,7 @@ auto bind_operator(PyObject* _module) -> void
 #if 1
     py::class_<Operator, std::shared_ptr<Operator>>(m, "Operator")
         .def(py::init<std::vector<Interaction>,
-                      std::shared_ptr<BasisBase const>>(),
-             DOC(R"EOF(
-            Constructs the Heisenberg Hamiltonian with given exchange couplings.
-            Full Hamiltonian is: ``∑Jᵢⱼ·σᵢ⊗σⱼ``, where ``σ`` are vector spin
-            operators.
-
-            :param specs: is a list of couplings. Each element is a tuple
-                ``(Jᵢⱼ, i, j)``. This defines a term ``Jᵢⱼ·σᵢ⊗σⱼ``.
-            :param basis: specifies the Hilbert space basis on which the
-                Hamiltonian is defined.)EOF"))
+                      std::shared_ptr<BasisBase const>>())
         .def_property_readonly(
             "interactions",
             [](Operator const& self) {
@@ -97,10 +88,9 @@ auto bind_operator(PyObject* _module) -> void
             },
             DOC(R"EOF(Returns the list of 'Interaction's)EOF"))
         .def_property_readonly("basis", &Operator::basis, DOC(R"EOF(
-            Returns the Hilbert space basis on which the Hamiltonian is defined.)EOF"))
+            Returns the Hilbert space basis on which the Operator is defined.)EOF"))
         .def_property_readonly("is_real", &Operator::is_real, DOC(R"EOF(
-            Returns whether the Hamiltonian is real, i.e. whether all couplings
-            ``{cᵢⱼ}`` are real.)EOF"))
+            Returns whether the Operator is real.)EOF"))
         .def("__call__", make_call_function<float>(), py::arg{"x"}.noconvert(),
              py::arg{"y"}.noconvert() = py::none())
         .def("__call__", make_call_function<double>(), py::arg{"x"}.noconvert(),

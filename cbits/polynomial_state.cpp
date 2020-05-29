@@ -16,23 +16,24 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
         torch::empty(std::initializer_list<int64_t>{spins_info.size(), 2L},
                      torch::TensorOptions{}.dtype(torch::kFloat32));
 
-    run_with_control_inversion(
-        [&spins_info, &buffer, &psi, &hamiltonian, device](auto async) {
-            torch::NoGradGuard no_grad;
-            auto               out = gsl::span<std::complex<float>>{
-                static_cast<std::complex<float>*>(buffer.data_ptr()),
-                static_cast<size_t>(spins_info.size())};
+    //run_with_control_inversion(
+    //    [&spins_info, &buffer, &psi, &hamiltonian, device](auto async) {
+    torch::NoGradGuard no_grad;
+    auto               out = gsl::span<std::complex<float>>{
+        static_cast<std::complex<float>*>(buffer.data_ptr()),
+        static_cast<size_t>(spins_info.size())};
 
-            detail::Accumulator acc{std::move(psi), out, batch_size, device,
-                                    std::move(async)};
-            for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
-                auto const& x = spins_info.data[i * spins_info.stride()];
-                acc([&hamiltonian, &x](auto&& f) {
-                    hamiltonian(x, std::forward<decltype(f)>(f));
-                });
-            }
-            acc.finalize();
+    detail::Accumulator acc{
+        std::move(psi), out, batch_size, device,
+        [](auto&& f) { return async(std::forward<decltype(f)>(f)); }};
+    for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
+        auto const& x = spins_info.data[i * spins_info.stride()];
+        acc([&hamiltonian, &x](auto&& f) {
+            hamiltonian(x, std::forward<decltype(f)>(f));
         });
+    }
+    acc.finalize();
+    //    });
 
     return buffer;
 }
