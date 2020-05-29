@@ -172,15 +172,18 @@ class Accumulator {
 
     using result_type = std::invoke_result_t<TaskBuilder::Task>;
     using future_type = std::future<result_type>;
+    using async_type =
+        stdext::inplace_function<auto(TaskBuilder::Task &&)->future_type>;
 
     TaskBuilder             _builder;
     output_type             _store;
     state_type              _state;
     std::queue<future_type> _futures;
+    async_type              _async;
 
   public:
     Accumulator(v2::ForwardT fn, gsl::span<std::complex<float>> out,
-                unsigned batch_size, c10::Device device);
+                unsigned batch_size, c10::Device device, async_type _async);
 
     auto reset(gsl::span<std::complex<float>> out) -> void;
 
@@ -214,7 +217,7 @@ auto Accumulator::operator()(Iterator first, Iterator last) -> void
         _builder.add(first->first, first->second);
         if (_builder.full()) {
             drain_if_needed();
-            _futures.push(async(_builder.submit()));
+            _futures.push(_async(_builder.submit()));
         }
     }
     _builder.finish();
@@ -230,7 +233,7 @@ auto Accumulator::operator()(ForEach&& for_each) -> void
         _builder.add(spin, coeff);
         if (_builder.full()) {
             drain_if_needed();
-            _futures.push(async(_builder.submit()));
+            _futures.push(_async(_builder.submit()));
         }
     });
     _builder.finish();

@@ -78,6 +78,65 @@ class ThreadPool {
 };
 
 namespace detail {
+class _ThreadPoolBase {
+  public:
+    _ThreadPoolBase();
+
+    template <class F>
+    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
+    {
+        using return_type = typename std::result_of<F()>::type;
+        auto task         = std::make_shared<std::packaged_task<return_type()>>(
+            std::forward<F>(f));
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(_queue_mutex);
+            // don't allow enqueueing after stopping the pool
+            TCM_CHECK(!_stop, std::runtime_error,
+                      "enqueue on stopped ThreadPool");
+            _tasks.emplace([p = std::move(task)]() { (*p)(); });
+        }
+        _condition.notify_one();
+        return res;
+    }
+
+    auto run_one_task() -> bool;
+    auto stop() -> void;
+
+  private:
+    std::queue<std::function<void()>> _tasks;
+    std::mutex                        _queue_mutex;
+    std::condition_variable           _condition;
+    bool                              _stop;
+};
+} // namespace detail
+
+template <class Function>
+auto run_with_control_inversion(Function function) -> void
+{
+    detail::_ThreadPoolBase pool;
+    std::exception_ptr      e_ptr = nullptr;
+
+    auto body = [&pool, &e_ptr, function = std::move(function)]() {
+        try {
+            function([&pool](auto&& task) {
+                return pool.enqueue(std::forward<decltype(task)>(task));
+            });
+        }
+        catch (...) {
+            e_ptr = std::current_exception();
+        }
+        pool.stop();
+    };
+    auto thread = std::thread{std::move(body)};
+
+    // This thread is now the worker thread
+    while (!pool.run_one_task()) {}
+    thread.join();
+    if (e_ptr) { std::rethrow_exception(e_ptr); }
+}
+
+namespace detail {
 TCM_IMPORT auto global_thread_pool() noexcept -> ThreadPool&;
 } // namespace detail
 #endif

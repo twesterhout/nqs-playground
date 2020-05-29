@@ -1,29 +1,28 @@
 #include "bind_polynomial_state.hpp"
 #include "../polynomial_state.hpp"
 #include "../trim.hpp"
+#include "pybind11_helpers.hpp"
 
-#include <pybind11/complex.h>
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <torch/script.h>
 
 TCM_NAMESPACE_BEGIN
 
-namespace {
-auto make_forward_function(torch::jit::script::Method method,
-                           std::optional<unsigned> number_spins) -> v2::ForwardT
-{
-    static_cast<void>(number_spins);
-    // auto const n =
-    //     number_spins.has_value() ? static_cast<int64_t>(*number_spins) : -1L;
-    return [f = std::move(method)](auto x) mutable {
-        // if (x.scalar_type == torch::kInt64) { x = unpack(x, n); }
-        return f({std::move(x)}).toTensor();
-    };
-}
-} // namespace
+// namespace {
+// auto make_forward_function(torch::jit::script::Method method,
+//                            std::optional<unsigned> number_spins) -> v2::ForwardT
+// {
+//     static_cast<void>(number_spins);
+//     // auto const n =
+//     //     number_spins.has_value() ? static_cast<int64_t>(*number_spins) : -1L;
+//     return [f = std::move(method)](auto x) mutable {
+//         // if (x.scalar_type == torch::kInt64) { x = unpack(x, n); }
+//         return f({std::move(x)}).toTensor();
+//     };
+// }
+//
+// auto make_forward_function(pybind11::object method) -> v2::ForwardT {}
+// } // namespace
 
 auto bind_polynomial_state(PyObject* _module) -> void
 {
@@ -33,19 +32,20 @@ auto bind_polynomial_state(PyObject* _module) -> void
     std::vector<std::string> keep_alive;
 #define DOC(str) trim(keep_alive, str)
 
-    m.def("apply", [](torch::Tensor spins, Heisenberg const& hamiltonian,
-                      torch::jit::script::Method forward) {
-        return apply(
-            std::move(spins), hamiltonian,
-            make_forward_function(std::move(forward),
-                                  hamiltonian.basis()->number_spins()));
-    });
+    m.def(
+        "apply",
+        [](torch::Tensor spins, Heisenberg const& hamiltonian,
+           v2::ForwardT forward) {
+            return apply(std::move(spins), hamiltonian, std::move(forward));
+        },
+        py::call_guard<py::gil_scoped_release>());
 
+#if 0
     m.def("apply", [](torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
-                      torch::jit::script::Method forward) {
-        return apply(std::move(spins), polynomial,
-                     make_forward_function(std::move(forward), std::nullopt));
+                      v2::ForwardT forward) {
+        return apply(std::move(spins), polynomial, std::move(forward));
     });
+#endif
 
     m.def(
         "diag",

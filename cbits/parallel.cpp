@@ -34,6 +34,37 @@ TCM_EXPORT ThreadPool::~ThreadPool()
 }
 
 namespace detail {
+TCM_EXPORT _ThreadPoolBase::_ThreadPoolBase()
+    : _tasks{}, _queue_mutex{}, _condition{}, _stop{false}
+{}
+
+TCM_EXPORT auto _ThreadPoolBase::run_one_task() -> bool
+{
+    std::function<void()> task;
+
+    {
+        std::unique_lock<std::mutex> lock(_queue_mutex);
+        _condition.wait(lock, [this] { return _stop || !_tasks.empty(); });
+        if (_stop && _tasks.empty()) return true;
+        task = std::move(_tasks.front());
+        _tasks.pop();
+    }
+
+    task();
+    return false;
+}
+
+TCM_EXPORT auto _ThreadPoolBase::stop() -> void
+{
+    {
+        std::unique_lock<std::mutex> lock(_queue_mutex);
+        _stop = true;
+    }
+    _condition.notify_all();
+}
+} // namespace detail
+
+namespace detail {
 TCM_EXPORT auto global_thread_pool() noexcept -> ThreadPool&
 {
     static ThreadPool pool{};

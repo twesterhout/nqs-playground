@@ -37,7 +37,8 @@ TCM_NAMESPACE_BEGIN
 
 namespace detail {
 
-constexpr auto find_nth_one_simple(uint64_t const v, unsigned r) noexcept -> unsigned
+constexpr auto find_nth_one_simple(uint64_t const v, unsigned r) noexcept
+    -> unsigned
 {
     ++r; // counting from 1
     auto i = 0U;
@@ -49,7 +50,6 @@ constexpr auto find_nth_one_simple(uint64_t const v, unsigned r) noexcept -> uns
     }
     return i;
 }
-
 
 constexpr auto find_nth_one(uint64_t const v, unsigned r) noexcept -> unsigned
 {
@@ -263,8 +263,9 @@ auto MetropolisKernel::kernel_cpu(size_t const                          n,
 }
 #endif
 
-TCM_EXPORT ProposalGenerator::ProposalGenerator(std::shared_ptr<BasisBase const> basis,
-                  RandomGenerator& generator)
+TCM_EXPORT
+ProposalGenerator::ProposalGenerator(std::shared_ptr<BasisBase const> basis,
+                                     RandomGenerator&                 generator)
     : _basis{std::move(basis)}, _generator{std::addressof(generator)}
 {
     TCM_CHECK(_basis != nullptr, std::invalid_argument,
@@ -279,20 +280,22 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     auto const batch_size = x.size(0);
     if (device.type() != torch::DeviceType::CPU) {
         pin_memory = true;
-        x = x.to(x.options().device(device), /*non_blocking=*/true);
+        x          = x.to(x.options().device(device), /*non_blocking=*/true);
     }
     TCM_CHECK(_basis->hamming_weight().has_value(), std::runtime_error,
-        "ProposalGenerator currently only supports bases with fixed magnetisation");
+              "ProposalGenerator currently only supports bases with fixed "
+              "magnetisation");
     auto const max_states =
-        *_basis->hamming_weight() * (_basis->number_spins() - *_basis->hamming_weight());
+        *_basis->hamming_weight()
+        * (_basis->number_spins() - *_basis->hamming_weight());
     auto y = torch::empty(
         std::initializer_list<int64_t>{batch_size * max_states, 8L},
         torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
     std::vector<int64_t> counts(static_cast<size_t>(batch_size));
 
-    auto x_info = obtain_tensor_info<bits512 const>(x, "x");
-    auto y_info = obtain_tensor_info<bits512, false>(y);
-    auto size = 0L;
+    auto                 x_info = obtain_tensor_info<bits512 const>(x, "x");
+    auto                 y_info = obtain_tensor_info<bits512, false>(y);
+    auto                 size   = 0L;
     std::vector<bits512> workspace;
     for (auto i = 0L; i < x_info.size(); ++i) {
         generate(x_info.data[i * x_info.stride()], workspace);
@@ -311,19 +314,22 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     return {std::move(y), std::move(counts)};
 }
 
-TCM_EXPORT auto ProposalGenerator::generate(bits512 const& spin,
-                                            std::vector<bits512>& ys) const -> void
+TCM_EXPORT auto ProposalGenerator::generate(bits512 const&        spin,
+                                            std::vector<bits512>& ys) const
+    -> void
 {
     TCM_ASSERT(_basis->number_spins() > 0, "");
     auto const max_states =
-        *_basis->hamming_weight() * (_basis->number_spins() - *_basis->hamming_weight());
+        *_basis->hamming_weight()
+        * (_basis->number_spins() - *_basis->hamming_weight());
     ys.clear();
     ys.reserve(max_states);
 
     for (auto i = 0U; i < _basis->number_spins() - 1; ++i) {
         for (auto j = i + 1U; j < _basis->number_spins(); ++j) {
             if (are_not_aligned(spin, i, j)) {
-                auto const [repr, _, norm] = _basis->full_info(flipped(spin, i, j));
+                auto const [repr, _, norm] =
+                    _basis->full_info(flipped(spin, i, j));
                 if (norm > 0 && repr != spin) { ys.push_back(repr); }
             }
         }
@@ -335,42 +341,50 @@ TCM_EXPORT auto ProposalGenerator::generate(bits512 const& spin,
         std::distance(begin(ys), std::unique(begin(ys), end(ys)))));
 }
 
-TCM_EXPORT auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void
+TCM_EXPORT auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates)
+    -> void
 {
     torch::NoGradGuard no_grad;
     TCM_CHECK(time.device().type() == torch::DeviceType::CPU,
               std::invalid_argument, "t must reside on the CPU");
     TCM_CHECK(rates.device().type() == torch::DeviceType::CPU,
               std::invalid_argument, "t must reside on the CPU");
-    auto time_info = obtain_tensor_info<float>(time, "t");
+    auto time_info  = obtain_tensor_info<float>(time, "t");
     auto rates_info = obtain_tensor_info<float>(rates, "rates");
     TCM_CHECK(time_info.size() == rates_info.size(), std::invalid_argument,
-              fmt::format("t and rates tensors have incompatible shapes: [{}] != [{}]",
-                          fmt::join(time.sizes(), ", "), fmt::join(rates.sizes(), ", ")));
+              fmt::format(
+                  "t and rates tensors have incompatible shapes: [{}] != [{}]",
+                  fmt::join(time.sizes(), ", "),
+                  fmt::join(rates.sizes(), ", ")));
     auto& generator = global_random_generator();
     for (auto i = 0L; i < time_info.size(); ++i) {
         auto const waiting =
-            - std::log1p(-std::uniform_real_distribution<double>{}(generator))
-                / rates_info.data[i * rates_info.stride()];
+            -std::log1p(-std::uniform_real_distribution<double>{}(generator))
+            / rates_info.data[i * rates_info.stride()];
         time_info.data[i * time_info.stride()] += static_cast<float>(waiting);
     }
 }
 
-TCM_EXPORT auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
-    torch::Tensor sizes, torch::Tensor current_state, torch::Tensor current_log_prob,
-    torch::Tensor times, float const thin_rate) -> bool
+TCM_EXPORT auto
+_store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
+                      torch::Tensor sizes, torch::Tensor current_state,
+                      torch::Tensor current_log_prob, torch::Tensor times,
+                      float const thin_rate) -> bool
 {
     TCM_CHECK(thin_rate > 0.0f, std::invalid_argument,
-              fmt::format("invalid thin_rate: {}; expected a positive number", thin_rate));
+              fmt::format("invalid thin_rate: {}; expected a positive number",
+                          thin_rate));
     TCM_CHECK(times.device().type() == torch::DeviceType::CPU,
               std::invalid_argument, "times must reside on the CPU");
     TCM_CHECK(sizes.device().type() == torch::DeviceType::CPU,
               std::invalid_argument, "sizes must reside on the CPU");
     auto times_info = obtain_tensor_info<float>(times, "times");
     auto sizes_info = obtain_tensor_info<int64_t>(sizes, "sizes");
-    TCM_CHECK(times_info.size() == sizes_info.size(), std::invalid_argument,
-              fmt::format("times and sizes tensors have incompatible shapes: [{}] != [{}]",
-                          fmt::join(times.sizes(), ", "), fmt::join(sizes.sizes(), ", ")));
+    TCM_CHECK(
+        times_info.size() == sizes_info.size(), std::invalid_argument,
+        fmt::format(
+            "times and sizes tensors have incompatible shapes: [{}] != [{}]",
+            fmt::join(times.sizes(), ", "), fmt::join(sizes.sizes(), ", ")));
     auto const max_size = states.size(0);
 
     auto const get_dst = [max_size](auto& tensor, int64_t const j,
@@ -379,8 +393,7 @@ TCM_EXPORT auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_pr
             torch::narrow(tensor, /*dim=*/1, /*start=*/j, /*length=*/1),
             /*dim=*/0,
             /*start=*/offset,
-            /*length=*/std::min(count, max_size - offset)
-        );
+            /*length=*/std::min(count, max_size - offset));
     };
 
     for (auto i = 0L; i < times_info.size(); ++i) {
@@ -392,8 +405,10 @@ TCM_EXPORT auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_pr
         int quotient;
         t = std::remquo(t, thin_rate, &quotient);
         if (quotient > 0 && n < max_size) {
-            get_dst(states, i, n, quotient).copy_(current_state[i], /*non_blocking=*/true);
-            get_dst(log_probs, i, n, quotient).copy_(current_log_prob[i], /*non_blocking=*/true);
+            get_dst(states, i, n, quotient)
+                .copy_(current_state[i], /*non_blocking=*/true);
+            get_dst(log_probs, i, n, quotient)
+                .copy_(current_log_prob[i], /*non_blocking=*/true);
             n = std::min(n + quotient, max_size);
         }
     }
@@ -410,22 +425,28 @@ TCM_EXPORT auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_pr
     return should_stop;
 }
 
-
-
-TCM_EXPORT auto _pick_next_state_index(torch::Tensor jump_rates, std::vector<int64_t> const& counts,
-    c10::optional<torch::Tensor> out) -> torch::Tensor
+TCM_EXPORT auto _pick_next_state_index(torch::Tensor                jump_rates,
+                                       std::vector<int64_t> const&  counts,
+                                       c10::optional<torch::Tensor> out)
+    -> torch::Tensor
 {
     if (!out.has_value()) {
         out.emplace(torch::empty(
             std::initializer_list<int64_t>{static_cast<int64_t>(counts.size())},
-            torch::TensorOptions{}.dtype(torch::kInt64).device(jump_rates.device())));
+            torch::TensorOptions{}
+                .dtype(torch::kInt64)
+                .device(jump_rates.device())));
     }
     auto& indices = *out;
-    auto offset = 0L;
+    auto  offset  = 0L;
     for (auto i = 0L; i < static_cast<int64_t>(counts.size()); ++i) {
         auto const n = static_cast<int64_t>(counts[static_cast<size_t>(i)]);
-        indices[i] = offset + torch::multinomial(
-            torch::narrow(jump_rates, /*dim=*/0, /*start=*/offset, /*length=*/n), 1).item<int64_t>();
+        indices[i] =
+            offset
+            + torch::multinomial(torch::narrow(jump_rates, /*dim=*/0,
+                                               /*start=*/offset, /*length=*/n),
+                                 1)
+                  .item<int64_t>();
         offset += n;
     }
     return indices;
@@ -434,14 +455,14 @@ TCM_EXPORT auto _pick_next_state_index(torch::Tensor jump_rates, std::vector<int
 TCM_EXPORT auto _calculate_jump_rates(torch::Tensor current_log_prob,
                                       torch::Tensor proposed_log_prob,
                                       std::vector<int64_t> const& counts,
-                                      torch::Device const target_device)
+                                      torch::Device const         target_device)
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
     torch::NoGradGuard no_grad;
-    auto rates = torch::empty_like(proposed_log_prob);
+    auto               rates = torch::empty_like(proposed_log_prob);
     rates.copy_(proposed_log_prob);
     auto rates_sum = torch::empty_like(current_log_prob);
-    auto parts = torch::split_with_sizes(rates, counts);
+    auto parts     = torch::split_with_sizes(rates, counts);
     for (auto i = size_t{0}; i < counts.size(); ++i) {
         parts[i].sub_(current_log_prob[static_cast<int64_t>(i)]);
     }
@@ -454,9 +475,9 @@ TCM_EXPORT auto _calculate_jump_rates(torch::Tensor current_log_prob,
     rates.exp_();
     rates.clamp_max_(1.0f);
     auto rates_target = rates.device() != target_device
-        ? rates.to(rates.options().device(target_device),
-                   /*non_blocking=*/true, /*copy=*/false)
-        : rates;
+                            ? rates.to(rates.options().device(target_device),
+                                       /*non_blocking=*/true, /*copy=*/false)
+                            : rates;
     for (auto i = size_t{0}; i < counts.size(); ++i) {
         rates_sum[static_cast<int64_t>(i)] = parts[i].sum();
     }
@@ -466,11 +487,13 @@ TCM_EXPORT auto _calculate_jump_rates(torch::Tensor current_log_prob,
     //         rates, /*dim=*/0, /*start=*/offset, /*length=*/counts[static_cast<size_t>(i)]);
     //     rates_sum[i] = part.sum();
     // }
-    auto rates_sum_target = rates_sum.device() != target_device
-        ? rates_sum.to(rates_sum.options().device(target_device),
-                       /*non_blocking=*/true, /*copy=*/false)
-        : rates_sum;
-    return std::make_tuple(std::move(rates_target), std::move(rates_sum_target));
+    auto rates_sum_target =
+        rates_sum.device() != target_device
+            ? rates_sum.to(rates_sum.options().device(target_device),
+                           /*non_blocking=*/true, /*copy=*/false)
+            : rates_sum;
+    return std::make_tuple(std::move(rates_target),
+                           std::move(rates_sum_target));
 }
 
 TCM_NAMESPACE_END

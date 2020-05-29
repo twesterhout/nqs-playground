@@ -6,8 +6,7 @@ TCM_NAMESPACE_BEGIN
 TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
                       v2::ForwardT psi) -> torch::Tensor
 {
-    torch::NoGradGuard no_grad;
-    constexpr auto     batch_size = 1024U;
+    constexpr auto batch_size = 1024U;
 
     auto const device = spins.device();
     spins = spins.to(spins.options().device(torch::DeviceType::CPU));
@@ -16,18 +15,24 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
     auto buffer =
         torch::empty(std::initializer_list<int64_t>{spins_info.size(), 2L},
                      torch::TensorOptions{}.dtype(torch::kFloat32));
-    auto out = gsl::span<std::complex<float>>{
-        static_cast<std::complex<float>*>(buffer.data_ptr()),
-        static_cast<size_t>(spins_info.size())};
 
-    detail::Accumulator acc{std::move(psi), out, batch_size, device};
-    for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
-        auto const& x = spins_info.data[i * spins_info.stride()];
-        acc([&hamiltonian, &x](auto&& f) {
-            hamiltonian(x, std::forward<decltype(f)>(f));
+    run_with_control_inversion(
+        [&spins_info, &buffer, &psi, &hamiltonian, device](auto async) {
+            torch::NoGradGuard no_grad;
+            auto               out = gsl::span<std::complex<float>>{
+                static_cast<std::complex<float>*>(buffer.data_ptr()),
+                static_cast<size_t>(spins_info.size())};
+
+            detail::Accumulator acc{std::move(psi), out, batch_size, device,
+                                    std::move(async)};
+            for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
+                auto const& x = spins_info.data[i * spins_info.stride()];
+                acc([&hamiltonian, &x](auto&& f) {
+                    hamiltonian(x, std::forward<decltype(f)>(f));
+                });
+            }
+            acc.finalize();
         });
-    }
-    acc.finalize();
 
     return buffer;
 }
@@ -53,6 +58,7 @@ TCM_EXPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
                   /*copy=*/false);
 }
 
+#if 0
 TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
                       v2::ForwardT psi) -> torch::Tensor
 {
@@ -84,5 +90,6 @@ TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
 
     return buffer;
 }
+#endif
 
 TCM_NAMESPACE_END

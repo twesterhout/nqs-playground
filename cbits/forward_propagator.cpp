@@ -121,19 +121,22 @@ auto TaskBuilder::Task::operator()() const
     results.reserve(this->counts.size());
 
     TCM_ASSERT(!counts.empty(), "");
-    auto const iteration = [this, &results, &output](auto const _j, auto const _offset) {
+    auto const iteration = [this, &results, &output](auto const _j,
+                                                     auto const _offset) {
         auto const slice = [this, _j, _offset](auto const& t) {
-            return torch::narrow(t, /*dim=*/0, /*start=*/_offset,
-                                 /*length=*/static_cast<int64_t>(this->counts[_j]));
+            return torch::narrow(
+                t, /*dim=*/0, /*start=*/_offset,
+                /*length=*/static_cast<int64_t>(this->counts[_j]));
         };
         auto const r = this->counts[_j] > 0
-                     ? dotu(slice(this->coeffs), slice(output))
-                     : std::complex<float>{0.0f, 0.0f};
+                           ? dotu(slice(this->coeffs), slice(output))
+                           : std::complex<float>{0.0f, 0.0f};
         results.push_back(r);
     };
     auto offset = int64_t{0};
     auto j      = size_t{0};
-    for (; j < this->counts.size() - 1; offset += static_cast<int64_t>(this->counts[j++])) {
+    for (; j < this->counts.size() - 1;
+         offset += static_cast<int64_t>(this->counts[j++])) {
         iteration(j, offset);
     }
     if (!(this->counts[j] == 0 && offset != batch_size)) {
@@ -144,11 +147,13 @@ auto TaskBuilder::Task::operator()() const
 }
 
 Accumulator::Accumulator(v2::ForwardT psi, gsl::span<std::complex<float>> out,
-                         unsigned batch_size, c10::Device device)
+                         unsigned const batch_size, c10::Device const device,
+                         async_type async)
     : _builder{std::move(psi), batch_size, device}
     , _store{out}
     , _state{}
     , _futures{}
+    , _async{std::move(async)}
 {}
 
 auto Accumulator::reset(gsl::span<std::complex<float>> out) -> void
@@ -167,8 +172,24 @@ auto Accumulator::drain(unsigned const count) -> void
     for (auto i = 0U; i < count; ++i) {
         auto future = std::move(_futures.front());
         _futures.pop();
-        auto value = future.get();
-        process(value);
+        try {
+            auto value = future.get();
+            process(value);
+        }
+        catch (...) {
+            // Drain the rest of the queue since we don't know how to recover
+            // anyway. We ignore all remaining exceptions and rethrow the first
+            // one.
+            auto exception_ptr = std::current_exception();
+            for (; !_futures.empty(); _futures.pop()) {
+                try {
+                    _futures.front().get();
+                }
+                catch (...) {
+                }
+            }
+            std::rethrow_exception(exception_ptr);
+        }
     }
 }
 
@@ -204,7 +225,7 @@ auto Accumulator::finalize() -> void
     if (!_builder.empty()) {
         _builder.add_junk();
         drain_if_needed();
-        _futures.push(async(_builder.submit()));
+        _futures.push(_async(_builder.submit()));
     }
     TCM_ASSERT(_builder.empty(), "postcondition violated");
     drain(_futures.size());

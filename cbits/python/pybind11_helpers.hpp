@@ -31,7 +31,10 @@
 #include "../common.hpp"
 #include "../symmetry.hpp"
 
+#include <pybind11/complex.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <torch/script.h>
 
@@ -172,13 +175,17 @@ namespace detail {
                 func_handle(function&& f_) : f(std::move(f_)) {}
                 ~func_handle()
                 {
+                    // fmt::print("~func_handle(): Waiting for GIL...\n");
                     gil_scoped_acquire acq;
-                    function           kill_f(std::move(f));
+                    // fmt::print("~func_handle(): Acquired GIL...\n");
+                    function kill_f(std::move(f));
                 }
             };
 
             value = [handle = func_handle{std::move(func)}](auto x) {
+                // fmt::print("__call__: Waiting for GIL...\n");
                 gil_scoped_acquire acq;
+                // fmt::print("__call__: Acquired GIL...\n");
                 return handle.f(std::move(x)).template cast<torch::Tensor>();
             };
             return true;
