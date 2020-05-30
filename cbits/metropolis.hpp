@@ -88,19 +88,25 @@ class TCM_IMPORT ProposalGenerator {
     auto generate(bits512 const& src, std::vector<bits512>& dst) const -> void;
 };
 
-auto _pick_next_state_index(torch::Tensor jump_rates, std::vector<int64_t> const& counts,
-    c10::optional<torch::Tensor> out = c10::nullopt) -> torch::Tensor;
+// auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void;
 
-auto _calculate_jump_rates(torch::Tensor current_log_prob,
-                           torch::Tensor proposed_log_prob,
-                           std::vector<int64_t> const& counts,
-                           torch::Device target_device)
+// auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
+//                            torch::Tensor sizes, torch::Tensor current_state,
+//                            torch::Tensor current_log_prob, torch::Tensor times,
+//                            float thin_rate) -> bool;
+
+auto zanella_next_state_index(torch::Tensor                jump_rates,
+                              std::vector<int64_t> const&  counts,
+                              c10::optional<torch::Tensor> out)
+    -> torch::Tensor;
+
+auto zanella_jump_rates(torch::Tensor               current_log_prob,
+                        torch::Tensor               proposed_log_prob,
+                        std::vector<int64_t> const& counts,
+                        torch::Device               target_device)
     -> std::tuple<torch::Tensor, torch::Tensor>;
 
-auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void;
-
-auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
-    torch::Tensor sizes, torch::Tensor current_state, torch::Tensor current_log_prob,
-    torch::Tensor times, float thin_rate) -> bool;
+auto zanella_waiting_time(torch::Tensor rates, c10::optional<torch::Tensor> out)
+    -> torch::Tensor;
 
 TCM_NAMESPACE_END
