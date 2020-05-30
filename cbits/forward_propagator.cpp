@@ -1,4 +1,5 @@
 #include "forward_propagator.hpp"
+#include "dotu.hpp"
 #include <torch/jit.h>
 
 TCM_NAMESPACE_BEGIN
@@ -69,8 +70,9 @@ auto TaskBuilder::submit(bool prepare_next) -> Task
     return task;
 }
 
+#if 1
 namespace {
-    auto dotu(torch::Tensor a, torch::Tensor b) -> std::complex<float>
+    auto _dotu(torch::Tensor a, torch::Tensor b) -> std::complex<float>
     {
         static auto p = [] {
             auto  cu = torch::jit::compile(R"JIT(
@@ -92,6 +94,7 @@ namespace {
                                    std::move(out[1]).toTensor().item<float>()};
     }
 } // namespace
+#endif
 
 auto TaskBuilder::Task::operator()() const
     -> std::tuple<float, bool, std::vector<std::complex<float>>>
@@ -128,9 +131,9 @@ auto TaskBuilder::Task::operator()() const
                 t, /*dim=*/0, /*start=*/_offset,
                 /*length=*/static_cast<int64_t>(this->counts[_j]));
         };
-        auto const r = this->counts[_j] > 0
-                           ? dotu(slice(this->coeffs), slice(output))
-                           : std::complex<float>{0.0f, 0.0f};
+        auto const r = this->counts[_j] > 0 ? static_cast<std::complex<float>>(
+                           dotu(slice(this->coeffs), slice(output)))
+                                            : std::complex<float>{0.0f, 0.0f};
         results.push_back(r);
     };
     auto offset = int64_t{0};

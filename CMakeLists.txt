@@ -387,7 +387,9 @@ endif()
 ###############################################################################
 add_library(nqs_cpu OBJECT
     cbits/cpu/unpack.hpp
-    cbits/cpu/unpack.cpp)
+    cbits/cpu/unpack.cpp
+    cbits/cpu/dotu.hpp
+    cbits/cpu/dotu.cpp)
 nqs_cbits_add_low_level_flags(nqs_cpu)
 target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
 target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
@@ -417,6 +419,7 @@ add_library(nqs SHARED
     cbits/polynomial_state.cpp
     cbits/random.cpp
     cbits/unpack.cpp
+    cbits/dotu.cpp
     cbits/operator.cpp
     cbits/symmetry.cpp
     cbits/spin_basis.cpp
