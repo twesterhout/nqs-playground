@@ -131,15 +131,7 @@ struct TensorInfo {
 
     template <class D = void, class = typename std::enable_if<
                                   std::is_same<D, D>::value && Dims == 1>::type>
-    TCM_CXX14_CONSTEXPR auto operator[](Index i) const noexcept -> T
-    {
-        TCM_ASSERT(0 <= i && i < sizes[0], "index out of bounds");
-        return data[i * strides[0]];
-    }
-
-    template <class D = void, class = typename std::enable_if<
-                                  std::is_same<D, D>::value && Dims == 1>::type>
-    TCM_CXX14_CONSTEXPR auto operator[](Index i) noexcept -> T&
+    TCM_CXX14_CONSTEXPR auto operator[](Index i) const noexcept -> T&
     {
         TCM_ASSERT(0 <= i && i < sizes[0], "index out of bounds");
         return data[i * strides[0]];

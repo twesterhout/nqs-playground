@@ -491,28 +491,20 @@ zanella_choose_samples(torch::Tensor weights, int64_t const number_samples,
 
     AT_DISPATCH_FLOATING_TYPES(
         weights.scalar_type(), "zanella_choose_samples", [&] {
-            auto const* weights_data          = weights.data_ptr<scalar_t>();
-            auto*       indices_data          = indices.data_ptr<int64_t>();
-            auto const  weights_stride        = weights.stride(0);
-            auto const  indices_stride        = indices.stride(0);
-            auto        time                  = 0.0;
-            auto        index                 = int64_t{0};
-            indices_data[0L * indices_stride] = index;
+            auto weights_info = obtain_tensor_info<scalar_t const>(weights);
+            auto indices_info = obtain_tensor_info<int64_t>(indices);
+            auto time         = 0.0;
+            auto index        = int64_t{0};
+            indices_info[0]   = index;
             for (auto size = int64_t{1}; size < number_samples; ++size) {
-                TCM_CHECK(index < weights.size(0), std::runtime_error,
-                          fmt::format("index out of bounds: {} >= {}; size={}",
-                                      index, weights.size(0), size));
-                while (time + weights_data[index * weights_stride]
-                       <= time_step) {
-                    time += weights_data[index * weights_stride];
+                while (time + weights_info[index] <= time_step) {
+                    time += weights_info[index];
                     ++index;
-                    TCM_CHECK(
-                        index < weights.size(0), std::runtime_error,
-                        fmt::format("2: index out of bounds: {} >= {}; size={}",
-                                    index, weights.size(0), size));
+                    TCM_CHECK(index < weights_info.size(), std::runtime_error,
+                              "time step is too big");
                 }
                 time -= time_step;
-                indices_data[size * indices_stride] = index;
+                indices_info[size] = index;
             }
         });
     return indices.to(indices.options().device(device),
@@ -531,7 +523,7 @@ auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
         auto const u = dist(global_random_generator());
         auto       s = 0.0L;
         for (auto i = int64_t{0}; i < weights.size(); ++i) {
-            auto const w = weights.data[i * weights.stride()];
+            auto const w = weights[i];
             TCM_CHECK(w >= scalar_t{0}, std::invalid_argument,
                       fmt::format("encountered a negative weight: {}", w));
             s += w;
@@ -548,9 +540,9 @@ auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
     }
 }
 
-TCM_EXPORT auto zanella_next_state_index_new(torch::Tensor jump_rates,
-                                             torch::Tensor jump_rates_sum,
-                                             std::vector<int64_t> const& counts)
+TCM_EXPORT auto zanella_next_state_index(torch::Tensor jump_rates,
+                                         torch::Tensor jump_rates_sum,
+                                         std::vector<int64_t> const& counts)
     -> torch::Tensor
 {
     using scalar_t    = float;
@@ -561,22 +553,22 @@ TCM_EXPORT auto zanella_next_state_index_new(torch::Tensor jump_rates,
                                 .dtype(torch::kInt64)
                                 .pinned_memory(!device.is_cpu()));
 
-    auto const out_info = obtain_tensor_info<int64_t, false>(out);
+    auto const out_info = obtain_tensor_info<int64_t>(out);
     auto const sum_info = obtain_tensor_info<scalar_t const>(jump_rates_sum);
-    auto       jump_rates_data   = jump_rates.data_ptr<scalar_t>();
-    auto const jump_rates_stride = jump_rates.stride(0);
-    auto       offset            = 0L;
-    for (auto i = 0L; i < out_info.size(); ++i) {
+    auto const weights_info = obtain_tensor_info<scalar_t const>(jump_rates);
+    auto       offset       = int64_t{0};
+    for (auto i = int64_t{0}; i < out_info.size(); ++i) {
         auto const n = counts[static_cast<size_t>(i)];
-        auto const rates =
-            TensorInfo<scalar_t const>{jump_rates_data, &n, &jump_rates_stride};
-        out_info.data[i * out_info.stride()] =
-            offset
-            + sample_one_from_multinomial(rates,
-                                          sum_info.data[i * sum_info.stride()]);
-        jump_rates_data += n * jump_rates_stride;
+        TCM_CHECK(n >= 0, std::runtime_error, "negative count");
+        TCM_CHECK(offset + n <= weights_info.size(), std::runtime_error,
+                  "sum of counts exceeds the size of jump_rates");
+        out_info[i] = offset
+                      + sample_one_from_multinomial(
+                          slice(weights_info, offset, offset + n), sum_info[i]);
         offset += n;
     }
+    TCM_CHECK(offset == weights_info.size(), std::runtime_error,
+              "sum of counts is smaller than the size of jump_rates");
 
     if (!device.is_cpu()) {
         return out.to(out.options().device(device), /*non_blocking=*/true);
@@ -584,6 +576,7 @@ TCM_EXPORT auto zanella_next_state_index_new(torch::Tensor jump_rates,
     return out;
 }
 
+#if 0
 TCM_EXPORT auto zanella_next_state_index(torch::Tensor               jump_rates,
                                          std::vector<int64_t> const& counts,
                                          c10::optional<torch::Tensor> out)
@@ -610,6 +603,7 @@ TCM_EXPORT auto zanella_next_state_index(torch::Tensor               jump_rates,
     }
     return indices;
 }
+#endif
 
 #if 0
 TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,

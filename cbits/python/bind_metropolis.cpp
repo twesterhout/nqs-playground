@@ -52,30 +52,21 @@ auto bind_metropolis(PyObject* _module) -> void
             },
             py::arg{"x"}.noconvert());
 
+#if 0
     m.def("zanella_next_state_index", &zanella_next_state_index, DOC(R"EOF(
 
           )EOF"),
           py::arg{"jump_rates"}.noconvert(), py::arg{"counts"}.noconvert(),
           py::arg{"out"}.noconvert() = py::none());
+#endif
 
-    m.def("zanella_next_state_index_new", &zanella_next_state_index_new);
+    m.def("zanella_next_state_index", &zanella_next_state_index);
 
-    m.def(
-        "zanella_jump_rates",
-        [](torch::Tensor current, torch::Tensor possible,
-           std::vector<int64_t> const& counts) {
-            return zanella_jump_rates(std::move(current), std::move(possible),
-                                      counts);
-        },
-        DOC(R"EOF(
+    m.def("zanella_jump_rates", &zanella_jump_rates, DOC(R"EOF(
 
         )EOF"),
-        py::arg{"current_log_prob"}.noconvert(),
-        py::arg{"possible_log_prob"}.noconvert(), py::arg{"counts"});
-
-    // m.def("_add_waiting_time_", &_add_waiting_time_, py::arg{"t"}.noconvert(),
-    //       py::arg{"rates"}.noconvert());
-    // m.def("_store_ready_samples_", &_store_ready_samples_);
+          py::arg{"current_log_prob"}.noconvert(),
+          py::arg{"possible_log_prob"}.noconvert(), py::arg{"counts"});
 
     m.def("zanella_waiting_time", &zanella_waiting_time, DOC(R"EOF(
           Calculate waiting time for current state.

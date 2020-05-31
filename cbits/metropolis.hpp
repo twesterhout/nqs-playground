@@ -95,14 +95,14 @@ class TCM_IMPORT ProposalGenerator {
 //                            torch::Tensor current_log_prob, torch::Tensor times,
 //                            float thin_rate) -> bool;
 
-auto zanella_next_state_index(torch::Tensor                jump_rates,
-                              std::vector<int64_t> const&  counts,
-                              c10::optional<torch::Tensor> out)
-    -> torch::Tensor;
+// auto zanella_next_state_index(torch::Tensor                jump_rates,
+//                               std::vector<int64_t> const&  counts,
+//                               c10::optional<torch::Tensor> out)
+//     -> torch::Tensor;
 
-auto zanella_next_state_index_new(torch::Tensor               jump_rates,
-                                  torch::Tensor               jump_rates_sum,
-                                  std::vector<int64_t> const& counts)
+auto zanella_next_state_index(torch::Tensor               jump_rates,
+                              torch::Tensor               jump_rates_sum,
+                              std::vector<int64_t> const& counts)
     -> torch::Tensor;
 
 #if 0
