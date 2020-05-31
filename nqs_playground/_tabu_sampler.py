@@ -33,14 +33,20 @@
 
 from itertools import islice
 from time import time
-from typing import List
+from typing import Callable, List, Tuple
 
 import numpy as np
 import torch
 from torch import Tensor
 
 from . import _C
-from _C import zanella_next_state_index, zanella_waiting_time, zanella_jump_rates
+from ._C import (
+    zanella_next_state_index,
+    zanella_next_state_index_new,
+    zanella_waiting_time,
+    zanella_jump_rates,
+    zanella_choose_samples,
+)
 from .monte_carlo import SamplingOptions, _prepare_initial_state
 
 
@@ -116,6 +122,8 @@ def zanella_process(
     # Device is determined by the location of initial state
     device = current_state.device
     current_log_prob = log_prob_fn(current_state)
+    if current_log_prob.dim() > 1:
+        current_log_prob.squeeze_(dim=1)
     # Number of chains is also deduced from current_state. It is simply
     # current_state.size(0). In the following we pre-allocate storage for
     # states and log probabilities.
@@ -135,23 +143,31 @@ def zanella_process(
         # Generates all states to which we could jump
         possible_state, counts = generator_fn(current_state)
         possible_log_prob = log_prob_fn(possible_state)
+        if possible_log_prob.dim() > 1:
+            possible_log_prob.squeeze_(dim=1)
         jump_rates, jump_rates_sum = zanella_jump_rates(
-            current_log_prob, possible_log_prob, counts, cpu
+            current_log_prob, possible_log_prob, counts
         )
         # Calculate for how long we have to sit in the current state
         # Note that only now have we computed all quantities for `iteration`.
         zanella_waiting_time(jump_rates_sum, out=current_weight)
 
         iteration += 1
+        if iteration % 1000 == 0:
+            print(
+                "Information :: Patience! At {:.2f}%...".format(
+                    100 * iteration / number_samples
+                )
+            )
         if iteration == number_samples:
             break
 
-        current_state = states[i]
-        current_log_prob = log_prob[i]
-        current_weight = weights[i]
+        current_state = states[iteration]
+        current_log_prob = log_prob[iteration]
+        current_weight = weights[iteration]
 
         # Pick the next state
-        indices = zanella_next_state_index(jump_rates, counts)
+        indices = zanella_next_state_index_new(jump_rates, jump_rates_sum, counts)
         torch.index_select(possible_state, dim=0, index=indices, out=current_state)
         torch.index_select(
             possible_log_prob, dim=0, index=indices, out=current_log_prob
@@ -170,12 +186,22 @@ def sample_using_zanella(log_prob_fn, basis, options):
         current_state, log_prob_fn, generator_fn, options.number_samples * sweep_size
     )
 
+    final_states = states.new_empty((options.number_samples,) + states.size()[1:])
+    final_log_prob = log_prob.new_empty((options.number_samples,) + log_prob.size()[1:])
+
     time_step = torch.sum(weights, dim=0)
     time_step /= options.number_samples
+    for chain in range(weights.size(1)):
+        indices = zanella_choose_samples(
+            weights[:, chain],
+            options.number_samples,
+            time_step[chain].item(),
+            torch.device("cpu"),
+        )
+        torch.index_select(states, dim=0, index=indices, out=final_states[:, chain])
+        torch.index_select(log_prob, dim=0, index=indices, out=final_log_prob[:, chain])
 
-    # TODO 
-
-    return states, log_prob
+    return final_states, final_log_prob
 
 
 @torch.no_grad()

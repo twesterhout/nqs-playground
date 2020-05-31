@@ -100,13 +100,24 @@ auto zanella_next_state_index(torch::Tensor                jump_rates,
                               c10::optional<torch::Tensor> out)
     -> torch::Tensor;
 
+auto zanella_next_state_index_new(torch::Tensor               jump_rates,
+                                  torch::Tensor               jump_rates_sum,
+                                  std::vector<int64_t> const& counts)
+    -> torch::Tensor;
+
+#if 0
 auto zanella_jump_rates(torch::Tensor               current_log_prob,
                         torch::Tensor               proposed_log_prob,
                         std::vector<int64_t> const& counts,
                         torch::Device               target_device)
     -> std::tuple<torch::Tensor, torch::Tensor>;
+#endif
 
 auto zanella_waiting_time(torch::Tensor rates, c10::optional<torch::Tensor> out)
+    -> torch::Tensor;
+
+auto zanella_choose_samples(torch::Tensor weights, int64_t number_samples,
+                            double time_step, c10::Device device)
     -> torch::Tensor;
 
 TCM_NAMESPACE_END

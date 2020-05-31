@@ -3,6 +3,8 @@
 #include "../spin_basis.hpp"
 #include "../trim.hpp"
 
+#include "../cpu/kernels.hpp"
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -56,20 +58,20 @@ auto bind_metropolis(PyObject* _module) -> void
           py::arg{"jump_rates"}.noconvert(), py::arg{"counts"}.noconvert(),
           py::arg{"out"}.noconvert() = py::none());
 
+    m.def("zanella_next_state_index_new", &zanella_next_state_index_new);
+
     m.def(
         "zanella_jump_rates",
         [](torch::Tensor current, torch::Tensor possible,
-           std::vector<int64_t> const& counts, py::object device) {
-            return zanella_jump_rates(
-                std::move(current), std::move(possible), counts,
-                torch::python::detail::py_object_to_device(device));
+           std::vector<int64_t> const& counts) {
+            return zanella_jump_rates(std::move(current), std::move(possible),
+                                      counts);
         },
         DOC(R"EOF(
 
         )EOF"),
         py::arg{"current_log_prob"}.noconvert(),
-        py::arg{"possible_log_prob"}.noconvert(), py::arg{"counts"},
-        py::arg{"target_device"}.noconvert());
+        py::arg{"possible_log_prob"}.noconvert(), py::arg{"counts"});
 
     // m.def("_add_waiting_time_", &_add_waiting_time_, py::arg{"t"}.noconvert(),
     //       py::arg{"rates"}.noconvert());
@@ -83,6 +85,19 @@ auto bind_metropolis(PyObject* _module) -> void
           :return:)EOF"),
           py::arg{"rates"}.noconvert(), py::arg{"out"}.noconvert() = py::none(),
           py::call_guard<py::gil_scoped_release>());
+
+    m.def(
+        "zanella_choose_samples",
+        [](torch::Tensor weights, int64_t number_samples, double time_step,
+           py::object device) {
+            return zanella_choose_samples(
+                std::move(weights), number_samples, time_step,
+                torch::python::detail::py_object_to_device(device));
+        },
+        DOC(R"EOF(
+        )EOF"),
+        py::arg{"weights"}.noconvert(), py::arg{"number_samples"},
+        py::arg{"time_step"}.noconvert(), py::arg{"device"}.noconvert());
 
 #undef DOC
 }

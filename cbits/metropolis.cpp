@@ -27,6 +27,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "metropolis.hpp"
+#include "errors.hpp"
 #include "random.hpp"
 #include "spin_basis.hpp"
 
@@ -469,6 +470,113 @@ _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
 }
 #endif
 
+TCM_EXPORT auto
+zanella_choose_samples(torch::Tensor weights, int64_t const number_samples,
+                       double const time_step, c10::Device const device)
+    -> torch::Tensor
+{
+    TCM_CHECK(
+        weights.dim() == 1, std::invalid_argument,
+        fmt::format("weights has wrong shape: [{}]; expected it to be a vector",
+                    fmt::join(weights.sizes(), ", ")));
+    TCM_CHECK(weights.device().type() == c10::DeviceType::CPU,
+              std::invalid_argument, "weights must reside on the CPU");
+
+    auto const pinned_memory = device != c10::DeviceType::CPU;
+    auto       indices =
+        torch::empty({number_samples}, torch::TensorOptions{}
+                                           .dtype(torch::kInt64)
+                                           .pinned_memory(pinned_memory));
+    if (number_samples == 0) { return indices.to(device); }
+
+    AT_DISPATCH_FLOATING_TYPES(
+        weights.scalar_type(), "zanella_choose_samples", [&] {
+            auto const* weights_data          = weights.data_ptr<scalar_t>();
+            auto*       indices_data          = indices.data_ptr<int64_t>();
+            auto const  weights_stride        = weights.stride(0);
+            auto const  indices_stride        = indices.stride(0);
+            auto        time                  = 0.0;
+            auto        index                 = int64_t{0};
+            indices_data[0L * indices_stride] = index;
+            for (auto size = int64_t{1}; size < number_samples; ++size) {
+                while (time + weights_data[index * weights_stride]
+                       <= time_step) {
+                    time += weights_data[index * weights_stride];
+                    ++index;
+                }
+                time -= time_step;
+                indices_data[size * indices_stride] = index;
+            }
+        });
+    return indices.to(indices.options().device(device),
+                      /*non_blocking=*/pinned_memory);
+}
+
+template <class scalar_t>
+auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
+                                 scalar_t                   sum) -> int64_t
+{
+    TCM_CHECK(
+        sum >= scalar_t{0}, std::invalid_argument,
+        fmt::format("invalid sum: {}; expected a non-negative number", sum));
+    for (;;) {
+        std::uniform_real_distribution<long double> dist{0.0, sum};
+        auto const u = dist(global_random_generator());
+        auto       s = 0.0L;
+        for (auto i = int64_t{0}; i < weights.size(); ++i) {
+            auto const w = weights.data[i * weights.stride()];
+            TCM_CHECK(w >= scalar_t{0}, std::invalid_argument,
+                      fmt::format("encountered a negative weight: {}", w));
+            s += w;
+            if (s >= u) { return i; }
+        }
+        // Check that this is indeed an extremely unlikely numerical instability
+        // rather than a bug
+        TCM_CHECK(std::abs(s - sum) < 1e-5L * std::max<long double>(s, sum),
+                  std::runtime_error,
+                  fmt::format(
+                      "provided sum does not match the computed one: {} != {}",
+                      sum, s));
+        sum = static_cast<scalar_t>(s);
+    }
+}
+
+TCM_EXPORT auto zanella_next_state_index_new(torch::Tensor jump_rates,
+                                             torch::Tensor jump_rates_sum,
+                                             std::vector<int64_t> const& counts)
+    -> torch::Tensor
+{
+    using scalar_t    = float;
+    auto const device = jump_rates.device();
+    if (!device.is_cpu()) { jump_rates = jump_rates.cpu(); }
+    auto out = torch::empty({static_cast<int64_t>(counts.size())},
+                            torch::TensorOptions{}
+                                .dtype(torch::kInt64)
+                                .pinned_memory(!device.is_cpu()));
+
+    auto const out_info = obtain_tensor_info<int64_t, false>(out);
+    auto const sum_info = obtain_tensor_info<scalar_t const>(jump_rates_sum);
+    auto       jump_rates_data   = jump_rates.data_ptr<scalar_t>();
+    auto const jump_rates_stride = jump_rates.stride(0);
+    auto       offset            = 0L;
+    for (auto i = 0L; i < out_info.size(); ++i) {
+        auto const n = counts[static_cast<size_t>(i)];
+        auto const rates =
+            TensorInfo<scalar_t const>{jump_rates_data, &n, &jump_rates_stride};
+        out_info.data[i * out_info.stride()] =
+            offset
+            + sample_one_from_multinomial(rates,
+                                          sum_info.data[i * sum_info.stride()]);
+        jump_rates_data += n * jump_rates_stride;
+        offset += n;
+    }
+
+    if (!device.is_cpu()) {
+        return out.to(out.options().device(device), /*non_blocking=*/true);
+    }
+    return out;
+}
+
 TCM_EXPORT auto zanella_next_state_index(torch::Tensor               jump_rates,
                                          std::vector<int64_t> const& counts,
                                          c10::optional<torch::Tensor> out)
@@ -496,6 +604,7 @@ TCM_EXPORT auto zanella_next_state_index(torch::Tensor               jump_rates,
     return indices;
 }
 
+#if 0
 TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
                                    torch::Tensor proposed_log_prob,
                                    std::vector<int64_t> const& counts,
@@ -530,5 +639,6 @@ TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
     return std::make_tuple(std::move(rates_target),
                            std::move(rates_sum_target));
 }
+#endif
 
 TCM_NAMESPACE_END

@@ -206,6 +206,8 @@ def local_values(
                 "of int64; got a numpy.ndarray of {}".format(spins.dtype)
             )
         spins = torch.from_numpy(spins.view(np.int64))
+    if isinstance(state, torch.jit.ScriptModule):
+        state = state._c._get_method("forward")
     with torch.no_grad():
         # Computes log(⟨s|H|ψ⟩) for all s.
         # TODO: add support for batch size
@@ -214,7 +216,7 @@ def local_values(
             log_psi = forward_with_batches(state, spins, batch_size).to(
                 device="cpu", non_blocking=True
             )
-        log_h_psi = _C.apply(spins, hamiltonian, state._c._get_method("forward"))
+        log_h_psi = _C.apply(spins, hamiltonian, state)
         log_h_psi -= log_psi
         log_h_psi = log_h_psi.numpy().view(np.complex64)
         return np.exp(log_h_psi, out=log_h_psi)
