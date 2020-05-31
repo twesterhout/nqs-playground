@@ -174,20 +174,20 @@ if(NOT TARGET gsl::gsl-lite)
         message(STATUS "[nqs_cbits] GSL will throw on contract violation...")
     else()
         target_compile_definitions(gsl-lite INTERFACE
-            gsl_CONFIG_CONTRACT_LEVEL_OFF=1)
+            gsl_CONFIG_CONTRACT_CHECKING_OFF=1)
         message(STATUS "[nqs_cbits] disabling GSL contracts...")
     endif()
     add_library(gsl::gsl-lite ALIAS gsl-lite)
 endif()
 
 # expected library
-if(NOT TARGET tl::expected)
-    execute_process(COMMAND git submodule update --init -- external/expected
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    option(EXPECTED_ENABLE_TESTS OFF)
-    option(EXPECTED_ENABLE_DOCS OFF)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/expected)
-endif()
+# if(NOT TARGET tl::expected)
+#     execute_process(COMMAND git submodule update --init -- external/expected
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+#     option(EXPECTED_ENABLE_TESTS OFF)
+#     option(EXPECTED_ENABLE_DOCS OFF)
+#     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/expected)
+# endif()
 
 # flat_hash_map library
 if(NOT TARGET flat_hash_map)
@@ -315,8 +315,8 @@ endif()
 
 # Pybind11
 if(TRUE)
-    execute_process(COMMAND git submodule update --init -- external/pybind11
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    # execute_process(COMMAND git submodule update --init -- external/pybind11
+    #     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set(PYBIND11_CPP_STANDARD "-std=c++17")
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/pybind11)
 endif()
@@ -405,6 +405,32 @@ target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
 target_compile_options(nqs_cpu_avx PRIVATE
     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
 
+add_library(nqs_cpu_kernels_sse2 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
+add_library(nqs_cpu_kernels_avx OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
+add_library(nqs_cpu_kernels_avx2 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
+# add_library(nqs_cpu_kernels_avx512 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
+nqs_cbits_add_low_level_flags(nqs_cpu_kernels_sse2)
+nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx)
+nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx2)
+# nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx512)
+target_compile_options(nqs_cpu_kernels_sse2 PRIVATE ${TCM_WARNING_FLAGS})
+target_compile_options(nqs_cpu_kernels_avx PRIVATE ${TCM_WARNING_FLAGS})
+target_compile_options(nqs_cpu_kernels_avx2 PRIVATE ${TCM_WARNING_FLAGS})
+# target_compile_options(nqs_cpu_kernels_avx512 PRIVATE ${TCM_WARNING_FLAGS})
+target_link_libraries(nqs_cpu_kernels_sse2 PUBLIC torch fmt::fmt Boost::boost)
+target_link_libraries(nqs_cpu_kernels_avx PUBLIC torch fmt::fmt Boost::boost)
+target_link_libraries(nqs_cpu_kernels_avx2 PUBLIC torch fmt::fmt Boost::boost)
+# target_link_libraries(nqs_cpu_kernels_avx512 PUBLIC torch fmt::fmt Boost::boost)
+target_link_libraries(nqs_cpu_kernels_sse2 PRIVATE vectorclass)
+target_link_libraries(nqs_cpu_kernels_avx PRIVATE vectorclass)
+target_link_libraries(nqs_cpu_kernels_avx2 PRIVATE vectorclass)
+# target_link_libraries(nqs_cpu_kernels_avx512 PRIVATE vectorclass)
+
+target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
+target_compile_options(nqs_cpu_kernels_avx PRIVATE -m64 -mavx)
+target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
+# target_compile_options(nqs_cpu_kernels_avx512 PRIVATE -m64 -mavx512f -mfma -mavx512vl -mavx512bw -mavx512dq)
+
 
 ###############################################################################
 # General Python independent code
@@ -434,6 +460,9 @@ target_compile_definitions(nqs PUBLIC
     TORCH_EXTENSION_NAME="_C")
 target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
 target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu nqs_cpu_avx)
+target_link_libraries(nqs PUBLIC nqs_cpu_kernels_sse2
+                                 nqs_cpu_kernels_avx
+                                 nqs_cpu_kernels_avx2)
 if(CMAKE_CUDA_COMPILER)
     target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
     target_link_libraries(nqs PUBLIC nqs_gpu)
