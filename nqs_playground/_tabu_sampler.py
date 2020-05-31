@@ -31,11 +31,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from itertools import islice
-from time import time
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -50,39 +47,33 @@ from ._C import (
 from .monte_carlo import SamplingOptions, _prepare_initial_state
 
 
-# @torch.jit.script
-@torch.no_grad()
-def default_balancing_function(x: Tensor) -> Tensor:
-    return torch.min(x, torch.scalar_tensor(1, dtype=x.dtype, device=x.device))
-
-
-@torch.no_grad()
-def calculate_rates(current_log_prob, proposed_log_prob, counts):
-    rates = torch.empty_like(proposed_log_prob)
-    rates.copy_(proposed_log_prob)
-    rates_batches = torch.split(rates, counts)
-    for current, r in zip(current_log_prob, rates_batches):
-        r -= current
-    torch.exp_(rates)
-    torch.min(
-        rates, torch.scalar_tensor(1, dtype=rates.dtype, device=rates.device), out=rates
-    )
-    rates_sum = torch.tensor([r.sum() for r in rates_batches])
-    return rates, rates_sum
+# @torch.no_grad()
+# def zanella_jump_rates(current_log_prob, proposed_log_prob, counts):
+#     rates = torch.empty_like(proposed_log_prob)
+#     rates.copy_(proposed_log_prob)
+#     rates_batches = torch.split(rates, counts)
+#     for current, r in zip(current_log_prob, rates_batches):
+#         r -= current
+#     torch.exp_(rates)
+#     torch.min(
+#         rates, torch.scalar_tensor(1, dtype=rates.dtype, device=rates.device), out=rates
+#     )
+#     rates_sum = torch.tensor([r.sum() for r in rates_batches])
+#     return rates, rates_sum
 
 
 # @torch.jit.script
-@torch.no_grad()
-def pick_next_state_index(jump_rates: Tensor, counts: List[int]) -> Tensor:
-    indices = torch.empty(len(counts), dtype=torch.int64, device=jump_rates.device)
-    offset = 0
-    for i, n in enumerate(counts):
-        indices[i] = (
-            offset
-            + torch.multinomial(jump_rates[offset : offset + n], num_samples=1).item()
-        )
-        offset += n
-    return indices
+# @torch.no_grad()
+# def pick_next_state_index(jump_rates: Tensor, counts: List[int]) -> Tensor:
+#     indices = torch.empty(len(counts), dtype=torch.int64, device=jump_rates.device)
+#     offset = 0
+#     for i, n in enumerate(counts):
+#         indices[i] = (
+#             offset
+#             + torch.multinomial(jump_rates[offset : offset + n], num_samples=1).item()
+#         )
+#         offset += n
+#     return indices
 
     # return torch.tensor([
     #     torch.multinomial(r, num_samples=1).item()
@@ -90,14 +81,17 @@ def pick_next_state_index(jump_rates: Tensor, counts: List[int]) -> Tensor:
     # ])
 
 
-@torch.jit.script
-@torch.no_grad()
-def _waiting_time(rates: Tensor) -> Tensor:
-    u = torch.rand(rates.size(), dtype=rates.dtype, device=rates.device)
-    u.log_()
-    u *= -1
-    u /= rates
-    return u
+# @torch.jit.script
+# @torch.no_grad()
+# def zanella_waiting_time(rates: Tensor, out: Optional[Tensor]) -> Tensor:
+#     u = torch.rand(rates.size(), dtype=rates.dtype, device=rates.device)
+#     u.log_()
+#     u *= -1
+#     u /= rates
+#     if out is not None:
+#         out.copy_(u)
+#         return out
+#     return u
 
 
 @torch.no_grad()
@@ -106,6 +100,7 @@ def zanella_process(
     log_prob_fn: Callable[[Tensor], Tensor],
     generator_fn: Callable[[Tensor], Tuple[Tensor, List[int]]],
     number_samples: int,
+    number_discarded: int,
 ):
     r"""
 
@@ -137,8 +132,11 @@ def zanella_process(
     log_prob[0] = current_log_prob
     current_weight = weights[0]
     # Main loop. We keep track of the iteration manually since we want to stop
-    # in the middle of the loop body rather than at the end
+    # in the middle of the loop body rather than at the end. We also keep a
+    # flag which indicated whether we are still in the thermalisation phase and
+    # that samples should be discarded
     iteration = 0
+    discard = True
     while True:
         # Generates all states to which we could jump
         possible_state, counts = generator_fn(current_state)
@@ -159,15 +157,19 @@ def zanella_process(
                     100 * iteration / number_samples
                 )
             )
-        if iteration == number_samples:
-            break
-
-        current_state = states[iteration]
-        current_log_prob = log_prob[iteration]
-        current_weight = weights[iteration]
+        if discard:
+            if iteration == number_discarded:
+                iteration = 0
+                discard = False
+        else:
+            if iteration == number_samples:
+                break
+            current_state = states[iteration]
+            current_log_prob = log_prob[iteration]
+            current_weight = weights[iteration]
 
         # Pick the next state
-        indices = zanella_next_state_index_new(jump_rates, jump_rates_sum, counts)
+        indices = zanella_next_state_index(jump_rates, counts)
         torch.index_select(possible_state, dim=0, index=indices, out=current_state)
         torch.index_select(
             possible_log_prob, dim=0, index=indices, out=current_log_prob
@@ -183,12 +185,14 @@ def sample_using_zanella(log_prob_fn, basis, options):
     generator_fn = _C._ProposalGenerator(basis)
     sweep_size = options.sweep_size if options.sweep_size is not None else 1
     states, log_prob, weights = zanella_process(
-        current_state, log_prob_fn, generator_fn, options.number_samples * sweep_size
+        current_state,
+        log_prob_fn,
+        generator_fn,
+        options.number_samples * sweep_size,
+        options.number_discarded * sweep_size,
     )
-
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
     final_log_prob = log_prob.new_empty((options.number_samples,) + log_prob.size()[1:])
-
     time_step = torch.sum(weights, dim=0)
     time_step /= options.number_samples
     for chain in range(weights.size(1)):
@@ -198,40 +202,10 @@ def sample_using_zanella(log_prob_fn, basis, options):
             time_step[chain].item(),
             torch.device("cpu"),
         )
-        torch.index_select(states, dim=0, index=indices, out=final_states[:, chain])
-        torch.index_select(log_prob, dim=0, index=indices, out=final_log_prob[:, chain])
-
+        torch.index_select(
+            states[:, chain], dim=0, index=indices, out=final_states[:, chain]
+        )
+        torch.index_select(
+            log_prob[:, chain], dim=0, index=indices, out=final_log_prob[:, chain]
+        )
     return final_states, final_log_prob
-
-
-@torch.no_grad()
-def _sample_using_zanella(log_ψ, basis, options, thin_rate):
-    current_state = _prepare_initial_state(basis, options.number_chains).to(
-        options.device
-    )
-
-    shape = (options.number_samples, options.number_chains)
-    states = torch.empty(shape + (8,), dtype=torch.int64, device=options.device)
-    log_prob = torch.empty(shape, dtype=torch.float32, device=options.device)
-    generator = _C._ProposalGenerator(basis)
-    assert states.is_contiguous() and log_prob.is_contiguous()
-
-    def f(x: Tensor) -> Tensor:
-        r = 2 * log_ψ(x)
-        if r.dim() > 1:
-            r.squeeze_(dim=1)
-        return r
-
-    # thin_rate = 1 # 1e-1
-    # for i, (x, p) in enumerate(
-    #     islice(
-    #         zanella_process(current_state, f, generator, thin_rate, options.number_samples),
-    #         options.number_samples,
-    #     )
-    # ):
-    #     states[i] = x
-    #     log_prob[i] = p
-    states, log_prob = zanella_process(
-        current_state, f, generator, thin_rate, options.number_samples
-    )
-    return states, log_prob

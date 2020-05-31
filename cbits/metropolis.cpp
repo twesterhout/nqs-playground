@@ -402,7 +402,7 @@ TCM_EXPORT auto zanella_waiting_time(torch::Tensor                rates,
         auto const waiting =
             -std::log1p(-std::uniform_real_distribution<double>{}(generator))
             / rates_info.data[i * rates_info.stride()];
-        out_info.data[i * out_info.stride()] += static_cast<float>(waiting);
+        out_info.data[i * out_info.stride()] = static_cast<float>(waiting);
     }
 
     return *out;
@@ -499,10 +499,17 @@ zanella_choose_samples(torch::Tensor weights, int64_t const number_samples,
             auto        index                 = int64_t{0};
             indices_data[0L * indices_stride] = index;
             for (auto size = int64_t{1}; size < number_samples; ++size) {
+                TCM_CHECK(index < weights.size(0), std::runtime_error,
+                          fmt::format("index out of bounds: {} >= {}; size={}",
+                                      index, weights.size(0), size));
                 while (time + weights_data[index * weights_stride]
                        <= time_step) {
                     time += weights_data[index * weights_stride];
                     ++index;
+                    TCM_CHECK(
+                        index < weights.size(0), std::runtime_error,
+                        fmt::format("2: index out of bounds: {} >= {}; size={}",
+                                    index, weights.size(0), size));
                 }
                 time -= time_step;
                 indices_data[size * indices_stride] = index;

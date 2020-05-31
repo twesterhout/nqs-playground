@@ -46,106 +46,74 @@ template <> struct vector_type<double> {
 };
 template <class T> using vector_t = typename vector_type<T>::type;
 
-namespace detail {
+/// Load a simd vector at index i
+template <class T>
+TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t i) noexcept
+    -> vector_t<T>
+{
+    TCM_ASSERT(0 <= i && i <= src.size() - V::size(), "index out of bounds");
+    using V       = vector_t<T>;
+    auto const* p = src.data + i * src.stride();
+
+    V a;
+    if (src.stride() == 1) { a.load(p); }
+    else {
+        // TODO: Use AVX2 vgather instructions when available
+        alignas(64) T buffer[V::size()];
+        for (auto n = 0; n < V::size(); ++n) {
+            buffer[n] = p[n * src.stride()];
+        }
+        a.load_a(buffer);
+    }
+    return a;
+}
+
+template <class T>
+TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
+                            vector_t<T> a) noexcept -> void
+{
+    TCM_ASSERT(0 <= i && i <= src.size() - V::size(), "index out of bounds");
+    using V = vector_t<T>;
+    auto* p = dst.data + i * dst.stride();
+
+    if (dst.stride() == 1) { a.store(p); }
+    else {
+        // TODO: Use AVX2 vscatter instructions when available
+        alignas(64) T buffer[V::size()];
+        a.store_a(buffer);
+        for (auto n = 0; n < V::size(); ++n) {
+            p[n * dst.stride()] = buffer[n];
+        }
+    }
+}
+
 namespace {
-    template <class T>
-    TCM_FORCEINLINE auto loadu(T const* src, int64_t const stride) noexcept
-    {
-        using V = vector_t<T>;
-        V a;
-        if (stride == 1) { a.load(src); }
-        else {
-            alignas(64) T buffer[V::size()];
-            for (auto n = 0; n < V::size(); ++n) {
-                buffer[n] = src[n * stride];
-            }
-            a.load_a(buffer);
-        }
-        return a;
+template <class T>
+auto jump_rates_one(TensorInfo<T> out, TensorInfo<T const> log_prob, T scale)
+    -> T
+{
+    using V           = vector_t<T>;
+    auto const count  = V::size() * (log_prob.size() / V::size());
+    auto const rest   = log_prob.size() % V::size();
+    auto const vscale = V{scale};
+    auto       vsum   = V{T{0}};
+    auto       i      = int64_t{0};
+    for (; i < count; i += V::size()) {
+        auto v = vload(log_prob, i);
+        v      = vcl::min(vcl::exp(v - vscale), V{T{1}});
+        vsum += v;
+        vstore(out, i, v);
     }
-
-    template <class T>
-    TCM_FORCEINLINE auto storeu(T* dst, int64_t const stride,
-                                vector_t<T> a) noexcept -> void
-    {
-        using V = vector_t<T>;
-        if (stride == 1) { a.store(dst); }
-        else {
-            alignas(64) T buffer[V::size()];
-            a.store_a(buffer);
-            for (auto n = 0; n < V::size(); ++n) {
-                dst[n * stride] = buffer[n];
-            }
-        }
+    auto sum = vcl::horizontal_add(vsum);
+    for (; i < count + rest; ++i) {
+        auto const r = std::min(
+            std::exp(log_prob.data[i * log_prob.stride()] - scale), T{1});
+        out.data[i * out.stride()] = r;
+        sum += r;
     }
-
-    template <class T>
-    TCM_FORCEINLINE auto load_partial(T const* src, int64_t const stride,
-                                      int const count) noexcept
-    {
-        using V = vector_t<T>;
-        V a;
-        if (stride == 1) { a.load_partial(src); }
-        else {
-            alignas(64) T buffer[V::size()];
-            for (auto n = 0; n < count; ++n) {
-                buffer[n] = src[n * stride];
-            }
-            for (auto n = count; n < V::size(); ++n) {
-                buffer[n] = T{0};
-            }
-            a.load_a(buffer);
-        }
-        return a;
-    }
-
-    template <class T>
-    TCM_FORCEINLINE auto store_partial(T* dst, int64_t const stride,
-                                       vector_t<T> a, int const count) noexcept
-    {
-        using V = vector_t<T>;
-        if (stride == 1) { a.store_partial(count, dst); }
-        else {
-            alignas(64) T buffer[V::size()];
-            a.store_a(buffer);
-            for (auto n = 0; n < count; ++n) {
-                dst[n * stride] = buffer[n];
-            }
-        }
-        return a;
-    }
-
-    template <class T>
-    auto jump_rates_one(TensorInfo<T> out, TensorInfo<T const> log_prob,
-                        T scale) -> T
-    {
-        using V                 = vector_t<T>;
-        auto const count        = V::size() * (log_prob.size() / V::size());
-        auto const rest         = log_prob.size() % V::size();
-        auto const vector_scale = V{scale};
-        auto       vector_sum   = V{T{0}};
-        auto       i            = int64_t{0};
-        for (; i < count; i += V::size()) {
-            // Loading strided data into a SIMD vector
-            auto v = detail::loadu(log_prob.data + i * log_prob.stride(),
-                                   log_prob.stride());
-            // The actual computation
-            v = vcl::exp(v - vector_scale);
-            vector_sum += v;
-            // Storing into strided tensor
-            detail::storeu(out.data + i * out.stride(), out.stride(), v);
-        }
-        auto sum = vcl::horizontal_add(vector_sum);
-        for (; i < count + rest; ++i) {
-            auto const r =
-                std::exp(log_prob.data[i * log_prob.stride()] - scale);
-            out.data[i * out.stride()] = r;
-            sum += r;
-        }
-        return sum;
-    }
+    return sum;
+}
 } // namespace
-} // namespace detail
 
 TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
                                         torch::Tensor proposed_log_prob,
@@ -177,29 +145,28 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
 
     AT_DISPATCH_FLOATING_TYPES(
         current_log_prob.scalar_type(), "zanella_jump_rates", [&] {
-            auto       out_data        = rates.data_ptr<scalar_t>();
-            auto       log_prob_data   = proposed_log_prob.data_ptr<scalar_t>();
-            auto const scale_data      = current_log_prob.data_ptr<scalar_t>();
-            auto const sum_data        = rates_sum.data_ptr<scalar_t>();
-            auto const out_stride      = rates.stride(0);
-            auto const log_prob_stride = proposed_log_prob.stride(0);
-            auto const scale_stride    = current_log_prob.stride(0);
-            auto const sum_stride      = rates_sum.stride(0);
+            auto out_info = obtain_tensor_info<scalar_t>(rates);
+            auto sum_info = obtain_tensor_info<scalar_t>(rates_sum);
+            auto log_prob_info =
+                obtain_tensor_info<scalar_t const>(proposed_log_prob);
+            auto scale_info =
+                obtain_tensor_info<scalar_t const>(current_log_prob);
 
+            auto offset = int64_t{0};
             for (auto i = int64_t{0}; i < static_cast<int64_t>(counts.size());
                  ++i) {
                 auto const n = counts[static_cast<size_t>(i)];
                 TCM_CHECK(n >= 0, std::runtime_error, "negative count");
-                auto const s = detail::jump_rates_one(
-                    TensorInfo<scalar_t>{out_data, &n, &out_stride},
-                    TensorInfo<scalar_t const>{log_prob_data, &n,
-                                               &log_prob_stride},
-                    scale_data[i * scale_stride]);
-                sum_data[i * sum_stride] = s;
-
-                out_data += n * out_stride;
-                log_prob_data += n * log_prob_stride;
+                TCM_CHECK(offset + n <= out_info.size(), std::runtime_error,
+                          "sum of counts exceeds the size of current_log_prob");
+                sum_info[i] = jump_rates_one(
+                    slice(out_info, offset, offset + n),
+                    slice(log_prob_info, offset, offset + n), scale_info[i]);
+                offset += n;
             }
+            TCM_CHECK(
+                offset == out_info.size(), std::runtime_error,
+                "sum of counts is smaller than the size of current_log_prob");
         });
     return std::make_tuple(std::move(rates), std::move(rates_sum));
 }
