@@ -164,7 +164,6 @@ namespace detail {
                 return true;
             }
 
-            return false;
             // We are dealing with a Python function
             if (!isinstance<function>(src)) return false;
             auto func = reinterpret_borrow<function>(src);
