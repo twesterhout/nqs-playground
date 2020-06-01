@@ -2,35 +2,20 @@
 
 from collections import namedtuple
 from enum import Enum
-import glob
 import math
-from math import sqrt
-import os
 import time
 from typing import Dict, List, Tuple, Optional
+from typing_extensions import Final
 
-import numpy as np
 from loguru import logger
-
+import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-try:
-    from typing_extensions import Final
-except ImportError:
-    # If you don't have `typing_extensions` installed, you can use a
-    # polyfill from `torch.jit`.
-    from torch.jit import Final
-
 from nqs_playground import *
 import nqs_playground._C as _C
-from nqs_playground.core import forward_with_batches
-from nqs_playground.sr import load_exact, load_optimiser
 
-# torch.set_num_interop_threads(1)
-# np.random.seed(123)
-# torch.manual_seed(432)
 
 TrainingOptions = namedtuple(
     "TrainingOptions",
@@ -40,10 +25,6 @@ TrainingOptions = namedtuple(
         # Max number of epochs. Usually, early stopping will kick in before
         # this number is reached.
         "max_epochs",
-        # Fraction of the dataset to use for training. The remaining part will
-        # be used as validation dataset for regularisation techniques such as
-        # early stopping.
-        "patience",
         # A function which given a list of parameters returns a
         # torch.optim.Optimizer to be used for training.
         "optimiser",
@@ -58,7 +39,6 @@ TrainingOptions = namedtuple(
     defaults=[
         64,  # train_batch_size
         20,  # max_epochs
-        10,  # patience
         lambda p: torch.optim.RMSprop(p, lr=1e-4),  # optimiser
         4096,  # val_batch_size
         None,  # output
@@ -87,7 +67,7 @@ Config = namedtuple(
         "model",
         # Folder where to save the results.
         "output",
-        # Hamiltonian of the system (of type nqs_playground._C.v2.Heisenberg).
+        # Hamiltonian of the system
         "hamiltonian",
         # Roots of the polynomial.
         "roots",
@@ -108,7 +88,7 @@ Config = namedtuple(
         # Location of the exact ground state. If specified, it will be used to
         # compute overlap at each epoch.
         "exact",
-        # Sweep size in Metropolis-Hasting algorithm
+        # Sweep size in Metropolis-Hasting or Zanella sampling algorithms
         "sweep_size",
         # Thermalisation length in Metropolis-Hasting algorithm
         "number_discarded",
@@ -278,9 +258,6 @@ class TensorIterableDataset(torch.utils.data.IterableDataset):
         self.batch_size = batch_size
         self.shuffle = shuffle
 
-    # def __len__(self):
-    #     return self.tensors[0].size(0)
-
     @property
     def device(self):
         return self.tensors[0].device
@@ -295,7 +272,7 @@ class TensorIterableDataset(torch.utils.data.IterableDataset):
 
 
 class ManualTrainer:
-    def __init__(self, target, model, train_dataset, config, test_dataset=None):
+    def __init__(self, target, model, train_dataset, config, test_dataset):
         self.target = target
         self.config = config
         self.train_dataset = self._prepare_dataset(train_dataset)
@@ -361,8 +338,8 @@ class ManualTrainer:
             ys *= -2.0
             torch.exp_(ys)
             self.train_dataset = self.train_dataset + (ys,)
-        # Store the original model "just in case"
         logger.debug("Constructing new model for predicting amplitudes...")
+        # Store the original model "just in case"
         self.__original_model = model
         model = _ExpModel(model, scale)
         if isinstance(self.__original_model, torch.jit.ScriptModule):

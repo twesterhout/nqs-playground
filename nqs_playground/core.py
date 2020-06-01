@@ -40,6 +40,7 @@ __all__ = [
     "load_model",
     "load_device",
     "load_optimiser",
+    "load_exact",
     "_get_device"
 ]
 
@@ -356,6 +357,18 @@ def load_optimiser(optimiser, parameters) -> torch.optim.Optimizer:
         # assume that optimiser is a lambda
         optimiser = optimiser(parameters)
     return optimiser
+
+
+def load_exact(ground_state):
+    if ground_state is None:
+        return None
+    if isinstance(ground_state, str):
+        # Ground state was saved using NumPy binary format
+        ground_state = np.load(ground_state)
+        if ground_state.ndim > 1:
+            raise ValueError("ground state must be a vector")
+    ground_state /= np.linalg.norm(ground_state)
+    return ground_state.squeeze()
 
 
 def load_device(config) -> torch.device:

@@ -289,17 +289,6 @@ class LogarithmicDerivatives:
             return torch.cat([results[0], results[1].to(results[0].device)])
 
 
-def load_exact(ground_state):
-    if ground_state is None:
-        return None
-    if isinstance(ground_state, str):
-        # Ground state was saved using NumPy binary format
-        ground_state = np.load(ground_state)
-        if ground_state.ndim > 1:
-            raise ValueError("ground state must be a vector")
-    return ground_state.squeeze().astype(np.complex64)
-
-
 class LogarithmicDerivativesClassifier(LogarithmicDerivatives):
     def __compute_jacobians(self):
         r"""Initialises :attr:`_real` and :attr:`_imag` with Jacobians of log
