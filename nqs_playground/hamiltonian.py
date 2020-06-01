@@ -176,11 +176,10 @@ def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None, tol=0):
         return None
 
     op = scipy.sparse.linalg.LinearOperator(shape=(n, n), matvec=matvec, dtype=dtype)
-    return scipy.sparse.linalg.eigsh(
-        op, k=k, ncv=number_lanczos_vectors(), which="SA", tol=tol
-    )
+    return scipy.sparse.linalg.eigsh(op, k=k, ncv=number_lanczos_vectors(), which="SA", tol=tol)
 
 
+@torch.no_grad()
 def local_values(
     spins,
     hamiltonian: _Heisenberg,
@@ -208,23 +207,29 @@ def local_values(
         spins = torch.from_numpy(spins.view(np.int64))
     if isinstance(state, torch.jit.ScriptModule):
         state = state._c._get_method("forward")
-    with torch.no_grad():
-        # Computes log(⟨s|H|ψ⟩) for all s.
-        # TODO: add support for batch size
-        # Computes log(⟨s|ψ⟩) for all s.
-        if log_psi is None:
-            log_psi = forward_with_batches(state, spins, batch_size).to(
-                device="cpu", non_blocking=True
-            )
-        log_h_psi = _C.apply(spins, hamiltonian, state)
-        log_h_psi -= log_psi
-        log_h_psi = log_h_psi.numpy().view(np.complex64)
-        return np.exp(log_h_psi, out=log_h_psi)
+    if spins.dim() == 1:
+        # We have an array of int64_t instead of bits512, so pad it with zeros
+        padding = torch.zeros(spins.size(0), 7, dtype=torch.int64, device=spins.device)
+        spins = torch.cat([spins.view(-1, 1), padding], dim=1)
+    if spins.size(-1) != 8:
+        raise ValueError(
+            "spins has wrong shape: {}; expected 8 elements along the last dimension"
+            "".format(spins.size())
+        )
+    shape = spins.size()[:-1]
+    spins = spins.view(-1, 8)
+    # Computes log(⟨s|H|ψ⟩) for all s.
+    if log_psi is None:
+        log_psi = forward_with_batches(state, spins, batch_size).to(device="cpu", non_blocking=True)
+    log_h_psi = _C.apply(spins, hamiltonian, state, batch_size)
+    log_h_psi -= log_psi
+    log_h_psi = log_h_psi.numpy().view(np.complex64)
+    values = np.exp(log_h_psi, out=log_h_psi)
+    values.shape = shape
+    return values
 
 
-def local_values_diagonal(
-    spins, hamiltonian: _Heisenberg, batch_size: int = 2048
-) -> np.ndarray:
+def local_values_diagonal(spins, hamiltonian: _Heisenberg, batch_size: int = 2048) -> np.ndarray:
     r"""Computes local values ``⟨s|H|s⟩`` for all ``s ∈ spins``.
 
     :param spins: Spin configurations ``{s}``. Must be either a
