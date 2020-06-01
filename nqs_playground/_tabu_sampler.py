@@ -39,7 +39,6 @@ from torch import Tensor
 from . import _C
 from ._C import (
     zanella_next_state_index,
-    zanella_next_state_index_new,
     zanella_waiting_time,
     zanella_jump_rates,
     zanella_choose_samples,
@@ -75,10 +74,10 @@ from .monte_carlo import SamplingOptions, _prepare_initial_state
 #         offset += n
 #     return indices
 
-    # return torch.tensor([
-    #     torch.multinomial(r, num_samples=1).item()
-    #         for r in torch.split(jump_rates, counts)
-    # ])
+# return torch.tensor([
+#     torch.multinomial(r, num_samples=1).item()
+#         for r in torch.split(jump_rates, counts)
+# ])
 
 
 # @torch.jit.script
@@ -169,7 +168,7 @@ def zanella_process(
             current_weight = weights[iteration]
 
         # Pick the next state
-        indices = zanella_next_state_index(jump_rates, counts)
+        indices = zanella_next_state_index(jump_rates, jump_rates_sum, counts)
         torch.index_select(possible_state, dim=0, index=indices, out=current_state)
         torch.index_select(
             possible_log_prob, dim=0, index=indices, out=current_log_prob
@@ -193,14 +192,12 @@ def sample_using_zanella(log_prob_fn, basis, options):
     )
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
     final_log_prob = log_prob.new_empty((options.number_samples,) + log_prob.size()[1:])
+    device = final_states.device
     time_step = torch.sum(weights, dim=0)
     time_step /= options.number_samples
     for chain in range(weights.size(1)):
         indices = zanella_choose_samples(
-            weights[:, chain],
-            options.number_samples,
-            time_step[chain].item(),
-            torch.device("cpu"),
+            weights[:, chain], options.number_samples, time_step[chain].item(), device,
         )
         torch.index_select(
             states[:, chain], dim=0, index=indices, out=final_states[:, chain]
