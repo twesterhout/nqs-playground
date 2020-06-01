@@ -1,13 +1,20 @@
 # from itertools import islice
 import math
 from random import randint
-from typing import Any, Optional, Tuple, Callable
+from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
 from torch import Tensor
 
-from ._C import MetropolisKernel
+from ._C import (
+    MetropolisKernel,
+    _ProposalGenerator,
+    zanella_next_state_index,
+    zanella_waiting_time,
+    zanella_jump_rates,
+    zanella_choose_samples,
+)
 from .core import forward_with_batches
 
 __all__ = [
@@ -223,7 +230,6 @@ def metropolis_process(
 
     # Subtract 1 because the loop above starts at 1
     acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
-    print("Information :: Acceptance {}".format(torch.mean(acceptance)))
     return states, log_probs, acceptance
 
 
@@ -301,6 +307,108 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
 
 
 @torch.no_grad()
+def zanella_process(
+    current_state: Tensor,
+    log_prob_fn: Callable[[Tensor], Tensor],
+    generator_fn: Callable[[Tensor], Tuple[Tensor, List[int]]],
+    number_samples: int,
+    number_discarded: int,
+):
+    r"""
+
+    :param current_state: State from which to start the process. The first
+        dimension is the batch dimension. It corresponds to multiple chains.
+    :param log_prob_fn: Function returning the logarithmic probability of a
+        state. It must support batching, i.e. work with tensors similar to
+        `current_state`.
+    :param generator_fn:
+    :param number_samples:
+    """
+    assert number_samples >= 1
+    cpu = torch.device("cpu")
+    # Device is determined by the location of initial state
+    device = current_state.device
+    current_log_prob = log_prob_fn(current_state)
+    if current_log_prob.dim() > 1:
+        current_log_prob.squeeze_(dim=1)
+    # Number of chains is also deduced from current_state. It is simply
+    # current_state.size(0). In the following we pre-allocate storage for
+    # states and log probabilities.
+    states = current_state.new_empty((number_samples,) + current_state.size())
+    log_prob = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
+    # Weights stores weights of samples, i.e. time we spend sitting there
+    weights = torch.empty(number_samples, current_state.size(0))
+    # Store results of the first iteration. Note that current_weight is not yet
+    # computed! It will be done inside the loop
+    states[0].copy_(current_state)
+    log_prob[0].copy_(current_log_prob)
+    current_state = states[0]
+    current_log_prob = log_prob[0]
+    current_weight = weights[0]
+    # Main loop. We keep track of the iteration manually since we want to stop
+    # in the middle of the loop body rather than at the end. We also keep a
+    # flag which indicated whether we are still in the thermalisation phase and
+    # that samples should be discarded
+    iteration = 0
+    discard = True
+    while True:
+        # Generates all states to which we could jump
+        possible_state, counts = generator_fn(current_state)
+        possible_log_prob = log_prob_fn(possible_state)
+        if possible_log_prob.dim() > 1:
+            possible_log_prob.squeeze_(dim=1)
+        jump_rates, jump_rates_sum = zanella_jump_rates(current_log_prob, possible_log_prob, counts)
+        # Calculate for how long we have to sit in the current state
+        # Note that only now have we computed all quantities for `iteration`.
+        zanella_waiting_time(jump_rates_sum, out=current_weight)
+
+        iteration += 1
+        if discard:
+            if iteration == number_discarded:
+                iteration = 0
+                discard = False
+        else:
+            if iteration == number_samples:
+                break
+            current_state = states[iteration]
+            current_log_prob = log_prob[iteration]
+            current_weight = weights[iteration]
+
+        # Pick the next state
+        indices = zanella_next_state_index(jump_rates, jump_rates_sum, counts)
+        torch.index_select(possible_state, dim=0, index=indices, out=current_state)
+        torch.index_select(possible_log_prob, dim=0, index=indices, out=current_log_prob)
+
+    return states, log_prob, weights
+
+
+@torch.no_grad()
+def sample_using_zanella(log_prob_fn, basis, options):
+    current_state = _prepare_initial_state(basis, options.number_chains)
+    current_state = current_state.to(options.device)
+    generator_fn = _ProposalGenerator(basis)
+    sweep_size = options.sweep_size if options.sweep_size is not None else 1
+    states, log_prob, weights = zanella_process(
+        current_state,
+        log_prob_fn,
+        generator_fn,
+        options.number_samples * sweep_size,
+        options.number_discarded * sweep_size,
+    )
+    final_states = states.new_empty((options.number_samples,) + states.size()[1:])
+    final_log_prob = log_prob.new_empty((options.number_samples,) + log_prob.size()[1:])
+    device = final_states.device
+    time_step = torch.sum(weights, dim=0)
+    time_step /= options.number_samples
+    for chain in range(weights.size(1)):
+        Δt = time_step[chain].item()
+        indices = zanella_choose_samples(weights[:, chain], options.number_samples, Δt, device)
+        torch.index_select(states[:, chain], dim=0, index=indices, out=final_states[:, chain])
+        torch.index_select(log_prob[:, chain], dim=0, index=indices, out=final_log_prob[:, chain])
+    return final_states, final_log_prob, None
+
+
+@torch.no_grad()
 def sample_some(
     log_ψ: Callable[[Tensor], Tensor],
     basis,
@@ -321,6 +429,8 @@ def sample_some(
         return sample_exactly(log_prob_fn, basis, options)
     elif mode == "metropolis":
         return sample_using_metropolis(log_prob_fn, basis, options)
+    elif mode == "zanella":
+        return sample_using_zanella(log_prob_fn, basis, options)
     else:
         supported = {"exact", "metropolis", "zanella"}
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
