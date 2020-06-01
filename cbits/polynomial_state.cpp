@@ -4,10 +4,9 @@
 TCM_NAMESPACE_BEGIN
 
 TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
-                      v2::ForwardT psi) -> torch::Tensor
+                      v2::ForwardT psi, uint32_t const batch_size)
+    -> torch::Tensor
 {
-    constexpr auto batch_size = 1024U;
-
     auto const device = spins.device();
     spins = spins.to(spins.options().device(torch::DeviceType::CPU));
     auto const spins_info = obtain_tensor_info<bits512 const>(spins);
@@ -59,13 +58,11 @@ TCM_EXPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
                   /*copy=*/false);
 }
 
-#if 0
+#if 1
 TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
-                      v2::ForwardT psi) -> torch::Tensor
+                      v2::ForwardT psi, uint32_t const batch_size)
+    -> torch::Tensor
 {
-    torch::NoGradGuard no_grad;
-    constexpr auto     batch_size = 1024U;
-
     auto const device = spins.device();
     spins = spins.to(spins.options().device(torch::DeviceType::CPU));
     auto const spins_info = obtain_tensor_info<bits512 const>(spins);
@@ -73,11 +70,17 @@ TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
     auto buffer =
         torch::empty(std::initializer_list<int64_t>{spins_info.size(), 2L},
                      torch::TensorOptions{}.dtype(torch::kFloat32));
-    auto out = gsl::span<std::complex<float>>{
+
+    //run_with_control_inversion(
+    //    [&spins_info, &buffer, &psi, &hamiltonian, device](auto async) {
+    torch::NoGradGuard no_grad;
+    auto               out = gsl::span<std::complex<float>>{
         static_cast<std::complex<float>*>(buffer.data_ptr()),
         static_cast<size_t>(spins_info.size())};
 
-    detail::Accumulator acc{std::move(psi), out, batch_size, device};
+    detail::Accumulator acc{
+        std::move(psi), out, batch_size, device,
+        [](auto&& f) { return async(std::forward<decltype(f)>(f)); }};
     for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
         auto const& state =
             polynomial(spins_info.data[i * spins_info.stride()]);
@@ -88,6 +91,7 @@ TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
         });
     }
     acc.finalize();
+    //    });
 
     return buffer;
 }

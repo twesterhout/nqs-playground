@@ -35,17 +35,17 @@ auto bind_polynomial_state(PyObject* _module) -> void
     m.def(
         "apply",
         [](torch::Tensor spins, Heisenberg const& hamiltonian,
-           v2::ForwardT forward) {
-            return apply(std::move(spins), hamiltonian, std::move(forward));
+           v2::ForwardT forward, uint32_t const batch_size) {
+            return apply(std::move(spins), hamiltonian, std::move(forward),
+                         batch_size);
         },
         py::call_guard<py::gil_scoped_release>());
 
-#if 0
     m.def("apply", [](torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
-                      v2::ForwardT forward) {
-        return apply(std::move(spins), polynomial, std::move(forward));
+                      v2::ForwardT forward, uint32_t const batch_size) {
+        return apply(std::move(spins), polynomial, std::move(forward),
+                     batch_size);
     });
-#endif
 
     m.def(
         "diag",
