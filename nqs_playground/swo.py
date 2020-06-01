@@ -10,6 +10,7 @@ import time
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
+from loguru import logger
 
 import torch
 from torch import Tensor
@@ -24,17 +25,8 @@ except ImportError:
 
 from nqs_playground import *
 import nqs_playground._C as _C
-from nqs_playground.core import SpinDataset, forward_with_batches
+from nqs_playground.core import forward_with_batches
 from nqs_playground.sr import load_exact, load_optimiser
-
-try:
-    from loguru import logger
-    info = logger.info
-except ImportError:
-    import logging
-
-    def info(*args, **kwargs):
-        logging.info(str.format(*args, **kwargs))
 
 # torch.set_num_interop_threads(1)
 # np.random.seed(123)
@@ -69,7 +61,7 @@ TrainingOptions = namedtuple(
         10,  # patience
         lambda p: torch.optim.RMSprop(p, lr=1e-4),  # optimiser
         4096,  # val_batch_size
-        None, # output
+        None,  # output
     ],
 )
 
@@ -105,6 +97,8 @@ Config = namedtuple(
         "number_samples",
         # Number of Markov chains.
         "number_chains",
+        # Sampling method: one of {'exact', 'metropolis', 'zanella'}
+        "sampling_method",
         # TrainingOptions for amplitude network.
         "amplitude",
         # TrainingOptions for sign network.
@@ -115,20 +109,16 @@ Config = namedtuple(
         # compute overlap at each epoch.
         "exact",
         # Sweep size in Metropolis-Hasting algorithm
-        # **IGNORED** since Monte Carlo is not yet functional
         "sweep_size",
         # Thermalisation length in Metropolis-Hasting algorithm
-        # **IGNORED** since Monte Carlo is not yet functional
         "number_discarded",
     ],
-    defaults=[None, None, None],
+    defaults=[None, 1, None],
 )
 
 
 @torch.jit.script
-def overlap_loss_fn(
-    predicted: Tensor, expected: Tensor, weights: Tensor
-) -> Tensor:
+def overlap_loss_fn(predicted: Tensor, expected: Tensor, weights: Tensor) -> Tensor:
     r"""Computes the loss function which maximises weighted overlap between
     predicted and expected (overlap := ∑ weightsᵢ predictedᵢ expectedᵢ).
     """
@@ -146,6 +136,7 @@ class CrossEntropyLoss(torch.nn.CrossEntropyLoss):
     r"""This class differs from ``torch.nn.CrossEntropyLoss`` in one way:
     ``forward`` accepts an extra argument ``weights``.
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -222,9 +213,7 @@ class _AccuracyMetric:
     def update(self, output):
         predicted, expected, *weights = self.output_transform(output)
         if len(weights) > 0:
-            self._good += torch.dot(
-                weights[0], (predicted == expected).to(weights[0].dtype)
-            ).item()
+            self._good += torch.dot(weights[0], (predicted == expected).to(weights[0].dtype)).item()
             self._total += torch.sum(weights[0])
         else:
             self._good += torch.sum(predicted == expected).item()
@@ -254,6 +243,7 @@ class _LossMetric:
 
     def compute(self):
         return self._sum / self._count
+
 
 class _MeanVarMetric:
     def __init__(self, output_transform=lambda x: x):
@@ -288,8 +278,8 @@ class TensorIterableDataset(torch.utils.data.IterableDataset):
         self.batch_size = batch_size
         self.shuffle = shuffle
 
-    def __len__(self):
-        return self.tensors[0].size(0)
+    # def __len__(self):
+    #     return self.tensors[0].size(0)
 
     @property
     def device(self):
@@ -297,7 +287,7 @@ class TensorIterableDataset(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         if self.shuffle:
-            indices = torch.randperm(len(self), device=self.device)
+            indices = torch.randperm(self.tensors[0].size(0), device=self.device)
             tensors = tuple(tensor[indices] for tensor in self.tensors)
         else:
             tensors = self.tensors
@@ -311,7 +301,7 @@ class ManualTrainer:
         self.train_dataset = self._prepare_dataset(train_dataset)
         self.test_dataset = self._prepare_dataset(test_dataset, test=True)
         self.model = self._prepare_model(model)
-        self.debug = True
+        self.debug = False
 
         self._tb_writer = SummaryWriter(log_dir=self.config.output)
         self._loss_fn = self._get_loss_function()
@@ -332,10 +322,8 @@ class ManualTrainer:
                   modifies :attr:`train_dataset` by adding weights to it.
         """
         if not isinstance(model, torch.nn.Module):
-            raise TypeError(
-                "model must be a torch.nn.Module; received {} instead"
-                "".format(type(model))
-            )
+            _expected, _received = torch.nn.Module, type(model)
+            raise TypeError("model must be a {}; received {} instead".format(_expected, _received))
         if self.target is Target.SIGN:
             return model
         assert self.target is Target.AMPLITUDE
@@ -357,7 +345,7 @@ class ManualTrainer:
                 return torch.exp(self.module(x) - self.scale)
 
         with torch.no_grad():
-            info("Computing normalisation on the training dataset...")
+            logger.debug("Computing normalisation on the training dataset...")
             model.eval()
             # We assume that dataset is a tuple of tensors where the first
             # tensor contains inputs. Forward propagating the full training
@@ -374,16 +362,14 @@ class ManualTrainer:
             torch.exp_(ys)
             self.train_dataset = self.train_dataset + (ys,)
         # Store the original model "just in case"
-        info("Constructing new model predicting amplitudes...")
+        logger.debug("Constructing new model for predicting amplitudes...")
         self.__original_model = model
         model = _ExpModel(model, scale)
         if isinstance(self.__original_model, torch.jit.ScriptModule):
             model = torch.jit.script(model)
         return model
 
-    def _prepare_dataset(
-        self, dataset: Tuple[Tensor, Tensor], test=False
-    ) -> Tuple[Tensor, Tensor]:
+    def _prepare_dataset(self, dataset: Tuple[Tensor, Tensor], test=False) -> Tuple[Tensor, Tensor]:
         r"""Prepares the training dataset from Monte Carlo data. This applies
         some common transformation such as extracting signs or amplitudes.
         """
@@ -396,7 +382,7 @@ class ManualTrainer:
                 "dataset must be a tuple of Tensors; received {} instead"
                 "".format(type(dataset)))
         # fmt: on
-        info("Preprocessing dataset...")
+        logger.debug("Preprocessing dataset for {}...", self.target)
         with torch.no_grad():
             xs, _ys = dataset
             if self.target is Target.SIGN:
@@ -409,17 +395,13 @@ class ManualTrainer:
             return xs, ys
 
     def _get_loss_function(self):
-        return {Target.SIGN: CrossEntropyLoss(), Target.AMPLITUDE: overlap_loss_fn}[
-            self.target
-        ]
+        return {Target.SIGN: CrossEntropyLoss(), Target.AMPLITUDE: overlap_loss_fn}[self.target]
 
     def _get_eval_metrics(self):
         return {
             Target.AMPLITUDE: {"overlap_error": _FidelityMetric()},
             Target.SIGN: {
-                "accuracy": _AccuracyMetric(
-                    lambda t: (torch.argmax(t[0], dim=1), t[1])
-                ),
+                "accuracy": _AccuracyMetric(lambda t: (torch.argmax(t[0], dim=1), t[1])),
                 "cross_entropy": _LossMetric(loss_fn=CrossEntropyLoss()),
             },
         }[self.target]
@@ -430,9 +412,7 @@ class ManualTrainer:
         return {
             Target.AMPLITUDE: {"overlap_error": _FidelityMetric()},
             Target.SIGN: {
-                "accuracy": _AccuracyMetric(
-                    lambda t: (torch.argmax(t[0], dim=1), t[1])
-                ),
+                "accuracy": _AccuracyMetric(lambda t: (torch.argmax(t[0], dim=1), t[1])),
                 "weighted_accuracy": _AccuracyMetric(
                     lambda t: (torch.argmax(t[0], dim=1), t[1], t[2])
                 ),
@@ -443,7 +423,7 @@ class ManualTrainer:
     def _run_once_on_dataset(self, epoch: int, global_step: int) -> int:
         timer = time.time()
         self.model.train()
-        acc = _MeanVarMetric()        
+        acc = _MeanVarMetric()
         for batch in self._train_loader:
             self._optimiser.zero_grad()
             inputs, *other = batch
@@ -458,7 +438,7 @@ class ManualTrainer:
         timer = time.time() - timer
         self._tb_writer.add_scalar("training/loss_mean", mean, epoch)
         self._tb_writer.add_scalar("training/loss_std", std, epoch)
-        info("Loop over data in {:.2f} seconds, loss: {} ± {}", timer, mean, std)
+        logger.debug("Training loop over data in {:.2f} seconds, loss: {} ± {}", timer, mean, std)
         return global_step
 
     def _run_metrics_on_dataset(self, metrics, loader):
@@ -476,21 +456,17 @@ class ManualTrainer:
             return dict((name, metric.compute()) for name, metric in metrics.items())
 
     def _run_eval_on_dataset(self, epoch, verbose):
-        if verbose:
-            info("Running evaluators on training dataset...")
         results = self._run_metrics_on_dataset(self._eval_metrics, self._eval_loader)
-        if verbose:
-            info("Metrics: {}", results)
+        if verbose and len(results) > 0:
+            logger.info("Metrics on training dataset: {}", results)
         for name, value in results.items():
             self._tb_writer.add_scalar("validation/{}".format(name), value, epoch)
         return results
 
     def _run_test_on_dataset(self, epoch, verbose):
-        if verbose:
-            info("Running evaluators on test dataset...")
         results = self._run_metrics_on_dataset(self._test_metrics, self._test_loader)
-        if verbose:
-            info("Metrics: {}", results)
+        if verbose and len(results) > 0:
+            logger.info("Metrics: {}", results)
         for name, value in results.items():
             self._tb_writer.add_scalar("testing/{}".format(name), value, epoch)
         return results
@@ -521,6 +497,7 @@ class ManualTrainer:
 
         should_stop_early = evaluate(0)
         if should_stop_early:
+            logger.info("Stopping early, because accuracy is already 1.0")
             return
 
         iteration = 0
@@ -528,6 +505,7 @@ class ManualTrainer:
             iteration = self._run_once_on_dataset(epoch, iteration)
             should_stop_early = evaluate(epoch)
             if should_stop_early:
+                logger.info("Stopping early, because accuracy is already 1.0")
                 break
 
     def run(self):
@@ -551,24 +529,21 @@ class ManualTrainer:
                 assert torch.all(tensor == state_dict["module." + name])
 
 
-def train_amplitude(model, dataset, output, config, test_dataset):
-    ManualTrainer(
-        Target.AMPLITUDE,
-        model,
-        dataset,
-        config._replace(output=output),
-        test_dataset=test_dataset,
-    ).run()
+def train(target, model, dataset, config, test_dataset=None):
+    trainer = ManualTrainer(target, model, dataset, config, test_dataset=test_dataset)
+    trainer.run()
 
 
-def train_sign(model, dataset, output, config, test_dataset):
-    ManualTrainer(
-        Target.SIGN,
-        model,
-        dataset,
-        config._replace(output=output),
-        test_dataset=test_dataset,
-    ).run()
+# def train_amplitude(model, dataset, output, config, test_dataset):
+#     ManualTrainer(
+#         Target.AMPLITUDE, model, dataset, config._replace(output=output), test_dataset=test_dataset,
+#     ).run()
+
+
+# def train_sign(model, dataset, output, config, test_dataset):
+#     ManualTrainer(
+#         Target.SIGN, model, dataset, config._replace(output=output), test_dataset=test_dataset,
+#     ).run()
 
 
 @torch.jit.script
@@ -610,38 +585,71 @@ class Runner(object):
         )
         self.exact = load_exact(self.config.exact)
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
+        self._batch_size = 8192
         self._iteration = 0
 
-    def compute_statistics(self):
-        info("Computing statistics for {}...", self._iteration)
-        if self.exact is None:
-            return None
+    @torch.no_grad()
+    def compute_metrics(self, spins):
+        logger.info("Computing metrics for iteration #{}...", self._iteration)
+        local_energies = local_values(spins, self.config.hamiltonian, self.combined_state)
+        # Imaginary components are just noise because we have a purely real wavefunction
+        local_energies = local_energies.real
 
-        self.amplitude.eval()
-        self.sign.eval()
-        with torch.no_grad():
+        # Estimate autocorrelation time
+        tau = integrated_autocorr_time(local_energies)
+        self.tb_writer.add_scalar("autocorr_time/energy", tau, self._iteration)
+        msg = "Autocorrelation time based on local energies {}"
+        if tau > 2:
+            logger.warning(msg + ". You should increase sweep_size!", tau)
+        else:
+            logger.info(msg, tau)
+
+        # Compute observables
+        energy = np.mean(local_energies)
+        variance = np.var(local_energies)
+        self.tb_writer.add_scalar("energy", energy, self._iteration)
+        self.tb_writer.add_scalar("variance", variance, self._iteration)
+        logger.info("Estimated E[H] = {}, Var[H] = {}", energy, variance)
+
+        if self.exact is not None:
+            # We have exact ground state, so we can compute overlap
             basis = self.config.hamiltonian.basis
-            y = forward_with_batches(
-                self.combined_state,
-                torch.from_numpy(basis.states.view(np.int64)),
-                batch_size=8192,
-            )
+            # TODO: This should pobably be moved to the right device
+            spins = torch.from_numpy(basis.states.view(np.int64))
+            y = forward_with_batches(self.combined_state, spins, batch_size=self._batch_size)
             y = _safe_real_exp(y, normalise=True).cpu().numpy()
-
-            overlap = abs(np.dot(y.conj(), self.exact))
-            # Hy <- H*y
-            Hy = self.config.hamiltonian(y)
-            # E <- y.conj() * H * y = y.o
-            energy = np.dot(y.conj(), Hy)
-            Hy -= energy * y
-            variance = np.linalg.norm(Hy) ** 2
-
-            info("overlap: {}, energy: {:.5e}, variance: {:.2e}", overlap, energy.real, variance)
+            overlap = abs(np.dot(y, self.exact))
             self.tb_writer.add_scalar("overlap", overlap, self._iteration)
-            self.tb_writer.add_scalar("energy_real", energy.real, self._iteration)
-            self.tb_writer.add_scalar("energy_imag", energy.imag, self._iteration)
-            self.tb_writer.add_scalar("variance", variance, self._iteration)
-            return overlap, energy, variance
+            logger.info("Overlap with the ground state is {}", overlap)
+
+    # def compute_statistics(self):
+    #     info("Computing statistics for {}...", self._iteration)
+    #     if self.exact is None:
+    #         return None
+
+    #     self.amplitude.eval()
+    #     self.sign.eval()
+    #     with torch.no_grad():
+    #         basis = self.config.hamiltonian.basis
+    #         y = forward_with_batches(
+    #             self.combined_state, torch.from_numpy(basis.states.view(np.int64)), batch_size=8192,
+    #         )
+    #         y = _safe_real_exp(y, normalise=True).cpu().numpy()
+
+    #         overlap = abs(np.dot(y.conj(), self.exact))
+    #         # Hy <- H*y
+    #         Hy = self.config.hamiltonian(y)
+    #         # E <- y.conj() * H * y = y.o
+    #         energy = np.dot(y.conj(), Hy)
+    #         Hy -= energy * y
+    #         variance = np.linalg.norm(Hy) ** 2
+
+    #         info("overlap: {}, energy: {:.5e}, variance: {:.2e}", overlap, energy.real, variance)
+    #         self.tb_writer.add_scalar("overlap", overlap, self._iteration)
+    #         self.tb_writer.add_scalar("energy_real", energy.real, self._iteration)
+    #         self.tb_writer.add_scalar("energy_imag", energy.imag, self._iteration)
+    #         self.tb_writer.add_scalar("variance", variance, self._iteration)
+    #         return overlap, energy, variance
 
     @property
     def combined_state(self):
@@ -651,94 +659,113 @@ class Runner(object):
             )
         return self.__combined_state
 
+    @torch.no_grad()
     def apply_polynomial(self, spins: Tensor) -> Tensor:
-        with torch.no_grad():
-            log_ψ = self.combined_state._c._get_method("forward")
-            polynomial = _C.Polynomial(
-                self.config.hamiltonian, self.config.roots(self._iteration)
-            )
-            values = _C.apply(spins, polynomial, log_ψ)
-            values = _safe_real_exp(values, normalise=True)
-            return values
-
-    def monte_carlo(self):
-        info("Monte Carlo sampling from |ψ|²...")
-        start = time.time()
-
-        self.amplitude.eval()
-        self.sign.eval()
-        spins, _, acceptance = sample_some(
-            self.amplitude,
-            self.config.hamiltonian.basis,
-            self.sampling_options,
-            mode="exact",
-        )
-        spins = spins.view(-1, 8)
-        if acceptance is not None:
-            acceptance = torch.mean(acceptance)
+        timer = time.time()
+        logger.info("Applying polynomial P[H]...")
+        log_ψ = self.combined_state._c._get_method("forward")
+        polynomial = _C.Polynomial(self.config.hamiltonian, self.config.roots(self._iteration))
+        values = _C.apply(spins.view(-1, 8), polynomial, log_ψ, self._batch_size)
+        values = _safe_real_exp(values, normalise=True)
+        logger.info("Applying polynomial took {:.1f}s", time.time() - timer)
+        # Compute autocorrelation time using values as scalar observable. We
+        # reshape to reveal multiple chains
+        values = values.view(spins.size()[:-1])
+        tau = integrated_autocorr_time(values)
+        self.tb_writer.add_scalar("autocorr_time/polynomial", tau, self._iteration)
+        msg = "Autocorrelation time based on P[H]|ψ⟩ {}"
+        if tau > 2:
+            logger.warning(msg + ". You should increase sweep_size!", tau)
         else:
-            acceptance = 1.0
-        info("Applying polynomial...")
-        values = self.apply_polynomial(spins)
+            logger.info(msg, tau)
+        return values
 
-        stop = time.time()
-        info("Done in {:.2f} seconds. Acceptance {:.2f}%", stop - start, 100 * acceptance)
-        return spins, values
-
-    def load_checkpoint(self, i: int):
-        def load(target, model):
-            pattern = os.path.join(self.config.output, str(i), target, "best_model_*")
-            [filename] = glob.glob(pattern)
-            model.load_state_dict(torch.load(filename))
-
-        load("amplitude", self.amplitude)
-        load("sign", self.sign)
-
-    def prepare_test_dataset(self):
-        tqdm.write("Preparing test dataset...", end="")
-        start = time.time()
-
+    @torch.no_grad()
+    def monte_carlo(self):
+        timer = time.time()
         basis = self.config.hamiltonian.basis
-        basis.build()
-        spins = torch.from_numpy(basis.states.view(np.int64)).view(-1, 1)
-        spins = torch.cat(
-            [spins, torch.zeros(spins.size(0), 7, dtype=torch.int64)], dim=1
-        )
-        values = self.apply_polynomial(spins)
+        method = self.config.sampling_method
+        logger.info("Sampling from |ψ|² using '{}' sampling method...", method)
+        # NOTE: Set amplitude to eval mode since we don't want Dropout to screw up our results!
+        self.amplitude.eval()
 
-        stop = time.time()
-        tqdm.write(" Done in {:.2f} seconds. ".format(stop - start))
-        return spins, values
+        # Logarithmic probability is computed from self.amplitude only
+        def log_prob_fn(x: Tensor) -> Tensor:
+            x = self.amplitude(x)
+            x *= 2
+            return x
+
+        # Do the sampling
+        spins, log_probs, info = sample_some(log_prob_fn, basis, self.sampling_options, mode=method)
+        logger.info("Sampling took {:.1f}s", time.time() - timer)
+        if info is not None:
+            logger.info("Additional info from the sampler: {}", info)
+        # Compute autocorrelation time using log_probs as scalar observable.
+        tau = integrated_autocorr_time(log_probs)
+        self.tb_writer.add_scalar("autocorr_time/log_prob", tau, self._iteration)
+        msg = "Autocorrelation time based on log probabilities is {}"
+        if tau > 2:
+            logger.warning(msg + ". You should increase sweep_size!", tau)
+        else:
+            logger.info(msg, tau)
+        return spins
+
+        # timer = time.time()
+        # logger.info("Applying polynomial P[H]...")
+        # values = self.apply_polynomial(spins)
+
+        # stop = time.time()
+        # info("Done in {:.2f} seconds. Acceptance {:.2f}%", stop - start, 100 * acceptance)
+        # return spins, values
+
+    # def load_checkpoint(self, i: int):
+    #     def load(target, model):
+    #         pattern = os.path.join(self.config.output, str(i), target, "best_model_*")
+    #         [filename] = glob.glob(pattern)
+    #         model.load_state_dict(torch.load(filename))
+
+    #     load("amplitude", self.amplitude)
+    #     load("sign", self.sign)
+
+    # def prepare_test_dataset(self):
+    #     tqdm.write("Preparing test dataset...", end="")
+    #     start = time.time()
+
+    #     basis = self.config.hamiltonian.basis
+    #     basis.build()
+    #     spins = torch.from_numpy(basis.states.view(np.int64)).view(-1, 1)
+    #     spins = torch.cat([spins, torch.zeros(spins.size(0), 7, dtype=torch.int64)], dim=1)
+    #     values = self.apply_polynomial(spins)
+
+    #     stop = time.time()
+    #     tqdm.write(" Done in {:.2f} seconds. ".format(stop - start))
+    #     return spins, values
+
+    def train(self, spins, values):
+        dataset = (spins, values)
+        prefix = "{}/{}".format(self.config.output, self._iteration)
+
+        config = self.config.amplitude(self._iteration)._replace(output=prefix + "/amplitude")
+        train(Target.AMPLITUDE, self.amplitude, dataset, config, test_dataset=None)
+        torch.jit.save(self.amplitude, prefix + "/amplitude.pt")
+
+        config = self.config.sign(self._iteration)._replace(output=prefix + "/sign")
+        train(Target.SIGN, self.sign, dataset, config, test_dataset=None)
+        torch.jit.save(self.sign, prefix + "/sign.pt")
 
     def step(self):
-        if self._iteration == 0:
-            self.compute_statistics()
+        # if self._iteration == 0:
+        #     self.compute_statistics()
 
-        dataset = self.monte_carlo()
-        test_dataset = None # self.prepare_test_dataset()
-        train_amplitude(
-            self.amplitude,
-            dataset,
-            "{}/{}/amplitude".format(self.config.output, self._iteration),
-            self.config.amplitude(self._iteration),
-            test_dataset=test_dataset,
-        )
-        train_sign(
-            self.sign,
-            dataset,
-            "{}/{}/sign".format(self.config.output, self._iteration),
-            self.config.sign(self._iteration),
-            test_dataset=test_dataset,
-        )
-        torch.jit.save(
-            self.amplitude,
-            "{}/{}/amplitude.pt".format(self.config.output, self._iteration),
-        )
-        torch.jit.save(
-            self.sign, "{}/{}/sign.pt".format(self.config.output, self._iteration)
-        )
+        spins = self.monte_carlo()
+        self.compute_metrics(spins)
+        values = self.apply_polynomial(spins)
+
+        spins = spins.view(-1, 8)
+        values = values.view(-1, 1)
+        self.train(spins, values)
+
         self._iteration += 1
-        metrics = self.compute_statistics()
         self.tb_writer.flush()
 
 
