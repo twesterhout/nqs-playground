@@ -1,4 +1,5 @@
 from itertools import islice
+import math
 from random import randint
 from typing import Optional, Tuple, Callable
 
@@ -9,7 +10,55 @@ from torch import Tensor
 from ._C import MetropolisKernel
 from .core import forward_with_batches
 
-__all__ = ["SamplingOptions", "sample_some"]
+__all__ = ["SamplingOptions", "sample_some", "integrated_autocorr_time"]
+
+
+class SamplingOptions:
+    r"""Options for Monte Carlo sampling spin configurations."""
+
+    def __init__(
+        self,
+        number_samples: int,
+        number_chains: int = 1,
+        number_discarded: Optional[int] = None,
+        sweep_size: int = 1,
+        device: torch.device = "cpu",
+    ):
+        r"""Initialises the options.
+
+        :param number_samples: specifies the number of samples per Markov
+            chain. Must be a positive integer.
+        :param number_chains: specifies the number of independent Markov
+            chains. Must be a positive integer.
+        :param number_discarded: specifies the number of samples to discard
+            in the beginning of each Markov chain (i.e. how long should the
+            thermalisation procedure be). If specified, must be a positive
+            integer. Otherwise, 10% of ``number_samples`` is used.
+        :param sweep_size:
+        :param device:
+        """
+        self.number_samples = int(number_samples)
+        if self.number_samples <= 0:
+            raise ValueError("negative number_samples: {}".format(number_samples))
+        self.number_chains = int(number_chains)
+        if self.number_chains <= 0:
+            raise ValueError("negative number_chains: {}".format(number_chains))
+
+        if number_discarded is not None:
+            self.number_discarded = int(number_discarded)
+            if self.number_discarded <= 0:
+                raise ValueError(
+                    "invalid number_discarded: {}; expected either a positive "
+                    "integer or None".format(number_chains)
+                )
+        else:
+            self.number_discarded = self.number_samples // 10
+        self.sweep_size = int(sweep_size)
+        if self.sweep_size <= 0:
+            raise ValueError("negative sweep_size: {}".format(sweep_size))
+        if not isinstance(device, torch.device):
+            device = torch.device(device)
+        self.device = device
 
 
 class Sampler:
@@ -92,74 +141,10 @@ class Sampler:
         return self._current.accepted.to(dtype=torch.float64, device="cpu") / self._current.steps
 
 
-
-class SamplingOptions:
-    r"""Options for Monte Carlo sampling spin configurations."""
-
-    def __init__(
-        self,
-        number_samples: int,
-        number_chains: int = 1,
-        number_discarded: Optional[int] = None,
-        sweep_size: Optional[int] = None,
-        device: Optional[torch.device] = None,
-    ):
-        r"""Initialises the options.
-
-        :param number_samples: specifies the number of samples per Markov
-            chain. Must be a positive integer.
-        :param number_chains: specifies the number of independent Markov
-            chains. Must be a positive integer.
-        :param number_discarded: specifies the number of samples to discard
-            in the beginning of each Markov chain (i.e. how long should the
-            thermalisation procedure be). If specified, must be a positive
-            integer. Otherwise, 10% of ``number_samples`` is used.
-        :param sweep_size:
-        :param device:
-        """
-        self.number_samples = int(number_samples)
-        if self.number_samples <= 0:
-            raise ValueError(
-                "invalid number_samples: {}; expected a positive integer"
-                "".format(number_samples)
-            )
-        self.number_chains = int(number_chains)
-        if self.number_chains <= 0:
-            raise ValueError(
-                "invalid number_chains: {}; expected a positive integer"
-                "".format(number_chains)
-            )
-        if number_discarded is not None:
-            self.number_discarded = int(number_discarded)
-            if self.number_discarded <= 0:
-                raise ValueError(
-                    "invalid number_discarded: {}; expected either a positive "
-                    "integer or None".format(number_chains)
-                )
-        else:
-            self.number_discarded = self.number_samples // 10
-        if sweep_size is not None and sweep_size <= 0:
-            raise ValueError(
-                "invalid sweep_size: {}; expected a positive integer"
-                "".format(number_chains)
-            )
-        self.sweep_size = sweep_size
-        if device is None:
-            device = "cpu"
-        if not isinstance(device, torch.device):
-            device = torch.device(device)
-        self.device = device
-
-
-def _sample_using_metropolis(
-    log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions
-):
+def _sample_using_metropolis(log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
     kernel = MetropolisKernel(basis)
     sampler = Sampler(
-        kernel,
-        lambda x: 2 * log_ψ(x),
-        batch_size=options.number_chains,
-        device=options.device,
+        kernel, lambda x: 2 * log_ψ(x), batch_size=options.number_chains, device=options.device,
     )
 
     shape = (options.number_samples, options.number_chains)
@@ -178,6 +163,78 @@ def _sample_using_metropolis(
         states[i] = current.state
         log_prob[i] = current.log_prob
     return states, log_prob, sampler.acceptance_rate
+
+
+def metropolis_process(
+    initial_state: Tensor,
+    log_prob_fn: Callable[[Tensor], Tensor],
+    kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
+    number_samples: int,
+    number_discarded: int,
+    sweep_size: int,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    assert number_samples >= 1
+    current_state, current_norm = initial_state
+    current_log_prob = log_prob_fn(current_state)
+    if current_log_prob.dim() > 1:
+        current_log_prob.squeeze_(dim=1)
+    states = current_state.new_empty((number_samples,) + current_state.size())
+    log_probs = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
+    accepted = torch.zeros(current_state.size(0), dtype=torch.int64, device=current_state.device)
+
+    states[0].copy_(current_state)
+    log_probs[0].copy_(current_log_prob)
+    current_state = states[0]
+    current_log_prob = log_probs[0]
+
+    def sweep():
+        nonlocal accepted
+        for i in range(sweep_size):
+            proposed_state, proposed_norm = kernel_fn(current_state)
+            proposed_log_prob = log_prob_fn(proposed_state)
+            if proposed_log_prob.dim() > 1:
+                proposed_log_prob.squeeze_(dim=1)
+            r = torch.rand(current_state.size(0)) * proposed_norm / current_norm
+            t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - current_log_prob))
+            current_state[t] = proposed_state[t]
+            current_log_prob[t] = proposed_log_prob[t]
+            current_norm[t] = proposed_norm[t]
+            accepted += t
+
+    # Thermalisation
+    for i in range(number_discarded):
+        sweep()
+
+    # Reset acceptance count after thermalisation
+    accepted.fill_(0)
+    for i in range(1, number_samples):
+        states[i].copy_(current_state)
+        log_probs[i].copy_(current_log_prob)
+        current_state = states[i]
+        current_log_prob = log_probs[i]
+        sweep()
+
+    # Subtract 1 because the loop above starts at 1
+    acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
+    print("Information :: Acceptance {}".format(torch.mean(acceptance)))
+    return states, log_probs, acceptance
+
+
+def sample_using_metropolis(log_prob_fn, basis, options):
+    initial_state = _prepare_initial_state(basis, options.number_chains)
+    initial_norm = basis.norm(initial_state).to(options.device)
+    initial_state = initial_state.to(options.device)
+    kernel_fn = MetropolisKernel(basis)
+    states, log_probs, acceptance = metropolis_process(
+        (initial_state, initial_norm),
+        log_prob_fn,
+        kernel_fn,
+        options.number_samples,
+        options.number_discarded,
+        options.sweep_size,
+    )
+    info = {"acceptance_rate": torch.mean(acceptance).item()}
+    return states, log_probs, info
 
 
 def _sample_exactly(log_ψ: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
@@ -262,13 +319,11 @@ def sample_some(
     with torch.no_grad(), torch.jit.optimized_execution(True):
         if mode == "exact":
             return _sample_exactly(log_ψ, basis, options)
-        elif mode == "monte_carlo":
-            return _sample_using_metropolis(log_ψ, basis, options)
+        elif mode == "metropolis":
+            return sample_using_metropolis(lambda x: 2 * log_ψ(x), basis, options)
         else:
-            raise ValueError(
-                "invalid mode: {!r}; expected either 'exact' or "
-                "'monte_carlo'".format(mode)
-            )
+            supported = {"exact", "metropolis", "zanella"}
+            raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
 
 
 def closeness_testing_l1(p, q, n, C, m):
@@ -326,9 +381,7 @@ def test_uniform():
             self._i = 0
 
         def log_prob(self, state):
-            p = torch.tensor(
-                [self.target_prob[basis.index(x)] for x in state], dtype=torch.float32
-            )
+            p = torch.tensor([self.target_prob[basis.index(x)] for x in state], dtype=torch.float32)
             return torch.log(p)
 
         def __call__(self):
@@ -340,8 +393,7 @@ def test_uniform():
         def _fill(self):
             # +1 Here is to ensure that we count from 1
             self.buffer = (
-                torch.multinomial(self.target_prob, num_samples=10240, replacement=True)
-                + 1
+                torch.multinomial(self.target_prob, num_samples=10240, replacement=True) + 1
             )
             self._i = len(self.buffer)
 
@@ -409,9 +461,7 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
     r"""Generates a batch of valid spin configurations (i.e. representatives).
     """
     if batch_size <= 0:
-        raise ValueError(
-            "invalid batch size: {}; expected a positive integer".format(batch_size)
-        )
+        raise ValueError("invalid batch size: {}; expected a positive integer".format(batch_size))
     # First, we generate a bunch of representatives, and then sample uniformly
     # from them.
     states = set()
@@ -439,3 +489,36 @@ def _log_amplitudes_to_probabilities(values: Tensor) -> Tensor:
     prob = torch.exp_(prob)
     prob /= torch.sum(prob)
     return prob
+
+def autocorr_function(x: np.ndarray) -> np.ndarray:
+    r"""Estimate the normalised autocorrelation function of a 1D array.
+
+    :param x:
+    :return: 
+    """
+    if x.ndim != 1:
+        raise ValueError("x has wrong shape: {}; expected a 1D array".format(x.shape))
+    n = 1 << math.ceil(math.log2(len(x)))
+    f = np.fft.fft(x - np.mean(x), n=2 * n)
+    autocorr = np.fft.ifft(f * np.conj(f))[: len(x)].real
+    autocorr /= autocorr[0]
+    return autocorr
+
+
+def auto_window(taus, c):
+    m = np.arange(len(taus)) < c * taus
+    if np.any(m):
+        return np.argmin(m)
+    return len(taus) - 1
+
+
+def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
+    if isinstance(x, torch.Tensor):
+        x = x.numpy()
+    f = np.zeros(x.shape[0])
+    for i in range(x.shape[1]):
+        f += autocorr_function(x[:, i])
+    f /= x.shape[1]
+    taus = 2.0 * np.cumsum(f) - 1.0
+    window = auto_window(taus, c)
+    return taus[window]
