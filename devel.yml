@@ -7,11 +7,15 @@ dependencies:
   # Dependencies for Python code
   - numpy
   - scipy
-  - numba
+  - typing_extensions
+  - pip:
+    - loguru
+  # We choose to use GPU variant of PyTorch even on machines that don't have a
+  # GPU. It will all just work!
   - _pytorch_select ==0.2
   - pytorch
   - tensorboard
-  # Tool for generation of Conda packages
+  # Tools for generating Conda packages
   - anaconda-client
   - conda-build
   - conda-verify
