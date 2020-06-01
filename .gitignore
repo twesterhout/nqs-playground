@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# C++ stuff
+.clangd/
+cbits/backup
+cbits/backup_v2
+compile_commands.json
+
 # Distribution / packaging
 .Python
 build/
