@@ -315,8 +315,8 @@ endif()
 
 # Pybind11
 if(TRUE)
-    # execute_process(COMMAND git submodule update --init -- external/pybind11
-    #     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    execute_process(COMMAND git submodule update --init -- external/pybind11
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set(PYBIND11_CPP_STANDARD "-std=c++17")
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/pybind11)
 endif()
