@@ -168,7 +168,7 @@ TCM_FORCEINLINE auto slice(TensorInfo<T> const& x, int64_t const start,
 {
     if (end == std::numeric_limits<int64_t>::max()) { end = x.size(); }
     TCM_ASSERT(0 <= start && start < x.size(), "index out of bounds");
-    TCM_ASSERT(start <= end && end < x.size(), "index out of bounds");
+    TCM_ASSERT(start <= end && end <= x.size(), "index out of bounds");
     return TensorInfo<T>{x.data + start * x.stride(), end - start, x.stride()};
 }
 
