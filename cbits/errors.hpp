@@ -145,6 +145,7 @@ template <> struct formatter<::torch::ScalarType> : formatter<string_view> {
 
     template <typename FormatContext>
     auto format(::torch::ScalarType const type, FormatContext& ctx)
+        -> decltype(formatter<string_view>::format(std::declval<std::string>(), std::declval<FormatContext&>()))
     {
         // TODO(twesterhout): Us using c10 is probably not what PyTorch folks had
         // in mind... Suggestions are welcome

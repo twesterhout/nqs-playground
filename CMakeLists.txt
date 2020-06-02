@@ -318,6 +318,7 @@ if(TRUE)
     execute_process(COMMAND git submodule update --init -- external/pybind11
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set(PYBIND11_CPP_STANDARD "-std=c++17")
+    set(PYBIND11_PYTHON_VERSION ${Python3_VERSION})
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/pybind11)
 endif()
 
@@ -375,7 +376,9 @@ set(nqs_cbits_HEADERS)
 if(CMAKE_CUDA_COMPILER)
     add_library(nqs_gpu OBJECT
         cbits/gpu/unpack.hpp
-        cbits/gpu/unpack.cu)
+        cbits/gpu/unpack.cu
+        cbits/gpu/dotu.hpp
+        cbits/gpu/dotu.cu)
     nqs_cbits_add_low_level_flags(nqs_gpu)
     target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
     target_link_libraries(nqs_gpu PUBLIC Boost::boost fmt::fmt torch)
