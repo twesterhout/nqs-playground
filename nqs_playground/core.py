@@ -41,7 +41,8 @@ __all__ = [
     "load_device",
     "load_optimiser",
     "load_exact",
-    "_get_device"
+    "safe_exp",
+    "_get_device",
 ]
 
 import os
@@ -100,9 +101,7 @@ def forward_with_batches(f, xs, batch_size: int) -> Tensor:
     if n == 0:
         raise ValueError("invalid xs: {}; input should not be empty".format(xs))
     if batch_size <= 0:
-        raise ValueError(
-            "invalid batch_size: {}; expected a positive integer".format(batch_size)
-        )
+        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
     i = 0
     out = []
     while i + batch_size <= n:
@@ -149,9 +148,7 @@ class SpinDataset(torch.utils.data.IterableDataset):
         if isinstance(values, torch.Tensor):
             self.values = values
         else:
-            raise TypeError(
-                "values must be either a torch.Tensor; got {}".format(type(spins))
-            )
+            raise TypeError("values must be either a torch.Tensor; got {}".format(type(spins)))
 
         if self.spins.size(0) != self.values.size(0):
             raise ValueError(
@@ -162,8 +159,7 @@ class SpinDataset(torch.utils.data.IterableDataset):
 
         if batch_size <= 0:
             raise ValueError(
-                "invalid batch_size: {}; expected a positive integer"
-                "".format(batch_size)
+                "invalid batch_size: {}; expected a positive integer" "".format(batch_size)
             )
         self.batch_size = batch_size
 
@@ -190,8 +186,7 @@ class SpinDataset(torch.utils.data.IterableDataset):
             spins = self.spins
             values = self.values
         return zip(
-            torch.split(self.spins, self.batch_size),
-            torch.split(self.values, self.batch_size),
+            torch.split(self.spins, self.batch_size), torch.split(self.values, self.batch_size),
         )
 
 
@@ -241,17 +236,13 @@ def combine_amplitude_and_sign(
         def forward(self, x):
             a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
             if self.out_dim == 1:
-                b = (
-                    (1 - 2 * torch.argmax(self.phase(x), dim=1))
-                    .to(torch.float32)
-                    .view([-1, 1])
-                )
+                b = (1 - 2 * torch.argmax(self.phase(x), dim=1)).to(torch.float32).view([-1, 1])
                 a *= b
                 return a
             else:
-                b = 3.141592653589793 * torch.argmax(self.phase(x), dim=1).to(
-                    torch.float32
-                ).view([-1, 1])
+                b = 3.141592653589793 * torch.argmax(self.phase(x), dim=1).to(torch.float32).view(
+                    [-1, 1]
+                )
                 return torch.cat([a, b], dim=1)
 
     m = CombiningState(*modules)
@@ -292,13 +283,12 @@ def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Modu
 
 
 def combine_amplitude_and_sign_classifier(
-        *modules, number_spins: int,
-    use_jit: bool = True
+    *modules, number_spins: int, use_jit: bool = True
 ) -> torch.nn.Module:
     r"""Combines two torch.nn.Modules representing amplitudes and signs of the
     wavefunction coefficients into one model.
     """
-    
+
     class CombiningState(torch.nn.Module):
         def __init__(self, amplitude, phase, number_spins):
             super().__init__()
@@ -312,7 +302,7 @@ def combine_amplitude_and_sign_classifier(
             p = 2 * self.phase(x) - 1
 
             a = log_phi + torch.log(torch.abs(p))
-            b = 3.141592653589793 * (1. - torch.sign(p)) / 2.
+            b = 3.141592653589793 * (1.0 - torch.sign(p)) / 2.0
             return torch.cat([a, b], dim=1)
 
     m = CombiningState(*modules, number_spins)
@@ -387,8 +377,19 @@ def load_device(config) -> torch.device:
         )
     return device
 
+
+@torch.jit.script
+def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
+    x = x - torch.max(x)
+    torch.exp_(x)
+    if normalise:
+        x /= torch.sum(x)
+    return x
+
+
 def _get_device(obj) -> Optional[torch.device]:
     return __get_a_var(obj).device
+
 
 def __get_a_var(obj):
     if isinstance(obj, Tensor):

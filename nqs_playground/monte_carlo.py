@@ -3,6 +3,7 @@ import math
 from random import randint
 from typing import Any, Callable, List, Optional, Tuple
 
+from loguru import logger
 import numpy as np
 import torch
 from torch import Tensor
@@ -15,15 +16,14 @@ from ._C import (
     zanella_jump_rates,
     zanella_choose_samples,
 )
-from .core import forward_with_batches
+from .core import forward_with_batches, safe_exp
 
 __all__ = [
     "SamplingOptions",
     "sample_some",
-    "sample_exactly",
-    "sample_using_metropolis",
     "integrated_autocorr_time",
     "autocorr_function",
+    "are_close_l1"
 ]
 
 
@@ -263,7 +263,7 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
     """
     device = options.device
     states = torch.from_numpy(basis.states.view(np.int64)).to(device)
-    log_prob = forward_with_batches(log_prob_fn, xs, batch_size=4096).squeeze()
+    log_prob = forward_with_batches(log_prob_fn, states, batch_size=4096).squeeze()
     if log_prob.dim() != 1:
         raise ValueError(
             "log_prob_fn should return the logarithm of the probability, "
@@ -278,7 +278,7 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
         )
     prob = safe_exp(log_prob, normalise=True)
 
-    number_samples = (options.number_chains * options.number_samples,)
+    number_samples = options.number_chains * options.number_samples
     if len(prob) < (1 << 24):
         # PyTorch only supports discrete probability distributions
         # shorter than 2²⁴.
@@ -387,7 +387,7 @@ def sample_using_zanella(log_prob_fn, basis, options):
     current_state = _prepare_initial_state(basis, options.number_chains)
     current_state = current_state.to(options.device)
     generator_fn = _ProposalGenerator(basis)
-    sweep_size = options.sweep_size if options.sweep_size is not None else 1
+    sweep_size = options.sweep_size
     states, log_prob, weights = zanella_process(
         current_state,
         log_prob_fn,
@@ -481,15 +481,6 @@ def _log_amplitudes_to_probabilities(values: Tensor) -> Tensor:
     return prob
 
 
-@torch.jit.script
-def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
-    x = x - torch.max(x)
-    torch.exp_(x)
-    if normalise:
-        x /= torch.sum(x)
-    return x
-
-
 def autocorr_function(x: np.ndarray) -> np.ndarray:
     r"""Estimate the normalised autocorrelation function of a 1D array.
 
@@ -524,3 +515,42 @@ def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
     taus = 2.0 * np.cumsum(f) - 1.0
     window = _auto_window(taus, c)
     return taus[window]
+
+
+@torch.no_grad()
+def _histogram(spins: Tensor, basis) -> Tensor:
+    assert basis.number_spins <= 64
+    if spins.dim() == 2:
+        assert spins.size(1) == 8
+        spins = spins[:, 0]
+    spins = spins.cpu()
+    r = torch.zeros(basis.number_states, dtype=torch.int64)
+    spins, counts = torch.unique(spins, sorted=True, return_counts=True)
+    r[basis.index(spins)] += counts
+    return r
+
+
+@torch.no_grad()
+def are_close_l1(n: int, basis, sample, exact, eps, sweep_size=1, device="cpu"):
+    logger.debug("Sorting exact probabilities...")
+    exact, order = torch.sort(exact)
+    s = np.searchsorted(torch.cumsum(exact, dim=0).numpy(), eps / 8.0)
+    ms = np.random.poisson(n, size=4)
+    options = SamplingOptions(
+        number_chains=len(ms), number_samples=max(ms), sweep_size=sweep_size, device=device,
+    )
+    logger.debug("Sampling...")
+    qs, log_prob, *_ = sample(options)
+    logger.debug("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
+    logger.debug("Computing histograms...")
+    qs = [_histogram(qs[:m, i], basis)[order] for i, m in enumerate(ms)]
+
+    def analyze(x, k):
+        v = ((x - k * exact) ** 2 - x) * exact ** (-2 / 3)
+        w = exact ** (2 / 3)
+        cond1 = torch.sum(v[s:-1]) > 4 * k * torch.sum(w[s:-1]) ** (1 / 2)
+        cond2 = torch.sum(x[:s]) > 3 / 16 * eps * k
+        return not (cond1 or cond2)
+
+    logger.debug("Analyzing histograms...")
+    return [analyze(x, k) for x, k in zip(qs, ms)]

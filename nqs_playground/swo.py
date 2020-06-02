@@ -568,6 +568,8 @@ class Runner(object):
     @torch.no_grad()
     def compute_metrics(self, spins):
         logger.info("Computing metrics for iteration #{}...", self._iteration)
+        self.amplitude.eval()
+        self.sign.eval()
         local_energies = local_values(spins, self.config.hamiltonian, self.combined_state)
         # Imaginary components are just noise because we have a purely real wavefunction
         local_energies = local_energies.real
@@ -640,6 +642,8 @@ class Runner(object):
     def apply_polynomial(self, spins: Tensor) -> Tensor:
         timer = time.time()
         logger.info("Applying polynomial P[H]...")
+        self.amplitude.eval()
+        self.sign.eval()
         log_ψ = self.combined_state._c._get_method("forward")
         polynomial = _C.Polynomial(self.config.hamiltonian, self.config.roots(self._iteration))
         values = _C.apply(spins.view(-1, 8), polynomial, log_ψ, self._batch_size)
