@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include "config.hpp"
+#include "errors.hpp"
 #include <torch/types.h>
 #include <type_traits>
 #include <utility>

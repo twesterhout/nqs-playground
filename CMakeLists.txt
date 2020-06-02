@@ -169,7 +169,7 @@ if(NOT TARGET gsl::gsl-lite)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/gsl-lite/include)
     if("${TCM_BUILD_TYPE}" STREQUAL "DEBUG")
         target_compile_definitions(gsl-lite INTERFACE
-            gsl_CONFIG_CONTRACT_LEVEL_ON=1
+            gsl_CONFIG_CONTRACT_CHECKING_ON=1
             gsl_CONFIG_CONTRACT_VIOLATION_THROWS=1)
         message(STATUS "[nqs_cbits] GSL will throw on contract violation...")
     else()

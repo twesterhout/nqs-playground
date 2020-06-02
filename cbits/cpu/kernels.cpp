@@ -48,11 +48,11 @@ template <class T> using vector_t = typename vector_type<T>::type;
 
 /// Load a simd vector at index i
 template <class T>
-TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t i) noexcept
+TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
     -> vector_t<T>
 {
-    TCM_ASSERT(0 <= i && i <= src.size() - V::size(), "index out of bounds");
-    using V       = vector_t<T>;
+    using V = vector_t<T>;
+    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < src.size()), "index out of bounds");
     auto const* p = src.data + i * src.stride();
 
     V a;
@@ -72,8 +72,8 @@ template <class T>
 TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
                             vector_t<T> a) noexcept -> void
 {
-    TCM_ASSERT(0 <= i && i <= src.size() - V::size(), "index out of bounds");
     using V = vector_t<T>;
+    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < dst.size()), "index out of bounds");
     auto* p = dst.data + i * dst.stride();
 
     if (dst.stride() == 1) { a.store(p); }

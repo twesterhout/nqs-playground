@@ -1,4 +1,5 @@
 #include "dotu.hpp"
+#include "../errors.hpp"
 #include <ATen/Config.h>
 
 #define MKL_INT int
