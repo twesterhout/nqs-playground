@@ -93,8 +93,8 @@ auto jump_rates_one(TensorInfo<T> out, TensorInfo<T const> log_prob, T scale)
     -> T
 {
     using V           = vector_t<T>;
-    auto const count  = V::size() * (log_prob.size() / V::size());
-    auto const rest   = log_prob.size() % V::size();
+    auto const count  = static_cast<int64_t>(V::size() * (static_cast<uint64_t>(log_prob.size()) / V::size()));
+    auto const rest   = static_cast<int64_t>(static_cast<uint64_t>(log_prob.size()) % V::size());
     auto const vscale = V{scale};
     auto       vsum   = V{T{0}};
     auto       i      = int64_t{0};
@@ -121,10 +121,6 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
     torch::NoGradGuard no_grad;
-    TCM_CHECK(current_log_prob.device().is_cpu(), std::invalid_argument,
-              fmt::format("current_log_prob must reside on the CPU"));
-    TCM_CHECK(proposed_log_prob.device().is_cpu(), std::invalid_argument,
-              fmt::format("proposed_log_prob must reside on the CPU"));
     TCM_CHECK(
         current_log_prob.dim() == 1, std::invalid_argument,
         fmt::format("current_log_prob has wrong shape: [{}]; expected a vector",
@@ -139,6 +135,8 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
                           "different types: {} != {}",
                           current_log_prob.scalar_type(),
                           proposed_log_prob.scalar_type()));
+    if (!current_log_prob.device().is_cpu()) { current_log_prob = current_log_prob.cpu(); }
+    if (!proposed_log_prob.device().is_cpu()) { proposed_log_prob = proposed_log_prob.cpu(); }
 
     auto rates     = torch::empty_like(proposed_log_prob);
     auto rates_sum = torch::empty_like(current_log_prob);
