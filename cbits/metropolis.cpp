@@ -281,7 +281,7 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     auto const batch_size = x.size(0);
     if (device.type() != torch::DeviceType::CPU) {
         pin_memory = true;
-        x          = x.to(x.options().device(device), /*non_blocking=*/true);
+        x          = x.to(x.options().device(torch::DeviceType::CPU), /*non_blocking=*/true);
     }
     TCM_CHECK(_basis->hamming_weight().has_value(), std::runtime_error,
               "ProposalGenerator currently only supports bases with fixed "
@@ -542,12 +542,15 @@ auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
 
 TCM_EXPORT auto zanella_next_state_index(torch::Tensor jump_rates,
                                          torch::Tensor jump_rates_sum,
-                                         std::vector<int64_t> const& counts)
+                                         std::vector<int64_t> const& counts,
+                                         c10::Device const device)
     -> torch::Tensor
 {
     using scalar_t    = float;
-    auto const device = jump_rates.device();
-    if (!device.is_cpu()) { jump_rates = jump_rates.cpu(); }
+    TCM_CHECK(jump_rates.device().is_cpu(), std::invalid_argument,
+              "jump_rates must reside on the CPU");
+    TCM_CHECK(jump_rates_sum.device().is_cpu(), std::invalid_argument,
+              "jump_rates_sum must reside on the CPU");
     auto out = torch::empty({static_cast<int64_t>(counts.size())},
                             torch::TensorOptions{}
                                 .dtype(torch::kInt64)

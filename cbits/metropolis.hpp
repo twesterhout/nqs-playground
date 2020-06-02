@@ -102,7 +102,8 @@ class TCM_IMPORT ProposalGenerator {
 
 auto zanella_next_state_index(torch::Tensor               jump_rates,
                               torch::Tensor               jump_rates_sum,
-                              std::vector<int64_t> const& counts)
+                              std::vector<int64_t> const& counts,
+                              c10::Device                 device)
     -> torch::Tensor;
 
 #if 0
