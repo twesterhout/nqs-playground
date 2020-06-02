@@ -203,12 +203,13 @@ def metropolis_process(
 
     def sweep():
         nonlocal accepted
+        device = current_log_prob.device
         for i in range(sweep_size):
             proposed_state, proposed_norm = kernel_fn(current_state)
             proposed_log_prob = log_prob_fn(proposed_state)
             if proposed_log_prob.dim() > 1:
                 proposed_log_prob.squeeze_(dim=1)
-            r = torch.rand(current_state.size(0)) * proposed_norm / current_norm
+            r = torch.rand(current_state.size(0), device=device) * proposed_norm / current_norm
             t = (proposed_norm > 0) & (r <= torch.exp(proposed_log_prob - current_log_prob))
             current_state[t] = proposed_state[t]
             current_log_prob[t] = proposed_log_prob[t]
@@ -375,7 +376,7 @@ def zanella_process(
             current_weight = weights[iteration]
 
         # Pick the next state
-        indices = zanella_next_state_index(jump_rates, jump_rates_sum, counts)
+        indices = zanella_next_state_index(jump_rates, jump_rates_sum, counts, device)
         torch.index_select(possible_state, dim=0, index=indices, out=current_state)
         torch.index_select(possible_log_prob, dim=0, index=indices, out=current_log_prob)
 
@@ -507,7 +508,9 @@ def _auto_window(taus, c):
 
 def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
     if isinstance(x, torch.Tensor):
-        x = x.numpy()
+        # NOTE: We do the computation on the CPU because it's not performance
+        # critical and x might be complex which PyTorch doesn't support yet
+        x = x.cpu().numpy()
     f = np.zeros(x.shape[0])
     for i in range(x.shape[1]):
         f += autocorr_function(x[:, i])
@@ -523,27 +526,31 @@ def _histogram(spins: Tensor, basis) -> Tensor:
     if spins.dim() == 2:
         assert spins.size(1) == 8
         spins = spins[:, 0]
-    spins = spins.cpu()
-    r = torch.zeros(basis.number_states, dtype=torch.int64)
+    device = spins.device
+    r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
     spins, counts = torch.unique(spins, sorted=True, return_counts=True)
-    r[basis.index(spins)] += counts
+    r[basis.index(spins.cpu()).to(device)] += counts
     return r
 
 
 @torch.no_grad()
-def are_close_l1(n: int, basis, sample, exact, eps, sweep_size=1, device="cpu"):
-    logger.debug("Sorting exact probabilities...")
+def are_close_l1(n: int, basis, sample, exact, eps, sweep_size=1):
+    device = exact.device
+    logger.info("Sorting exact probabilities...")
     exact, order = torch.sort(exact)
-    s = np.searchsorted(torch.cumsum(exact, dim=0).numpy(), eps / 8.0)
-    ms = np.random.poisson(n, size=4)
+    # NOTE: We do a copy here until PyTorch v1.5 which introduces searchsorted
+    s = np.searchsorted(torch.cumsum(exact, dim=0).cpu().numpy(), eps / 8.0)
+    ms = np.random.poisson(n, size=32)
     options = SamplingOptions(
         number_chains=len(ms), number_samples=max(ms), sweep_size=sweep_size, device=device,
     )
-    logger.debug("Sampling...")
-    qs, log_prob, *_ = sample(options)
-    logger.debug("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
-    logger.debug("Computing histograms...")
-    qs = [_histogram(qs[:m, i], basis)[order] for i, m in enumerate(ms)]
+    logger.info("Sampling...")
+    states, log_prob, info = sample(options)
+    logger.info("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
+    if info is not None:
+        logger.info("Additional info from the sampler: {}", info)
+    logger.info("Computing histograms...")
+    states = [_histogram(states[:m, i], basis)[order] for i, m in enumerate(ms)]
 
     def analyze(x, k):
         v = ((x - k * exact) ** 2 - x) * exact ** (-2 / 3)
@@ -552,5 +559,5 @@ def are_close_l1(n: int, basis, sample, exact, eps, sweep_size=1, device="cpu"):
         cond2 = torch.sum(x[:s]) > 3 / 16 * eps * k
         return not (cond1 or cond2)
 
-    logger.debug("Analyzing histograms...")
-    return [analyze(x, k) for x, k in zip(qs, ms)]
+    logger.info("Analyzing histograms...")
+    return [analyze(x, k) for x, k in zip(states, ms)]

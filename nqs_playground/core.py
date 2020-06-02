@@ -55,12 +55,13 @@ import numpy as np
 import torch
 from torch import Tensor
 
-try:
-    from typing_extensions import Final
-except ImportError:
-    # If you don't have `typing_extensions` installed, you can use a
-    # polyfill from `torch.jit`.
-    from torch.jit import Final
+# from typing_extensions import Final
+# try:
+#     from typing_extensions import Final
+# except ImportError:
+#     # If you don't have `typing_extensions` installed, you can use a
+#     # polyfill from `torch.jit`.
+#     from torch.jit import Final
 
 from . import _C
 
@@ -82,7 +83,7 @@ def with_file_like(f, mode, body):
 
 
 class Unpack(torch.nn.Module):
-    n: Final[int]
+    n: int
 
     def __init__(self, n: int):
         super().__init__()
