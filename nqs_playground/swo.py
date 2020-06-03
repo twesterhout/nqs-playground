@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from nqs_playground import *
 import nqs_playground._C as _C
+from nqs_playground.core import _get_device
 
 
 TrainingOptions = namedtuple(
@@ -311,7 +312,7 @@ class ManualTrainer:
         # value in the dataset and then rescale the output to prevent
         # overflows.
         class _ExpModel(torch.nn.Module):
-            scale: Final[float]
+            scale: float
 
             def __init__(self, module, scale):
                 super().__init__()
@@ -559,6 +560,7 @@ class Runner(object):
             self.config.number_chains,
             self.config.number_discarded,
             self.config.sweep_size,
+            _get_device(self.amplitude),
         )
         self.exact = load_exact(self.config.exact)
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
@@ -595,6 +597,7 @@ class Runner(object):
             basis = self.config.hamiltonian.basis
             # TODO: This should pobably be moved to the right device
             spins = torch.from_numpy(basis.states.view(np.int64))
+            spins = spins.to(_get_device(self.combined_state))
             y = forward_with_batches(self.combined_state, spins, batch_size=self._batch_size)
             y = _safe_real_exp(y, normalise=True).cpu().numpy()
             overlap = abs(np.dot(y, self.exact))
