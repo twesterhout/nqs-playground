@@ -1,6 +1,5 @@
 #include "kernels.hpp"
 #include "../errors.hpp"
-#include "../tensor_info.hpp"
 
 #include <torch/types.h>
 #include <vectorclass/version2/vectorclass.h>
@@ -21,7 +20,13 @@
 #endif
 
 #if defined(INCLUDE_DISPATCH_CODE)
+#    include <ATen/Config.h>
 #    include <caffe2/utils/cpuid.h>
+
+#    define MKL_INT int
+extern "C" void cblas_cdotu_sub(const MKL_INT n, const void* x,
+                                const MKL_INT incx, const void* y,
+                                const MKL_INT incy, void* dotu);
 #endif
 
 TCM_NAMESPACE_BEGIN
@@ -189,6 +194,30 @@ TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
                                        std::move(proposed_log_prob), counts);
     }
 }
-#endif
+
+
+#if !AT_MKL_ENABLED()
+
+TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
+                         TensorInfo<std::complex<float> const> const& y)
+    -> std::complex<double>
+{
+    TCM_ERROR(std::runtime_error, "PyTorch is compiled without MKL support");
+}
+
+#else // AT_MKL_ENABLED
+
+TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
+                         TensorInfo<std::complex<float> const> const& y)
+    -> std::complex<double>
+{
+    std::complex<float> result;
+    cblas_cdotu_sub(x.size(), x.data, x.stride(), y.data, y.stride(), &result);
+    return static_cast<std::complex<double>>(result);
+}
+
+#endif // AT_MKL_ENABLED
+
+#endif // INCLUDE_DISPATCH_CODE
 
 TCM_NAMESPACE_END

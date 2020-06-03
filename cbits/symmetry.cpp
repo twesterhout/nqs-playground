@@ -1,8 +1,8 @@
 #include "symmetry.hpp"
-#include <boost/math/special_functions/cos_pi.hpp>
-#include <boost/math/special_functions/sin_pi.hpp>
+// #include <boost/math/special_functions/cos_pi.hpp>
+// #include <boost/math/special_functions/sin_pi.hpp>
 
-#include <iostream>
+// #include <iostream>
 
 TCM_NAMESPACE_BEGIN
 
@@ -19,8 +19,7 @@ TCM_EXPORT SymmetryBase::SymmetryBase(unsigned const sector,
                           sector, periodicity));
     auto const arg =
         -static_cast<double>(2U * sector) / static_cast<double>(periodicity);
-    _eigenvalue = std::complex<double>{boost::math::cos_pi(arg),
-                                       boost::math::sin_pi(arg)};
+    _eigenvalue = std::complex<double>{std::cos(M_PI * arg), std::sin(M_PI * arg)};
 }
 
 namespace v2 {

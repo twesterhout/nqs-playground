@@ -180,15 +180,6 @@ if(NOT TARGET gsl::gsl-lite)
     add_library(gsl::gsl-lite ALIAS gsl-lite)
 endif()
 
-# expected library
-# if(NOT TARGET tl::expected)
-#     execute_process(COMMAND git submodule update --init -- external/expected
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-#     option(EXPECTED_ENABLE_TESTS OFF)
-#     option(EXPECTED_ENABLE_DOCS OFF)
-#     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/expected)
-# endif()
-
 # flat_hash_map library
 if(NOT TARGET flat_hash_map)
     # Can't use submodules here anymore, thanks to PyTorch deciding to include
@@ -199,15 +190,6 @@ if(NOT TARGET flat_hash_map)
     target_include_directories(flat_hash_map
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/flat_hash_map)
 endif()
-
-# ska_sort library
-# if(NOT TARGET ska_sort)
-#     execute_process(COMMAND git submodule update --init -- external/ska_sort
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-#     add_library(ska_sort INTERFACE)
-#     target_include_directories(ska_sort
-#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/ska_sort)
-# endif()
 
 if(NOT TARGET vectorclass)
     execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
@@ -220,18 +202,6 @@ if(NOT TARGET vectorclass)
     target_compile_definitions(vectorclass INTERFACE VCL_NAMESPACE=vcl)
 endif()
 
-# cpuinfo library
-# execute_process(COMMAND git submodule update --init -- external/cpuinfo
-#     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-# set(CPUINFO_LIBRARY_TYPE "static")
-# option(CPUINFO_BUILD_TOOLS OFF)
-# option(CPUINFO_BUILD_UNIT_TESTS OFF)
-# option(CPUINFO_BUILD_MOCK_TESTS OFF)
-# option(CPUINFO_BUILD_BENCHMARKS OFF)
-# add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/cpuinfo EXCLUDE_FROM_ALL)
-# target_compile_definitions(cpuinfo PUBLIC _GLIBCXX_USE_CXX11_ABI=0)
-# target_compile_options(cpuinfo PUBLIC "-fPIC")
-
 # SG14 library
 if(NOT TARGET SG14)
     execute_process(COMMAND git submodule update --init -- external/SG14
@@ -241,73 +211,26 @@ if(NOT TARGET SG14)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14)
 endif()
 
-# ThreadPool
-# if(NOT TARGET ThreadPool)
-#     find_package(Threads REQUIRED)
-#     execute_process(COMMAND git submodule update --init -- external/ThreadPool
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-#     add_library(ThreadPool INTERFACE)
-#     target_include_directories(ThreadPool
-#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
-#     target_link_libraries(ThreadPool INTERFACE Threads::Threads)
-# endif()
-
 # Boost libraries (some header-only parts)
 if(NOT TARGET Boost::boost)
     execute_process(COMMAND git submodule update --init -- external/boost
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     execute_process(COMMAND git submodule update --init -- libs/align
-                                                           libs/array
                                                            libs/assert
-                                                           libs/concept_check
                                                            libs/config
-                                                           libs/container
                                                            libs/core
                                                            libs/detail
-                                                           libs/integer
-                                                           libs/intrusive
-                                                           libs/iterator
-                                                           libs/lexical_cast
-                                                           libs/math
-                                                           libs/move
-                                                           libs/mpl
-                                                           libs/numeric/conversion
-                                                           libs/pool
-                                                           libs/predef
-                                                           libs/preprocessor
-                                                           libs/range
-                                                           libs/smart_ptr
                                                            libs/static_assert
-                                                           libs/throw_exception
-                                                           libs/type_traits
                                                            libs/utility 
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
     add_library(Boost INTERFACE)
     target_include_directories(Boost SYSTEM INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/array/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/concept_check/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/container/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/integer/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/intrusive/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/iterator/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/lexical_cast/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/math/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/move/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/mpl/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/numeric/conversion/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/pool/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/predef/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/preprocessor/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/range/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/smart_ptr/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/throw_exception/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/type_traits/include
         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
     add_library(Boost::boost ALIAS Boost)
 endif()
@@ -325,39 +248,6 @@ endif()
 # OpenMP
 find_package(OpenMP REQUIRED)
 
-# Taskflow
-# if(NOT TARGET Taskflow)
-#     find_package(Threads REQUIRED)
-#     execute_process(COMMAND git submodule update --init -- external/cpp-taskflow
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-#     add_library(Taskflow INTERFACE)
-#     target_include_directories(Taskflow
-#         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/cpp-taskflow)
-#     target_link_libraries(Taskflow INTERFACE Threads::Threads)
-# endif()
-
-# Sleef
-if(FALSE)
-ExternalProject_Add(Sleef_build
-  GIT_REPOSITORY https://github.com/shibatch/sleef
-  BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/external/lib/libsleef.a
-  CMAKE_ARGS
-    -DCMAKE_BUILD_TYPE=Release
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-    -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/external
-    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-    -DBUILD_SHARED_LIBS=OFF
-    -DBUILD_DFT=OFF
-    -DBUILD_QUAD=OFF
-    -DBUILD_GNUABI_LIBS=OFF
-    -DBUILD_TESTS=OFF
-)
-add_library(Sleef INTERFACE)
-add_dependencies(Sleef Sleef_build)
-target_include_directories(Sleef SYSTEM INTERFACE ${CMAKE_BINARY_DIR}/external/include)
-target_link_libraries(Sleef INTERFACE ${CMAKE_BINARY_DIR}/external/lib/libsleef.a)
-endif()
-
 target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE torch
               fmt::fmt
@@ -368,7 +258,6 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               OpenMP::OpenMP_CXX
 )
 
-set(nqs_cbits_HEADERS)
 
 ###############################################################################
 # Library of CUDA specific kernels
@@ -390,9 +279,7 @@ endif()
 ###############################################################################
 add_library(nqs_cpu OBJECT
     cbits/cpu/unpack.hpp
-    cbits/cpu/unpack.cpp
-    cbits/cpu/dotu.hpp
-    cbits/cpu/dotu.cpp)
+    cbits/cpu/unpack.cpp)
 nqs_cbits_add_low_level_flags(nqs_cpu)
 target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
 target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
@@ -408,31 +295,16 @@ target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
 target_compile_options(nqs_cpu_avx PRIVATE
     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
 
-add_library(nqs_cpu_kernels_sse2 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
-add_library(nqs_cpu_kernels_avx OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
-add_library(nqs_cpu_kernels_avx2 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
-# add_library(nqs_cpu_kernels_avx512 OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
-nqs_cbits_add_low_level_flags(nqs_cpu_kernels_sse2)
-nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx)
-nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx2)
-# nqs_cbits_add_low_level_flags(nqs_cpu_kernels_avx512)
-target_compile_options(nqs_cpu_kernels_sse2 PRIVATE ${TCM_WARNING_FLAGS})
-target_compile_options(nqs_cpu_kernels_avx PRIVATE ${TCM_WARNING_FLAGS})
-target_compile_options(nqs_cpu_kernels_avx2 PRIVATE ${TCM_WARNING_FLAGS})
-# target_compile_options(nqs_cpu_kernels_avx512 PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs_cpu_kernels_sse2 PUBLIC torch fmt::fmt Boost::boost)
-target_link_libraries(nqs_cpu_kernels_avx PUBLIC torch fmt::fmt Boost::boost)
-target_link_libraries(nqs_cpu_kernels_avx2 PUBLIC torch fmt::fmt Boost::boost)
-# target_link_libraries(nqs_cpu_kernels_avx512 PUBLIC torch fmt::fmt Boost::boost)
-target_link_libraries(nqs_cpu_kernels_sse2 PRIVATE vectorclass)
-target_link_libraries(nqs_cpu_kernels_avx PRIVATE vectorclass)
-target_link_libraries(nqs_cpu_kernels_avx2 PRIVATE vectorclass)
-# target_link_libraries(nqs_cpu_kernels_avx512 PRIVATE vectorclass)
-
+foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
+    add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
+    nqs_cbits_add_low_level_flags(${my_target})
+    target_compile_options(${my_target} PRIVATE ${TCM_WARNING_FLAGS})
+    target_link_libraries(${my_target} PUBLIC torch fmt::fmt Boost::boost)
+    target_link_libraries(${my_target} PRIVATE vectorclass)
+endforeach()
 target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
 target_compile_options(nqs_cpu_kernels_avx PRIVATE -m64 -mavx)
 target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
-# target_compile_options(nqs_cpu_kernels_avx512 PRIVATE -m64 -mavx512f -mfma -mavx512vl -mavx512bw -mavx512dq)
 
 
 ###############################################################################
@@ -453,7 +325,7 @@ add_library(nqs SHARED
     cbits/symmetry.cpp
     cbits/spin_basis.cpp
     cbits/parallel.cpp
-    cbits/pool.cpp
+    # cbits/pool.cpp
     cbits/tensor_info.cpp
     cbits/trim.cpp
 )

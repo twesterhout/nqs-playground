@@ -2,7 +2,7 @@
 #include "common.hpp"
 #include "errors.hpp"
 
-#include "cpu/dotu.hpp"
+#include "cpu/kernels.hpp"
 #if defined(TCM_USE_CUDA)
 #    include "gpu/dotu.hpp"
 #endif
@@ -15,7 +15,7 @@ inline auto dotu_impl(TensorInfo<std::complex<float> const> const& x,
 {
     if (x.size() == 0) { return std::complex<double>{0.0, 0.0}; }
     switch (device.type()) {
-    case c10::DeviceType::CPU: return cpu::dotu_cpu(x, y);
+    case c10::DeviceType::CPU: return dotu_cpu(x, y);
 #if defined(TCM_USE_CUDA)
     case c10::DeviceType::CUDA: return gpu::dotu_gpu(x, y, device);
 #endif
