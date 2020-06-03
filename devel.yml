@@ -12,6 +12,7 @@ dependencies:
     - loguru
   # We choose to use GPU variant of PyTorch even on machines that don't have a
   # GPU. It will all just work!
+  - cudatoolkit ==10.0.130
   - _pytorch_select ==0.2
   - pytorch
   - tensorboard

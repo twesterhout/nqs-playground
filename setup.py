@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="nqs_playground",
-    version="0.0.6",
+    version="0.0.7",
     description="PyTorch-based implementation of SR and SWO for NQS",
     classifiers=[
         "Development Status :: 2 - Pre-Alpha",

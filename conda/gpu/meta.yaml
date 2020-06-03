@@ -1,6 +1,8 @@
+{% set data = load_setup_py_data() %}
+
 package:
   name: nqs_playground
-  version: "0.0.6"
+  version: {{ data.get('version') }}
 
 source:
   # git_url: https://github.com/twesterhout/nqs-playground
@@ -8,7 +10,6 @@ source:
   path: ../../
  
 build:
-  number: 1
   string: py{{ python }}_cuda{{ cudatoolkit }}_npy{{ numpy }}_torch{{ pytorch }}
 
 requirements:
@@ -20,6 +21,7 @@ requirements:
 
   host:
     - python {{ python }}
+    - pip
     - numpy {{ numpy }}
     - _pytorch_select ==0.2
     - cudatoolkit {{ cudatoolkit }}
@@ -30,6 +32,8 @@ requirements:
     - numpy
     - scipy
     - psutil
+    - typing_extensions
+    - loguru
     - tensorboard >=2.0
     - _pytorch_select ==0.2
     - {{ pin_compatible('cudatoolkit', max_pin='x.x') }}
