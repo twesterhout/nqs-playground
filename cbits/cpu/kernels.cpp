@@ -7,15 +7,18 @@
 
 // Define name of entry function depending on which instruction set we compile for
 #if INSTRSET >= 8 // AVX2
-#    define zanella_jump_rates_simd zanella_jump_rates_avx2
-#    define unpack_cpu_simd unpack_cpu_avx2
+// #    define zanella_jump_rates_simd zanella_jump_rates_avx2
+#    define jump_rates_one_simd jump_rates_one_avx2
+#    define unpack_one_simd unpack_one_avx2
 #elif INSTRSET >= 7 // AVX
-#    define zanella_jump_rates_simd zanella_jump_rates_avx
-#    define unpack_cpu_simd unpack_cpu_avx
+// #    define zanella_jump_rates_simd zanella_jump_rates_avx
+#    define jump_rates_one_simd jump_rates_one_avx
+#    define unpack_one_simd unpack_one_avx
 #elif INSTRSET >= 2 // SSE2
 #    define INCLUDE_DISPATCH_CODE
-#    define zanella_jump_rates_simd zanella_jump_rates_sse2
-#    define unpack_cpu_simd unpack_cpu_sse2
+// #    define zanella_jump_rates_simd zanella_jump_rates_sse2
+#    define jump_rates_one_simd jump_rates_one_sse2
+#    define unpack_one_simd unpack_one_sse2
 #else
 #    error Unsupported instruction set
 #endif
@@ -56,6 +59,7 @@ template <> struct vector_type<double> {
 template <class T> using vector_t = typename vector_type<T>::type;
 // }}}
 
+namespace {
 /// Load a simd vector at index i
 template <class T>
 TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
@@ -78,7 +82,9 @@ TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
     }
     return a;
 } // }}}
+} // namespace
 
+namespace {
 template <class T>
 TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
                             vector_t<T> a) noexcept -> void
@@ -98,10 +104,11 @@ TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
         }
     }
 } // }}}
+} // namespace
 
-namespace {
 template <class T>
-auto jump_rates_one(TensorInfo<T> out, TensorInfo<T const> log_prob, T scale)
+auto jump_rates_one_simd(TensorInfo<T> const&       out,
+                         TensorInfo<T const> const& log_prob, T scale) noexcept
     -> T
 { // {{{
     using V          = vector_t<T>;
@@ -127,11 +134,23 @@ auto jump_rates_one(TensorInfo<T> out, TensorInfo<T const> log_prob, T scale)
     }
     return sum;
 } // }}}
-} // namespace
 
-TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
-                                        torch::Tensor proposed_log_prob,
-                                        std::vector<int64_t> const& counts)
+template TCM_EXPORT auto jump_rates_one_simd(TensorInfo<float> const&,
+                                             TensorInfo<float const> const&,
+                                             float) noexcept -> float;
+template TCM_EXPORT auto jump_rates_one_simd(TensorInfo<double> const&,
+                                             TensorInfo<double const> const&,
+                                             double) noexcept -> double;
+
+#if defined(INCLUDE_DISPATCH_CODE)
+template <class T>
+using jump_rates_one_for_t = auto (*)(TensorInfo<T> const&,
+                                      TensorInfo<T const> const&, T) noexcept
+                             -> T;
+
+TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
+                                   torch::Tensor proposed_log_prob,
+                                   std::vector<int64_t> const& counts)
     -> std::tuple<torch::Tensor, torch::Tensor>
 { // {{{
     torch::NoGradGuard no_grad;
@@ -167,6 +186,13 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
                 obtain_tensor_info<scalar_t const>(proposed_log_prob);
             auto scale_info =
                 obtain_tensor_info<scalar_t const>(current_log_prob);
+            auto const jump_rates_one_ptr =
+                []() -> jump_rates_one_for_t<scalar_t> {
+                auto& cpuid = caffe2::GetCpuId();
+                if (cpuid.avx2()) { return &jump_rates_one_avx2; }
+                if (cpuid.avx()) { return &jump_rates_one_avx; }
+                return &jump_rates_one_sse2;
+            }();
 
             auto offset = int64_t{0};
             for (auto i = int64_t{0}; i < static_cast<int64_t>(counts.size());
@@ -175,7 +201,7 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
                 TCM_CHECK(n >= 0, std::runtime_error, "negative count");
                 TCM_CHECK(offset + n <= out_info.size(), std::runtime_error,
                           "sum of counts exceeds the size of current_log_prob");
-                sum_info[i] = jump_rates_one(
+                sum_info[i] = (*jump_rates_one_ptr)(
                     slice(out_info, offset, offset + n),
                     slice(log_prob_info, offset, offset + n), scale_info[i]);
                 offset += n;
@@ -186,28 +212,9 @@ TCM_EXPORT auto zanella_jump_rates_simd(torch::Tensor current_log_prob,
         });
     return std::make_tuple(std::move(rates), std::move(rates_sum));
 } // }}}
+#endif
 
 #if defined(INCLUDE_DISPATCH_CODE)
-TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
-                                   torch::Tensor proposed_log_prob,
-                                   std::vector<int64_t> const& counts)
-    -> std::tuple<torch::Tensor, torch::Tensor>
-{
-    auto& cpuid = caffe2::GetCpuId();
-    if (cpuid.avx2()) {
-        return zanella_jump_rates_avx2(std::move(current_log_prob),
-                                       std::move(proposed_log_prob), counts);
-    }
-    else if (cpuid.avx()) {
-        return zanella_jump_rates_avx(std::move(current_log_prob),
-                                      std::move(proposed_log_prob), counts);
-    }
-    else {
-        return zanella_jump_rates_sse2(std::move(current_log_prob),
-                                       std::move(proposed_log_prob), counts);
-    }
-}
-
 #    if !AT_MKL_ENABLED()
 
 TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
@@ -229,41 +236,28 @@ TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
 }
 
 #    endif // AT_MKL_ENABLED
+#endif     // INCLUDE_DISPATCH_CODE
 
-#endif // INCLUDE_DISPATCH_CODE
-
-// unpack {{{
 namespace {
 TCM_FORCEINLINE auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f
 {
-    auto const one = vcl::Vec8f{1.0f}; // 1.0f == 0x3f800000
-    auto const two = vcl::Vec8f{2.0f};
-    // Adding 0x3f800000 to select ensures that we're working with valid
-    // floats rather than denormals
-    auto const select = vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{
-        0x3f800000 + (1 << 0), 0x3f800000 + (1 << 1), 0x3f800000 + (1 << 2),
-        0x3f800000 + (1 << 3), 0x3f800000 + (1 << 4), 0x3f800000 + (1 << 5),
-        0x3f800000 + (1 << 6), 0x3f800000 + (1 << 7)})};
-    auto       broadcasted =
-        vcl::Vec8f{vcl::reinterpret_f(vcl::Vec8i{static_cast<int>(bits)})};
-    broadcasted |= one;
-    broadcasted &= select;
-    broadcasted = broadcasted == select;
-    broadcasted &= two;
-    broadcasted -= one;
-    return broadcasted;
+    auto const  up   = vcl::Vec8f{1.0f};
+    auto const  down = vcl::Vec8f{-1.0f};
+    vcl::Vec8fb mask;
+    mask.load_bits(bits);
+    return vcl::select(mask, up, down);
 }
 
-TCM_NOINLINE auto unpack_word(uint64_t x, float* out) noexcept -> void
+TCM_FORCEINLINE auto unpack_word(uint64_t x, float* out) noexcept -> void
 {
     for (auto i = 0; i < 8; ++i, out += 8, x >>= 8) {
         unpack_byte(static_cast<uint8_t>(x & 0xFF)).store(out);
     }
 }
+} // namespace
 
-template <bool Unsafe>
-auto unpack_one(uint64_t x, unsigned const number_spins, float* out) noexcept
-    -> void
+TCM_EXPORT auto unpack_one_simd(uint64_t x, unsigned const number_spins,
+                                float* out) noexcept -> void
 {
     auto const chunks = number_spins / 8U;
     auto const rest   = number_spins % 8U;
@@ -272,16 +266,12 @@ auto unpack_one(uint64_t x, unsigned const number_spins, float* out) noexcept
     }
     if (rest != 0) {
         auto const t = unpack_byte(static_cast<uint8_t>(x & 0xFF));
-        if constexpr (Unsafe) { t.store(out); }
-        else {
-            t.store_partial(static_cast<int>(rest), out);
-        }
+        t.store_partial(static_cast<int>(rest), out);
     }
 }
 
-template <bool Unsafe>
-auto unpack_one(bits512 const& bits, unsigned const count, float* out) noexcept
-    -> void
+TCM_EXPORT auto unpack_one_simd(bits512 const& bits, unsigned const count,
+                                float* out) noexcept -> void
 {
     constexpr auto block  = 64U;
     auto const     chunks = count / block;
@@ -291,16 +281,26 @@ auto unpack_one(bits512 const& bits, unsigned const count, float* out) noexcept
     for (; i < chunks; ++i, out += block) {
         unpack_word(bits.words[i], out);
     }
-    if (rest != 0) { unpack_one<Unsafe>(bits.words[i], rest, out); }
+    if (rest != 0) { unpack_one_simd(bits.words[i], rest, out); }
 }
 
+#if defined(INCLUDE_DISPATCH_CODE)
 struct _IdentityProjection {
     template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
     {
         return std::forward<T>(x);
     }
 };
-} // namespace
+
+template <class Bits> struct unpack_one_for;
+template <> struct unpack_one_for<uint64_t> {
+    using type = auto (*)(uint64_t, unsigned, float*) noexcept -> void;
+};
+template <> struct unpack_one_for<bits512> {
+    using type = auto (*)(bits512 const&, unsigned, float*) noexcept -> void;
+};
+template <class Bits>
+using unpack_one_for_t = typename unpack_one_for<Bits>::type;
 
 template <class Bits, class Projection = _IdentityProjection>
 auto unpack_impl(TensorInfo<Bits const> const& src_info,
@@ -311,6 +311,14 @@ auto unpack_impl(TensorInfo<Bits const> const& src_info,
     TCM_CHECK(
         dst_info.strides[0] == dst_info.sizes[1], std::invalid_argument,
         fmt::format("unpack_cpu_avx does not support strided output tensors"));
+
+    auto unpack_ptr = []() -> unpack_one_for_t<Bits> {
+        auto& cpuid = caffe2::GetCpuId();
+        if (cpuid.avx2()) { return &unpack_one_avx2; }
+        if (cpuid.avx()) { return &unpack_one_avx; }
+        return &unpack_one_sse2;
+    }();
+
     auto const number_spins = static_cast<unsigned>(dst_info.sizes[1]);
     auto const rest         = number_spins % 8;
     auto const tail         = std::min<int64_t>(
@@ -320,39 +328,21 @@ auto unpack_impl(TensorInfo<Bits const> const& src_info,
     auto  i   = int64_t{0};
     for (; i < src_info.size() - tail;
          ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
-        unpack_one</*Unsafe=*/true>(proj(*src), number_spins, dst);
+        // unpack_one</*Unsafe=*/true>(proj(*src), number_spins, dst);
+        (*unpack_ptr)(proj(*src), number_spins, dst);
     }
     for (; i < src_info.size();
          ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
-        unpack_one</*Unsafe=*/false>(proj(*src), number_spins, dst);
+        // unpack_one</*Unsafe=*/false>(proj(*src), number_spins, dst);
+        (*unpack_ptr)(proj(*src), number_spins, dst);
     }
 }
 
 template <class Bits>
-auto unpack_cpu_simd(TensorInfo<Bits const> const& src_info,
-                     TensorInfo<float, 2> const&   dst_info) -> void
+auto unpack_cpu(TensorInfo<Bits const> const& src_info,
+                TensorInfo<float, 2> const&   dst_info) -> void
 {
     unpack_impl(src_info, dst_info);
-}
-
-template TCM_EXPORT auto unpack_cpu_simd(TensorInfo<uint64_t const> const&,
-                                         TensorInfo<float, 2> const&) -> void;
-template TCM_EXPORT auto unpack_cpu_simd(TensorInfo<bits512 const> const&,
-                                         TensorInfo<float, 2> const&) -> void;
-
-#if defined(INCLUDE_DISPATCH_CODE)
-template <class Bits>
-auto unpack_cpu(TensorInfo<Bits const> const& spins,
-                TensorInfo<float, 2> const&   out) -> void
-{
-    auto& cpuid = caffe2::GetCpuId();
-    if (cpuid.avx2()) { unpack_cpu_avx2(spins, out); }
-    else if (cpuid.avx()) {
-        unpack_cpu_avx(spins, out);
-    }
-    else {
-        unpack_cpu_sse2(spins, out);
-    }
 }
 
 template TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const> const&,

@@ -13,34 +13,25 @@ auto zanella_jump_rates(torch::Tensor               current_log_prob,
                         std::vector<int64_t> const& counts)
     -> std::tuple<torch::Tensor, torch::Tensor>;
 
+template <class T>
+auto jump_rates_one_avx2(TensorInfo<T> const&, TensorInfo<T const> const&,
+                         T) noexcept -> T;
+template <class T>
+auto jump_rates_one_avx(TensorInfo<T> const&, TensorInfo<T const> const&,
+                        T) noexcept -> T;
+template <class T>
+auto jump_rates_one_sse2(TensorInfo<T> const&, TensorInfo<T const> const&,
+                         T) noexcept -> T;
+
 template <class Bits>
 auto unpack_cpu(TensorInfo<Bits const> const& spins,
                 TensorInfo<float, 2> const&   out) -> void;
 
-// Specific implementations
-auto zanella_jump_rates_sse2(torch::Tensor               current_log_prob,
-                             torch::Tensor               proposed_log_prob,
-                             std::vector<int64_t> const& counts)
-    -> std::tuple<torch::Tensor, torch::Tensor>;
-auto zanella_jump_rates_avx(torch::Tensor               current_log_prob,
-                            torch::Tensor               proposed_log_prob,
-                            std::vector<int64_t> const& counts)
-    -> std::tuple<torch::Tensor, torch::Tensor>;
-auto zanella_jump_rates_avx2(torch::Tensor               current_log_prob,
-                             torch::Tensor               proposed_log_prob,
-                             std::vector<int64_t> const& counts)
-    -> std::tuple<torch::Tensor, torch::Tensor>;
-
-template <class Bits>
-auto unpack_cpu_sse2(TensorInfo<Bits const> const& spins,
-                     TensorInfo<float, 2> const&   out) -> void;
-
-template <class Bits>
-auto unpack_cpu_avx(TensorInfo<Bits const> const& spins,
-                    TensorInfo<float, 2> const&   out) -> void;
-
-template <class Bits>
-auto unpack_cpu_avx2(TensorInfo<Bits const> const& spins,
-                     TensorInfo<float, 2> const&   out) -> void;
+auto unpack_one_avx2(bits512 const&, unsigned, float*) noexcept -> void;
+auto unpack_one_avx2(uint64_t, unsigned, float*) noexcept -> void;
+auto unpack_one_avx(bits512 const&, unsigned, float*) noexcept -> void;
+auto unpack_one_avx(uint64_t, unsigned, float*) noexcept -> void;
+auto unpack_one_sse2(bits512 const&, unsigned, float*) noexcept -> void;
+auto unpack_one_sse2(uint64_t, unsigned, float*) noexcept -> void;
 
 TCM_NAMESPACE_END
