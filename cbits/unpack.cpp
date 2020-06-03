@@ -1,7 +1,7 @@
 #include "unpack.hpp"
 #include "errors.hpp"
 
-#include "cpu/unpack.hpp"
+#include "cpu/kernels.hpp"
 #if defined(TCM_USE_CUDA)
 #    include "gpu/unpack.hpp"
 #endif
@@ -26,9 +26,11 @@ auto unpack_impl(TensorInfo<Bits const> const& spins,
         TensorInfo<float, 2>{static_cast<float*>(out.data_ptr()),
                              out.sizes().data(), out.strides().data()};
     switch (device.type()) {
-    case c10::DeviceType::CPU: cpu::unpack_cpu(spins, out_info); break;
+    case c10::DeviceType::CPU: unpack_cpu(spins, out_info); break;
 #if defined(TCM_USE_CUDA)
-    case c10::DeviceType::CUDA: gpu::unpack_cuda(spins, out_info, device); break;
+    case c10::DeviceType::CUDA:
+        gpu::unpack_cuda(spins, out_info, device);
+        break;
 #endif
     default: {
 #if defined(TCM_USE_CUDA)

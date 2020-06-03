@@ -8,12 +8,10 @@ string(TOUPPER "${CMAKE_BUILD_TYPE}" TCM_BUILD_TYPE)
 
 cmake_policy(SET CMP0048 NEW)
 project(nqs_cbits
-    VERSION 0.0.1
-    DESCRIPTION "_C Python extension for nqs-playground"
+    DESCRIPTION "_C Python extension for nqs_playground"
     LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-# C++17 without extensions
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 if(NOT CMAKE_CXX_STANDARD)
@@ -50,17 +48,6 @@ elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
         -Wsign-conversion -Wsign-promo -Wstrict-null-sentinel
         -Wstrict-overflow=5 -Wswitch-default -Wundef -Wno-unused)
 endif()
-
-if(UNIX AND CMAKE_GENERATOR STREQUAL "Ninja")
-    # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    #     list(APPEND CMAKE_CXX_FLAGS "-fcolor-diagnostics")
-    #     list(APPEND CMAKE_C_FLAGS "-fcolor-diagnostics")
-    # elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    #     list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always")
-    #     list(APPEND CMAKE_C_FLAGS "-fdiagnostics-color=always")
-    # endif()
-endif()
-
 
 # Torch
 if(TRUE)
@@ -191,11 +178,12 @@ if(NOT TARGET flat_hash_map)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/flat_hash_map)
 endif()
 
+# vectorclass library
 if(NOT TARGET vectorclass)
     execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    execute_process(COMMAND git submodule update --init -- external/vectorclass/add-on
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    # execute_process(COMMAND git submodule update --init -- external/vectorclass/add-on
+    #     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     add_library(vectorclass INTERFACE)
     target_include_directories(vectorclass
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
@@ -235,7 +223,6 @@ if(NOT TARGET Boost::boost)
     add_library(Boost::boost ALIAS Boost)
 endif()
 
-
 # Pybind11
 if(TRUE)
     execute_process(COMMAND git submodule update --init -- external/pybind11
@@ -247,6 +234,7 @@ endif()
 
 # OpenMP
 find_package(OpenMP REQUIRED)
+
 
 target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE torch
@@ -277,23 +265,23 @@ endif()
 ###############################################################################
 # Library of CPU specific kernels
 ###############################################################################
-add_library(nqs_cpu OBJECT
-    cbits/cpu/unpack.hpp
-    cbits/cpu/unpack.cpp)
-nqs_cbits_add_low_level_flags(nqs_cpu)
-target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
+# add_library(nqs_cpu OBJECT
+#     cbits/cpu/unpack.hpp
+#     cbits/cpu/unpack.cpp)
+# nqs_cbits_add_low_level_flags(nqs_cpu)
+# target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
+# target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
 
 # Efficient AVX implementation
-add_library(nqs_cpu_avx OBJECT
-    cbits/cpu/unpack.hpp
-    cbits/cpu/unpack_avx.cpp)
-nqs_cbits_add_low_level_flags(nqs_cpu_avx)
-target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost)
-target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
-target_compile_options(nqs_cpu_avx PRIVATE
-    -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
+# add_library(nqs_cpu_avx OBJECT
+#     cbits/cpu/unpack.hpp
+#     cbits/cpu/unpack_avx.cpp)
+# nqs_cbits_add_low_level_flags(nqs_cpu_avx)
+# target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
+# target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost)
+# target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
+# target_compile_options(nqs_cpu_avx PRIVATE
+#     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
 
 foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
     add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
@@ -334,10 +322,10 @@ target_compile_definitions(nqs PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
 target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs PUBLIC nqs_cbits_Common nqs_cpu nqs_cpu_avx)
-target_link_libraries(nqs PUBLIC nqs_cpu_kernels_sse2
+target_link_libraries(nqs PUBLIC nqs_cbits_Common
+                                 nqs_cpu_kernels_avx2
                                  nqs_cpu_kernels_avx
-                                 nqs_cpu_kernels_avx2)
+                                 nqs_cpu_kernels_sse2)
 if(CMAKE_CUDA_COMPILER)
     target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
     target_link_libraries(nqs PUBLIC nqs_gpu)

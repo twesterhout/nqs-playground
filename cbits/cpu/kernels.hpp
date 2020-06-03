@@ -13,11 +13,9 @@ auto zanella_jump_rates(torch::Tensor               current_log_prob,
                         std::vector<int64_t> const& counts)
     -> std::tuple<torch::Tensor, torch::Tensor>;
 
-auto unpack_cpu(TensorInfo<uint64_t const> const& spins,
-                TensorInfo<float, 2> const&       out) -> void;
-
-auto unpack_cpu(TensorInfo<bits512 const> const& spins,
-                TensorInfo<float, 2> const&      out) -> void;
+template <class Bits>
+auto unpack_cpu(TensorInfo<Bits const> const& spins,
+                TensorInfo<float, 2> const&   out) -> void;
 
 // Specific implementations
 auto zanella_jump_rates_sse2(torch::Tensor               current_log_prob,
