@@ -673,14 +673,8 @@ class Runner(object):
         # NOTE: Set amplitude to eval mode since we don't want Dropout to screw up our results!
         self.amplitude.eval()
 
-        # Logarithmic probability is computed from self.amplitude only
-        def log_prob_fn(x: Tensor) -> Tensor:
-            x = self.amplitude(x)
-            x *= 2
-            return x
-
         # Do the sampling
-        spins, log_probs, info = sample_some(log_prob_fn, basis, self.sampling_options, mode=method)
+        spins, log_probs, info = sample_some(self.amplitude, basis, self.sampling_options, mode=method)
         logger.info("Sampling took {:.1f}s", time.time() - timer)
         if info is not None:
             logger.info("Additional info from the sampler: {}", info)

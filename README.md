@@ -21,11 +21,10 @@ using [Conda](https://docs.conda.io/en/latest/):
 conda install -c twesterhout nqs_playground
 ```
 
-> **Note:** I am just getting started with Conda packaging system. Currently,
-> there is only one version of `nqs_playground` on [Anaconda
-> Cloud](https://anaconda.org/twesterhout/nqs_playground) built against Python
-> 3.7 and PyTorch 1.3.1 with GPU support. I hope to add more versions in the
-> near future.
+Due to limitations of
+[Cartesius](https://userinfo.surfsara.nl/systems/cartesius) which we use for
+building the package, we are stuck with CUDA 10.0.
+
 
 ### Building from source
 
