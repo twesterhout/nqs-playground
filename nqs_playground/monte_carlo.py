@@ -457,8 +457,6 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
     for _ in range(max(2 * batch_size, 10000)):
         spin = _random_spin_configuration(basis.number_spins, basis.hamming_weight)
         states.add(basis.full_info(spin)[0])
-    if len(states) < batch_size:
-        raise RuntimeError("failed to generate enough different spin configurations")
 
     def to_array(x, out):
         for i in range(8):
@@ -468,7 +466,15 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
     states = list(states)
     out = torch.empty((batch_size, 8), dtype=torch.int64)
     batch = out.numpy().view(np.uint64)
-    for i, index in enumerate(torch.randperm(len(states))[:batch_size]):
+    if len(states) >= batch_size:
+        indices = torch.randperm(len(states))[:batch_size]
+    else:
+        logger.warning(
+            "Failed to generate enough different spin configurations: {} generated, "
+            "but {} required".format(len(states), batch_size)
+        )
+        indices = torch.cat([torch.arange(len(states)), torch.randint(len(states), size=(batch_size - len(states),))])
+    for i, index in enumerate(indices):
         to_array(states[index], out=batch[i])
     return out
 
