@@ -2,6 +2,7 @@
 
 from collections import namedtuple
 from enum import Enum
+import inspect
 import math
 import time
 from typing import Dict, List, Tuple, Optional
@@ -552,7 +553,7 @@ def _safe_real_exp(values: Tensor, normalise: bool = True) -> Tensor:
 
 
 class Runner(object):
-    def __init__(self, config):
+    def __init__(self, config, initial_iteration):
         self.config = config
         self.amplitude, self.sign = self.config.model
         self.sampling_options = SamplingOptions(
@@ -565,7 +566,7 @@ class Runner(object):
         self.exact = load_exact(self.config.exact)
         self.tb_writer = SummaryWriter(log_dir=self.config.output)
         self._batch_size = 8192
-        self._iteration = 0
+        self._iteration = initial_iteration
 
     @torch.no_grad()
     def compute_metrics(self, spins):
@@ -648,7 +649,11 @@ class Runner(object):
         self.amplitude.eval()
         self.sign.eval()
         log_ψ = self.combined_state._c._get_method("forward")
-        polynomial = _C.Polynomial(self.config.hamiltonian, self.config.roots(self._iteration))
+        if inspect.isfunction(self.config.roots):
+            roots = self.config.roots(self._iteration)
+        else:
+            roots = self.config.roots
+        polynomial = _C.Polynomial(self.config.hamiltonian, roots)
         values = _C.apply(spins.view(-1, 8), polynomial, log_ψ, self._batch_size)
         values = _safe_real_exp(values, normalise=True)
         logger.info("Applying polynomial took {:.1f}s", time.time() - timer)
@@ -747,8 +752,8 @@ class Runner(object):
         self.tb_writer.flush()
 
 
-def run(config: Config):
+def run(config: Config, initial_iteration=0):
     # Running the simulation
-    runner = Runner(config)
+    runner = Runner(config, initial_iteration)
     for i in range(config.epochs):
         runner.step()
