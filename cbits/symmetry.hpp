@@ -219,12 +219,9 @@ template <unsigned Bits> struct Symmetry;
 template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
   public:
     using StateT = uint64_t;
-    using _PickleStateT = std::tuple<
-        unsigned,
-        unsigned,
-        std::array<uint64_t, 6>,
-        std::array<uint64_t, 6>
-    >;
+    using _PickleStateT =
+        std::tuple<unsigned, unsigned, std::array<uint64_t, 6>,
+                   std::array<uint64_t, 6>>;
 
   private:
     std::array<uint64_t, 6> _fwd;
@@ -245,7 +242,7 @@ template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
         return ibfly(bfly(x, _fwd), _bwd);
     }
 
-    auto _internal_state() const noexcept -> _PickleStateT;
+    auto        _internal_state() const noexcept -> _PickleStateT;
     static auto _from_internal_state(_PickleStateT const&) -> Symmetry;
 };
 
@@ -277,6 +274,23 @@ template <> struct TCM_EXPORT Symmetry<512> : public SymmetryBase {
 };
 
 } // namespace v2
+
+struct alignas(64) Symmetry8x64 {
+    uint64_t             _fwds[6][8];
+    uint64_t             _bwds[6][8];
+    unsigned             _sectors[8];
+    unsigned             _periodicities[8];
+    std::complex<double> _eigenvalues[8];
+
+    Symmetry8x64(gsl::span<v2::Symmetry<64> const> original);
+
+    Symmetry8x64(Symmetry8x64 const&) noexcept = default;
+    Symmetry8x64(Symmetry8x64&&) noexcept      = default;
+    auto operator=(Symmetry8x64 const&) noexcept -> Symmetry8x64& = default;
+    auto operator=(Symmetry8x64&&) noexcept -> Symmetry8x64& = default;
+
+    auto operator()(uint64_t x[8]) const noexcept -> void;
+};
 
 TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<64> const> symmetries,
                           uint64_t                          spin)

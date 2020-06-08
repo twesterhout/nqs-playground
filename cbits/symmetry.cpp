@@ -1,4 +1,5 @@
 #include "symmetry.hpp"
+#include "cpu/kernels.hpp"
 // #include <boost/math/special_functions/cos_pi.hpp>
 // #include <boost/math/special_functions/sin_pi.hpp>
 
@@ -19,7 +20,8 @@ TCM_EXPORT SymmetryBase::SymmetryBase(unsigned const sector,
                           sector, periodicity));
     auto const arg =
         -static_cast<double>(2U * sector) / static_cast<double>(periodicity);
-    _eigenvalue = std::complex<double>{std::cos(M_PI * arg), std::sin(M_PI * arg)};
+    _eigenvalue =
+        std::complex<double>{std::cos(M_PI * arg), std::sin(M_PI * arg)};
 }
 
 namespace v2 {
@@ -34,10 +36,11 @@ auto Symmetry<64>::_internal_state() const noexcept -> _PickleStateT
     return std::make_tuple(sector(), periodicity(), _fwd, _bwd);
 }
 
-auto Symmetry<64>::_from_internal_state(_PickleStateT const& state) -> Symmetry<64>
+auto Symmetry<64>::_from_internal_state(_PickleStateT const& state)
+    -> Symmetry<64>
 {
-    return Symmetry<64>{
-        std::get<2>(state), std::get<3>(state), std::get<0>(state), std::get<1>(state)};
+    return Symmetry<64>{std::get<2>(state), std::get<3>(state),
+                        std::get<0>(state), std::get<1>(state)};
 }
 
 Symmetry<512>::Symmetry(std::array<bits512, 9> const& forward,
@@ -47,6 +50,28 @@ Symmetry<512>::Symmetry(std::array<bits512, 9> const& forward,
 {}
 } //namespace v2
 
+#if 0
+struct alignas(64) Symmetry8x64 {
+    uint64_t             _fwds[6][8];
+    uint64_t             _bwds[6][8];
+    unsigned             _sectors[8];
+    unsigned             _periodicities[8];
+    std::complex<double> _eigenvalues[8];
+
+    Symmetry8x64(gsl::span<v2::Symmetry<64> const> original);
+
+    Symmetry8x64(Symmetry8x64 const&) noexcept = default;
+    Symmetry8x64(Symmetry8x64&&) noexcept      = default;
+    auto operator=(Symmetry8x64 const&) noexcept -> Symmetry8x64& = default;
+    auto operator=(Symmetry8x64&&) noexcept -> Symmetry8x64& = default;
+};
+#endif
+
+TCM_EXPORT auto Symmetry8x64::operator()(uint64_t x[8]) const noexcept -> void
+{
+    bfly(x, _fwds);
+    ibfly(x, _bwds);
+}
 #if 0
 auto full_info(gsl::span<v2::Symmetry<64> const> symmetries, uint64_t x)
     -> std::tuple</*representative=*/uint64_t,
@@ -106,6 +131,53 @@ auto full_info(gsl::span<v2::Symmetry<64> const> symmetries, uint64_t x)
         repr, std::complex<double>{std::cos(arg), std::sin(arg)}, norm);
 }
 #endif
+
+auto representative(gsl::span<Symmetry8x64 const>     symmetries,
+                    gsl::span<v2::Symmetry<64> const> other,
+                    uint64_t const                    x) noexcept
+    -> std::tuple<uint64_t, double, ptrdiff_t>
+{
+    TCM_ASSERT(!symmetries.empty(), "");
+    alignas(16) uint64_t buffer[8];
+
+    auto repr = x;
+    auto norm = 0.0;
+    auto g    = ptrdiff_t{0};
+    for (auto i = uint64_t{0}; i < symmetries.size(); ++i) {
+        for (auto n = 0; n < 8; ++n) {
+            buffer[n] = x;
+        }
+        symmetries[i](buffer);
+        for (auto n = 0; n < 8; ++n) {
+            if (buffer[n] < repr) {
+                repr = buffer[n];
+                g    = static_cast<ptrdiff_t>(i) + n;
+            }
+            else if (buffer[n] == x) {
+                norm += symmetries[i]._eigenvalues[n].real();
+            }
+        }
+    }
+    for (auto i = uint64_t{0}; i < other.size(); ++i) {
+        auto const y = other[i](x);
+        if (y < repr) {
+            repr = y;
+            g    = static_cast<ptrdiff_t>(8U * symmetries.size() + i);
+        }
+        else if (y == x) {
+            norm += other[i].eigenvalue().real();
+        }
+    }
+
+    // We need to detect the case when norm is not zero, but only because of
+    // inaccurate arithmetics
+    constexpr auto norm_threshold = 1.0e-5;
+    if (std::abs(norm) <= norm_threshold) { norm = 0.0; }
+    TCM_ASSERT(norm >= 0, "");
+    norm = std::sqrt(
+        norm / static_cast<double>(8U * symmetries.size() + other.size()));
+    return {repr, norm, g};
+}
 
 template <bool Representative, bool Eigenvalue, bool Norm, class Symmetry>
 TCM_FORCEINLINE auto
