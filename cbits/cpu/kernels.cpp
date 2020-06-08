@@ -10,15 +10,21 @@
 // #    define zanella_jump_rates_simd zanella_jump_rates_avx2
 #    define jump_rates_one_simd jump_rates_one_avx2
 #    define unpack_one_simd unpack_one_avx2
+#    define bfly_simd bfly_avx2
+#    define ibfly_simd ibfly_avx2
 #elif INSTRSET >= 7 // AVX
 // #    define zanella_jump_rates_simd zanella_jump_rates_avx
 #    define jump_rates_one_simd jump_rates_one_avx
 #    define unpack_one_simd unpack_one_avx
+#    define bfly_simd bfly_avx
+#    define ibfly_simd ibfly_avx
 #elif INSTRSET >= 2 // SSE2
 #    define INCLUDE_DISPATCH_CODE
 // #    define zanella_jump_rates_simd zanella_jump_rates_sse2
 #    define jump_rates_one_simd jump_rates_one_sse2
 #    define unpack_one_simd unpack_one_sse2
+#    define bfly_simd bfly_sse2
+#    define ibfly_simd ibfly_sse2
 #else
 #    error Unsupported instruction set
 #endif
@@ -349,6 +355,109 @@ template TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const> const&,
                                     TensorInfo<float, 2> const&) -> void;
 template TCM_EXPORT auto unpack_cpu(TensorInfo<bits512 const> const&,
                                     TensorInfo<float, 2> const&) -> void;
+#endif
+
+namespace {
+/// Performs one step of the Butterfly network. It exchanges bits with distance
+/// \p d between them if the corresponding bits in the mask \p m are set.
+TCM_FORCEINLINE auto bit_permute_step(__m128i& x0, __m128i& x1, __m128i& x2,
+                                      __m128i& x3, __m128i m0, __m128i m1,
+                                      __m128i m2, __m128i m3,
+                                      __m128i d) noexcept -> void
+{
+    __m128i y0, y1, y2, y3;
+    y0 = _mm_srl_epi64(x0, d);
+    y1 = _mm_srl_epi64(x1, d);
+    y2 = _mm_srl_epi64(x2, d);
+    y3 = _mm_srl_epi64(x3, d);
+    y0 = _mm_xor_si128(x0, y0);
+    y1 = _mm_xor_si128(x1, y1);
+    y2 = _mm_xor_si128(x2, y2);
+    y3 = _mm_xor_si128(x3, y3);
+    y0 = _mm_and_si128(y0, m0);
+    y1 = _mm_and_si128(y1, m1);
+    y2 = _mm_and_si128(y2, m2);
+    y3 = _mm_and_si128(y3, m3);
+    x0 = _mm_xor_si128(x0, y0);
+    x1 = _mm_xor_si128(x1, y1);
+    x2 = _mm_xor_si128(x2, y2);
+    x3 = _mm_xor_si128(x3, y3);
+    y0 = _mm_sll_epi64(y0, d);
+    y1 = _mm_sll_epi64(y1, d);
+    y2 = _mm_sll_epi64(y2, d);
+    y3 = _mm_sll_epi64(y3, d);
+    x0 = _mm_xor_si128(x0, y0);
+    x1 = _mm_xor_si128(x1, y1);
+    x2 = _mm_xor_si128(x2, y2);
+    x3 = _mm_xor_si128(x3, y3);
+}
+} // namespace
+
+TCM_EXPORT auto bfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
+    -> void
+{
+    __m128i x0, x1, x2, x3;
+    __m128i m0, m1, m2, m3;
+    x0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x));
+    x1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 1);
+    x2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 2);
+    x3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 3);
+    for (auto i = 0; i < 6; ++i) {
+        m0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]));
+        m1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
+        m2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
+        m3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
+        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
+                         _mm_cvtsi32_si128(1 << i));
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x), x0);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
+}
+
+TCM_EXPORT auto ibfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
+    -> void
+{
+    __m128i x0, x1, x2, x3;
+    __m128i m0, m1, m2, m3;
+    x0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x));
+    x1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 1);
+    x2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 2);
+    x3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 3);
+    for (auto i = 6; i-- > 0;) {
+        m0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]));
+        m1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
+        m2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
+        m3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
+        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
+                         _mm_cvtsi32_si128(1 << i));
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x), x0);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
+}
+
+#if defined(INCLUDE_DISPATCH_CODE)
+TCM_EXPORT auto bfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void
+{
+    auto& cpuid = caffe2::GetCpuId();
+    if (cpuid.avx()) { bfly_avx(x, masks); }
+    else {
+        bfly_sse2(x, masks);
+    }
+}
+
+TCM_EXPORT auto ibfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
+    -> void
+{
+    auto& cpuid = caffe2::GetCpuId();
+    if (cpuid.avx()) { ibfly_avx(x, masks); }
+    else {
+        ibfly_sse2(x, masks);
+    }
+}
 #endif
 
 TCM_NAMESPACE_END

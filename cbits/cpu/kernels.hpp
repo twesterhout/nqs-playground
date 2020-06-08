@@ -34,4 +34,16 @@ auto unpack_one_avx(uint64_t, unsigned, float*) noexcept -> void;
 auto unpack_one_sse2(bits512 const&, unsigned, float*) noexcept -> void;
 auto unpack_one_sse2(uint64_t, unsigned, float*) noexcept -> void;
 
+auto bfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+auto ibfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+
+auto bfly_avx(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+auto bfly_sse2(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+auto ibfly_avx(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+auto ibfly_sse2(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+
+// These are not really used anywhere
+auto bfly_avx2(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+auto ibfly_avx2(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void;
+
 TCM_NAMESPACE_END
