@@ -85,10 +85,6 @@ def make_hamiltonian(shape, basis):
     return Heisenberg([(1, *e) for e in j1_edges], basis)
 
 
-def check_state(H, y):
-    return close, E
-
-
 def make_exact(shape, hamiltonian, use_symmetries=True, check_state=True):
     if use_symmetries:
         prefix = CURRENT_DIR / "ED" / "with"
@@ -229,6 +225,65 @@ def do_4x6():
     initial_iteration += config.epochs
 
 
+def do_6x6():
+    import nqs_playground.swo
+
+    shape = (6, 6)
+    basis = make_basis(shape, use_symmetries=True, build=True)
+    hamiltonian = make_hamiltonian(shape, basis)
+    ground_state = make_exact(shape, hamiltonian, use_symmetries=True, check_state=False)
+    n = basis.number_spins
+    i = 1
+    while pathlib.Path("SWO/{}x{}/{}".format(*shape, i)).exists():
+        i += 1
+
+    m1, m2 = make_amplitude_network(n, 0.2), make_sign_network(n, 0.3)
+    if torch.cuda.is_available():
+        m1 = m1.cuda()
+        m2 = m2.cuda()
+
+    initial_iteration = 0
+    config = nqs_playground.swo.Config(
+        model=(m1, m2),
+        output="SWO/{}x{}/{}".format(*shape, i),
+        hamiltonian=hamiltonian,
+        roots=lambda _: [2 * n, 2 * n],
+        epochs=50,
+        sampling_method="zanella",
+        number_chains=20 * n,
+        number_samples=2000 // 20,
+        sweep_size=10,
+        amplitude=lambda _: nqs_playground.swo.TrainingOptions(
+            train_batch_size=128,
+            max_epochs=20,
+            optimiser=lambda p: torch.optim.Adam(p, lr=1e-4),
+        ),
+        sign=lambda _: nqs_playground.swo.TrainingOptions(
+            train_batch_size=128,
+            max_epochs=7,
+            optimiser=lambda p: torch.optim.RMSprop(p, lr=1e-4),
+        ),
+        exact=ground_state,
+    )
+    nqs_playground.swo.run(config)
+    initial_iteration += config.epochs
+
+    config = config_with_poly_and_dropout(lambda _: [-20, 30], (0.1, 0.3), config)
+    nqs_playground.swo.run(config, initial_iteration)
+    initial_iteration += config.epochs
+
+    config = config_with_poly_and_dropout(lambda _: [-20, 30], (0.0, 0.1), config)
+    config = config._replace(
+        amplitude=lambda _: nqs_playground.swo.TrainingOptions(
+            train_batch_size=1024,
+            max_epochs=30,
+            optimiser=lambda p: torch.optim.Adam(p, lr=1e-4),
+        )
+    )
+    nqs_playground.swo.run(config, initial_iteration)
+    initial_iteration += config.epochs
+
+
 def do_swo():
     import nqs_playground.swo
 
@@ -263,7 +318,7 @@ def do_swo():
 
 
 def main():
-    do_4x6()
+    do_6x6()
     # do_swo()
 
 
