@@ -31,7 +31,7 @@ struct BasisCache {
     inline BasisCache(gsl::span<v2::Symmetry<64> const> symmetries,
                       unsigned                          number_spins,
                       std::optional<unsigned>           hamming_weight,
-                      std::vector<uint64_t> _unsafe_states = {});
+                      std::vector<uint64_t>             _unsafe_states = {});
 
 #if 0
     inline BasisCache(StatesT&& states, RangesT&& ranges);
@@ -277,10 +277,11 @@ auto generate_ranges(Iterator first, Sentinel last, unsigned number_spins)
 BasisCache::BasisCache(gsl::span<v2::Symmetry<64> const> symmetries,
                        unsigned const                    number_spins,
                        std::optional<unsigned>           hamming_weight,
-                       std::vector<uint64_t> _unsafe_states)
-    : _states{_unsafe_states.empty()
-        ? generate_states(symmetries, number_spins, std::move(hamming_weight))
-        : StatesT{std::begin(_unsafe_states), std::end(_unsafe_states)}}
+                       std::vector<uint64_t>             _unsafe_states)
+    : _states{_unsafe_states.empty() ? generate_states(
+                  symmetries, number_spins, std::move(hamming_weight))
+                                     : StatesT{std::begin(_unsafe_states),
+                                               std::end(_unsafe_states)}}
     , _ranges{
           generate_ranges<bits>(_states.cbegin(), _states.cend(), number_spins)}
 {}
@@ -344,15 +345,15 @@ TCM_EXPORT
 SmallSpinBasis::SmallSpinBasis(std::vector<v2::Symmetry<64>> symmetries,
                                unsigned                      number_spins,
                                std::optional<unsigned>       hamming_weight)
-    : SmallSpinBasis{std::move(symmetries), number_spins, std::move(hamming_weight), nullptr}
-{
-}
+    : SmallSpinBasis{std::move(symmetries), number_spins,
+                     std::move(hamming_weight), nullptr}
+{}
 
 TCM_EXPORT
-SmallSpinBasis::SmallSpinBasis(std::vector<v2::Symmetry<64>> symmetries,
-                               unsigned                      number_spins,
-                               std::optional<unsigned>       hamming_weight,
-                               std::unique_ptr<detail::BasisCache> _unsafe_cache)
+SmallSpinBasis::SmallSpinBasis(
+    std::vector<v2::Symmetry<64>> symmetries, unsigned number_spins,
+    std::optional<unsigned>             hamming_weight,
+    std::unique_ptr<detail::BasisCache> _unsafe_cache)
     : BasisBase{number_spins, hamming_weight}
     , _symmetries{std::move(symmetries)}
     , _cache{std::move(_unsafe_cache)}
@@ -361,6 +362,16 @@ SmallSpinBasis::SmallSpinBasis(std::vector<v2::Symmetry<64>> symmetries,
               fmt::format("invalid number_spins: {}; use SpinBasis for systems "
                           "larger than 64 spins",
                           _number_spins));
+    auto const number_chunks = _symmetries.size() / 8U;
+    auto const remaining     = _symmetries.size() % 8U;
+    auto       i             = size_t{0};
+    for (auto j = uint64_t{0}; j < number_chunks; ++j, i += 8) {
+        _alternative._chunks.emplace_back(
+            gsl::span<v2::Symmetry<64> const>{_symmetries.data() + i, 8U});
+    }
+    for (auto j = uint64_t{0}; j < remaining; ++j, ++i) {
+        _alternative._rest.push_back(_symmetries[i]);
+    }
 }
 
 TCM_EXPORT SmallSpinBasis::~SmallSpinBasis() = default;
@@ -368,7 +379,15 @@ TCM_EXPORT SmallSpinBasis::~SmallSpinBasis() = default;
 TCM_EXPORT auto SmallSpinBasis::full_info(uint64_t const x) const
     -> std::tuple<StateT, std::complex<double>, double>
 {
-    return ::TCM_NAMESPACE::full_info(_symmetries, x);
+    // auto r1 = ::TCM_NAMESPACE::full_info(_symmetries, x);
+    auto r2 = representative(_alternative._chunks, _alternative._rest, x);
+    // TCM_CHECK(std::get<0>(r1) == std::get<0>(r2), std::runtime_error, "");
+    // TCM_CHECK(std::get<2>(r1) == std::get<1>(r2), std::runtime_error,
+    //           fmt::format("{} != {}", std::get<2>(r1), std::get<1>(r2)));
+    auto const eigenvalue =
+        _symmetries[static_cast<uint64_t>(std::get<2>(r2))].eigenvalue();
+    // TCM_CHECK(std::get<1>(r1) == eigenvalue, std::runtime_error, "");
+    return {std::get<0>(r2), eigenvalue, std::get<1>(r2)};
 }
 
 TCM_EXPORT auto SmallSpinBasis::full_info(bits512 const& x) const
@@ -433,17 +452,19 @@ TCM_EXPORT auto SmallSpinBasis::_internal_state() const -> _PickleStateT
         }
         return out;
     }();
-    return std::make_tuple(
-        number_spins(), hamming_weight(), _symmetries, std::move(representatives));
+    return std::make_tuple(number_spins(), hamming_weight(), _symmetries,
+                           std::move(representatives));
 }
 
 TCM_EXPORT auto SmallSpinBasis::_from_internal_state(_PickleStateT const& state)
     -> std::shared_ptr<SmallSpinBasis>
 {
     auto cache = std::make_unique<detail::BasisCache>(
-        gsl::span{std::get<2>(state)}, std::get<0>(state), std::get<1>(state), std::get<3>(state));
+        gsl::span{std::get<2>(state)}, std::get<0>(state), std::get<1>(state),
+        std::get<3>(state));
     return std::make_shared<SmallSpinBasis>(
-        std::get<2>(state), std::get<0>(state), std::get<1>(state), std::move(cache));
+        std::get<2>(state), std::get<0>(state), std::get<1>(state),
+        std::move(cache));
 }
 // }}}
 

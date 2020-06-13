@@ -82,23 +82,26 @@ class TCM_EXPORT SmallSpinBasis : public BasisBase {
     using UInt      = uint64_t;
     using StateT    = UInt;
     using SymmetryT = v2::Symmetry<64>;
-    using _PickleStateT = std::tuple<
-        unsigned,
-        std::optional<unsigned>,
-        std::vector<SymmetryT>,
-        std::vector<uint64_t>
-    >;
+    using _PickleStateT =
+        std::tuple<unsigned, std::optional<unsigned>, std::vector<SymmetryT>,
+                   std::vector<uint64_t>>;
+
+    struct Alternative {
+        std::vector<Symmetry8x64>     _chunks;
+        std::vector<v2::Symmetry<64>> _rest;
+    };
 
   private:
     std::vector<SymmetryT>              _symmetries;
     std::unique_ptr<detail::BasisCache> _cache;
+    Alternative                         _alternative;
 
   public:
     SmallSpinBasis(std::vector<SymmetryT> symmetries, unsigned number_spins,
                    std::optional<unsigned> hamming_weight);
 
     SmallSpinBasis(std::vector<SymmetryT> symmetries, unsigned number_spins,
-                   std::optional<unsigned> hamming_weight,
+                   std::optional<unsigned>             hamming_weight,
                    std::unique_ptr<detail::BasisCache> _unsafe_cache);
 
     SmallSpinBasis(SmallSpinBasis const&)     = delete;
@@ -123,7 +126,7 @@ class TCM_EXPORT SmallSpinBasis : public BasisBase {
     auto number_states() const -> uint64_t;
     auto index(StateT const x) const -> uint64_t;
 
-    auto _internal_state() const -> _PickleStateT;
+    auto        _internal_state() const -> _PickleStateT;
     static auto _from_internal_state(_PickleStateT const&)
         -> std::shared_ptr<SmallSpinBasis>;
 }; // }}}

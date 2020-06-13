@@ -67,11 +67,30 @@ struct alignas(64) Symmetry8x64 {
 };
 #endif
 
-TCM_EXPORT auto Symmetry8x64::operator()(uint64_t x[8]) const noexcept -> void
+TCM_EXPORT
+Symmetry8x64::Symmetry8x64(gsl::span<v2::Symmetry<64> const> original)
 {
-    bfly(x, _fwds);
-    ibfly(x, _bwds);
+    TCM_CHECK(original.size() == 8, std::invalid_argument,
+              fmt::format("expected a chunk of 8 symmetries, but got {}",
+                          original.size()));
+    for (auto i = 0U; i < 8U; ++i) {
+        for (auto j = 0U; j < 6U; ++j) {
+            _fwds[j][i] = original[i]._fwd[j];
+            _bwds[j][i] = original[i]._bwd[j];
+        }
+        _sectors[i]       = original[i].sector();
+        _periodicities[i] = original[i].periodicity();
+        _eigenvalues[i]   = original[i].eigenvalue();
+    }
 }
+
+TCM_EXPORT auto Symmetry8x64::operator()(uint64_t x, uint64_t out[8]) const
+    noexcept -> void
+{
+    bfly(x, out, _fwds);
+    ibfly(out, _bwds);
+}
+
 #if 0
 auto full_info(gsl::span<v2::Symmetry<64> const> symmetries, uint64_t x)
     -> std::tuple</*representative=*/uint64_t,
@@ -132,22 +151,19 @@ auto full_info(gsl::span<v2::Symmetry<64> const> symmetries, uint64_t x)
 }
 #endif
 
-auto representative(gsl::span<Symmetry8x64 const>     symmetries,
-                    gsl::span<v2::Symmetry<64> const> other,
-                    uint64_t const                    x) noexcept
+TCM_EXPORT auto representative(gsl::span<Symmetry8x64 const>     symmetries,
+                               gsl::span<v2::Symmetry<64> const> other,
+                               uint64_t const                    x) noexcept
     -> std::tuple<uint64_t, double, ptrdiff_t>
 {
     TCM_ASSERT(!symmetries.empty(), "");
-    alignas(16) uint64_t buffer[8];
+    alignas(32) uint64_t buffer[8];
 
     auto repr = x;
     auto norm = 0.0;
     auto g    = ptrdiff_t{0};
     for (auto i = uint64_t{0}; i < symmetries.size(); ++i) {
-        for (auto n = 0; n < 8; ++n) {
-            buffer[n] = x;
-        }
-        symmetries[i](buffer);
+        symmetries[i](x, buffer);
         for (auto n = 0; n < 8; ++n) {
             if (buffer[n] < repr) {
                 repr = buffer[n];

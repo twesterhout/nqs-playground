@@ -212,6 +212,8 @@ struct TCM_IMPORT SymmetryBase {
     }
 }; // }}}
 
+struct Symmetry8x64;
+
 namespace v2 {
 
 template <unsigned Bits> struct Symmetry;
@@ -223,7 +225,7 @@ template <> struct TCM_EXPORT Symmetry<64> : public SymmetryBase {
         std::tuple<unsigned, unsigned, std::array<uint64_t, 6>,
                    std::array<uint64_t, 6>>;
 
-  private:
+    // private:
     std::array<uint64_t, 6> _fwd;
     std::array<uint64_t, 6> _bwd;
 
@@ -289,7 +291,7 @@ struct alignas(64) Symmetry8x64 {
     auto operator=(Symmetry8x64 const&) noexcept -> Symmetry8x64& = default;
     auto operator=(Symmetry8x64&&) noexcept -> Symmetry8x64& = default;
 
-    auto operator()(uint64_t x[8]) const noexcept -> void;
+    auto operator()(uint64_t x, uint64_t out[8]) const noexcept -> void;
 };
 
 TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<64> const> symmetries,
@@ -301,6 +303,11 @@ TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<512> const> symmetries,
                           bits512 const&                     spin)
     -> std::tuple</*representative=*/bits512,
                   /*eigenvalue=*/std::complex<double>, /*norm=*/double>;
+
+auto representative(gsl::span<Symmetry8x64 const>     symmetries,
+                    gsl::span<v2::Symmetry<64> const> other,
+                    uint64_t const                    x) noexcept
+    -> std::tuple<uint64_t, double, ptrdiff_t>;
 
 template <class... UInts>
 TCM_FORCEINLINE constexpr auto flipped(uint64_t const x, UInts... is) noexcept
