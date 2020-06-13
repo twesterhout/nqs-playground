@@ -178,6 +178,16 @@ if(NOT TARGET flat_hash_map)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/flat_hash_map)
 endif()
 
+if(NOT TARGET libcuckoo)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+
+    add_library(libcuckoo INTERFACE)
+    target_include_directories(libcuckoo
+        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/libcuckoo)
+    target_link_libraries(libcuckoo INTERFACE Threads::Threads)
+endif()
+
 # vectorclass library
 if(NOT TARGET vectorclass)
     execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
@@ -241,6 +251,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               fmt::fmt
               gsl::gsl-lite
               flat_hash_map
+              libcuckoo
               Boost::boost
               SG14
               OpenMP::OpenMP_CXX
@@ -305,6 +316,7 @@ add_library(nqs SHARED
     cbits/jacobian.cpp
     cbits/heisenberg.cpp
     cbits/forward_propagator.cpp
+    cbits/polynomial.cpp
     cbits/polynomial_state.cpp
     cbits/random.cpp
     cbits/unpack.cpp

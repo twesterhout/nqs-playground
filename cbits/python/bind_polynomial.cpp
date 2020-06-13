@@ -21,13 +21,13 @@ auto make_polynomial(py::module m, char const* class_name)
     py::class_<Polynomial<Hamiltonian>,
                std::shared_ptr<Polynomial<Hamiltonian>>>(m, "Polynomial")
         .def(py::init<std::shared_ptr<Hamiltonian const>,
-                      std::vector<complex_type>, bool>(),
+                      std::vector<complex_type>, bool, int>(),
              py::arg{"hamiltonian"}, py::arg{"roots"},
-             py::arg{"normalising"} = false)
+             py::arg{"normalising"} = false, py::arg{"num_threads"} = -1)
         .def(
             "__call__",
             [](Polynomial<Hamiltonian>& self, bits512 const& spin)
-                -> QuantumState const& { return self(spin); },
+                -> v2::QuantumState const& { return self(spin); },
             py::return_value_policy::reference_internal);
 }
 
@@ -38,6 +38,7 @@ TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
     std::vector<std::string> keep_alive;
 #define DOC(str) trim(keep_alive, str)
 
+#if 0
     py::class_<QuantumState>(m, "ExplicitState", DOC(R"EOF(
             Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a table {(σᵢ, cᵢ)}.
         )EOF"))
@@ -74,24 +75,42 @@ TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
                 return py::make_iterator(self.begin(), self.end());
             },
             py::keep_alive<0, 1>());
+#else
+    py::class_<v2::QuantumState>(m, "ExplicitState", DOC(R"EOF(
+            Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a Dict[int, complex].
+        )EOF"))
+        .def(
+            "__contains__",
+            [](v2::QuantumState const& self, bits512 const& spin) {
+                auto const& table = self.unsafe_locked_table();
+                return table.count(spin) > 0;
+            },
+            py::arg{"spin"})
+        .def(
+            "__getitem__",
+            [](v2::QuantumState const& self, bits512 const& spin) {
+                auto const& table = self.unsafe_locked_table();
+                auto        i     = table.find(spin);
+                if (i != table.cend()) { return i->second; }
+                throw py::key_error{};
+            },
+            py::arg{"spin"})
+        .def(
+            "__len__",
+            [](v2::QuantumState const& self) {
+                return self.unsafe_locked_table().size();
+            },
+            R"EOF(Returns number of elements in |ψ⟩.)EOF")
+        .def(
+            "__iter__",
+            [](v2::QuantumState const& self) {
+                auto const& table = self.unsafe_locked_table();
+                return py::make_iterator(table.cbegin(), table.cend());
+            },
+            py::keep_alive<0, 1>());
+#endif
 
     make_polynomial<Heisenberg>(m, "Polynomial");
-    // .def(
-    //     "keys",
-    //     [](QuantumState const& self) {
-    //         return vector_to_numpy(keys(self));
-    //     },
-    //     R"EOF(Returns basis vectors {|σᵢ⟩} as a ``numpy.ndarray``.)EOF")
-    // .def(
-    //     "values",
-    //     [](QuantumState const& self, bool only_real) {
-    //         return values(self, only_real);
-    //     },
-    //     pybind11::arg{"only_real"} = false,
-    //     R"EOF(
-    //         Returns coefficients {cᵢ} or {Re[cᵢ]} (depending on the value
-    //         of ``only_real``) as a ``torch.Tensor``.
-    //     )EOF");
 
 #undef DOC
 }

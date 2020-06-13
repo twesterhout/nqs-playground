@@ -13,7 +13,9 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
 
     auto buffer =
         torch::empty(std::initializer_list<int64_t>{spins_info.size(), 2L},
-                     torch::TensorOptions{}.dtype(torch::kFloat32).pinned_memory(!device.is_cpu()));
+                     torch::TensorOptions{}
+                         .dtype(torch::kFloat32)
+                         .pinned_memory(!device.is_cpu()));
 
     //run_with_control_inversion(
     //    [&spins_info, &buffer, &psi, &hamiltonian, device](auto async) {
@@ -35,7 +37,8 @@ TCM_EXPORT auto apply(torch::Tensor spins, Heisenberg const& hamiltonian,
     //    });
 
     if (!device.is_cpu()) {
-        buffer = buffer.to(buffer.options().device(device), /*non_blocking=*/true);
+        buffer =
+            buffer.to(buffer.options().device(device), /*non_blocking=*/true);
     }
     return buffer;
 }
@@ -61,6 +64,7 @@ TCM_EXPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
                   /*copy=*/false);
 }
 
+#if 1
 TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
                       v2::ForwardT psi, uint32_t const batch_size)
     -> torch::Tensor
@@ -86,19 +90,25 @@ TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
     for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
         auto const& state =
             polynomial(spins_info.data[i * spins_info.stride()]);
+#    if 1
+        acc([&state](auto&& f) { state.for_each(f); });
+#    else
         acc([&state](auto&& f) {
             for (auto const& item : state) {
                 f(item.first, item.second);
             }
         });
+#    endif
     }
     acc.finalize();
     //    });
 
     if (!device.is_cpu()) {
-        buffer = buffer.to(buffer.options().device(device), /*non_blocking=*/true);
+        buffer =
+            buffer.to(buffer.options().device(device), /*non_blocking=*/true);
     }
     return buffer;
 }
+#endif
 
 TCM_NAMESPACE_END

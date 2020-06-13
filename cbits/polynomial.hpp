@@ -30,10 +30,9 @@
 
 #include "bits512.hpp"
 #include "errors.hpp"
+#include "parallel.hpp"
 
-#include <boost/align/is_aligned.hpp>
-#include <torch/types.h>
-#include <flat_hash_map/bytell_hash_map.hpp>
+#include <libcuckoo/cuckoohash_map.hh>
 
 #include <cmath>
 #include <memory>
@@ -41,6 +40,87 @@
 
 TCM_NAMESPACE_BEGIN
 
+namespace v2 {
+class QuantumState {
+  private:
+    using table_type = libcuckoo::cuckoohash_map<bits512, std::complex<double>>;
+
+    table_type                              _table;
+    std::optional<table_type::locked_table> _locked_table;
+
+  public:
+    QuantumState();
+    QuantumState(QuantumState const&) = default;
+    QuantumState(QuantumState&&)      = default;
+    QuantumState& operator=(QuantumState const&) = delete;
+    QuantumState& operator=(QuantumState&&) = delete;
+
+    /// Performs `|ψ⟩ := |ψ⟩ + c|σ⟩`.
+    ///
+    /// \param value A pair `(c, |σ⟩)`.
+    auto operator+=(std::pair<bits512 const, std::complex<double>> const& item)
+        -> QuantumState&;
+
+    auto norm() const -> double;
+    auto empty() const noexcept -> bool { return _table.empty(); }
+    auto freeze() -> void;
+    auto unfreeze() -> void;
+    auto clear() -> void;
+
+    auto unsafe_locked_table() const -> table_type::locked_table const&;
+
+    template <class Function>
+    auto parallel_for(Function fn, uint64_t chunk_size, int num_threads) const
+        -> void;
+
+    template <class Function> auto for_each(Function&& fn) const -> void;
+
+    friend auto swap(QuantumState& x, QuantumState& y) -> void;
+};
+
+template <class Function>
+auto QuantumState::parallel_for(Function fn, uint64_t const chunk_size,
+                                int num_threads) const -> void
+{
+    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
+              "table is not frozen");
+    if (_locked_table->empty()) { return; }
+    if (num_threads <= 0) { num_threads = omp_get_max_threads(); }
+
+    omp_task_handler task_handler;
+#pragma omp parallel default(none) num_threads(num_threads)                    \
+    firstprivate(fn, chunk_size) shared(task_handler)
+    {
+#pragma omp single nowait
+        {
+            auto const count = _locked_table->size() / chunk_size;
+            auto       first = _locked_table->cbegin();
+            for (auto i = uint64_t{0}; i < count; ++i) {
+                auto next = first;
+                for (auto _j = uint64_t{0}; _j < chunk_size; ++_j) {
+                    ++next;
+                }
+                task_handler.submit([first, next, fn]() { fn(first, next); });
+                first = next;
+            }
+            fn(first, _locked_table->cend());
+        }
+    }
+    task_handler.check_errors();
+}
+
+template <class Function>
+auto QuantumState::for_each(Function&& fn) const -> void
+{
+    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
+              "table is not frozen");
+    for (auto const& item : (*_locked_table)) {
+        fn(item.first, item.second);
+    }
+}
+} // namespace v2
+
+#if 0
 class QuantumState
     : public ska::bytell_hash_map<bits512, std::complex<double>> {
   public:
@@ -84,57 +164,25 @@ auto swap(QuantumState& x, QuantumState& y) -> void
     using base = QuantumState::base;
     static_cast<base&>(x).swap(static_cast<base&>(y));
 }
-
-#if 0
-template <class State>
-auto keys(QuantumState<State> const& psi) -> aligned_vector<State>
-{
-    using std::begin, std::end;
-    aligned_vector<State> spins;
-    spins.reserve(psi.size());
-    std::transform(begin(psi), end(psi), std::back_inserter(spins),
-                   [](auto const& item) { return item.first; });
-    return spins;
-}
-
-template <class State>
-auto values(QuantumState<State> const& psi, bool only_real) -> torch::Tensor
-{
-    using std::begin, std::end;
-    if (only_real) {
-        auto  coeffs = ::TCM_NAMESPACE::detail::make_tensor<float>(psi.size());
-        auto* data   = reinterpret_cast<float*>(coeffs.data_ptr());
-        std::transform(begin(psi), end(psi), data, [](auto const& item) {
-            return static_cast<float>(item.second.real());
-        });
-        return coeffs;
-    }
-    else {
-        auto coeffs =
-            ::TCM_NAMESPACE::detail::make_tensor<float>(psi.size(), 2);
-        auto* data = reinterpret_cast<std::complex<float>*>(coeffs.data_ptr());
-        std::transform(begin(psi), end(psi), data,
-                       [](auto const& item) { return item.second; });
-        return coeffs;
-    }
-}
 #endif
 
 // Polynomial {{{
 template <class Hamiltonian> class Polynomial {
   private:
-    QuantumState _current;
-    QuantumState _old;
+    v2::QuantumState _current;
+    v2::QuantumState _old;
     /// Hamiltonian which knows how to perform `|ψ⟩ += c * H|σ⟩`.
     std::shared_ptr<Hamiltonian const> _hamiltonian;
     /// List of roots A.
     std::vector<complex_type> _roots;
     bool                      _normalising;
+    int                       _num_threads;
 
   public:
     /// Constructs the polynomial given the hamiltonian and a list or terms.
     TCM_NOINLINE Polynomial(std::shared_ptr<Hamiltonian const> hamiltonian,
-                            std::vector<complex_type> roots, bool normalising);
+                            std::vector<complex_type> roots, bool normalising,
+                            int num_threads = -1);
 
     Polynomial(Polynomial const&)           = delete;
     Polynomial(Polynomial&& other) noexcept = default;
@@ -147,45 +195,48 @@ template <class Hamiltonian> class Polynomial {
 
     /// Applies the polynomial to state `|ψ⟩ = coeff * |spin⟩`.
     TCM_NOINLINE auto operator()(bits512 const& spin, complex_type coeff = 1.0)
-        -> QuantumState const&;
+        -> v2::QuantumState const&;
 
     /// Applies the polynomial to a state.
-    TCM_NOINLINE auto operator()(QuantumState const& state)
-        -> QuantumState const&;
+    TCM_NOINLINE auto operator()(v2::QuantumState const& state)
+        -> v2::QuantumState const&;
 
   private:
-    TCM_FORCEINLINE auto apply_hamiltonian(complex_type   coeff,
-                                           bits512 const& spin,
-                                           QuantumState&  state) const -> void;
+    TCM_FORCEINLINE auto apply_hamiltonian(complex_type      coeff,
+                                           bits512 const&    spin,
+                                           v2::QuantumState& state) const
+        -> void;
 
-    TCM_FORCEINLINE auto iteration(complex_type root, QuantumState& current,
-                                   QuantumState const& old) const -> void;
+    TCM_FORCEINLINE auto iteration(complex_type root, v2::QuantumState& current,
+                                   v2::QuantumState& old) const -> void;
 
     template <size_t Offset>
-    TCM_FORCEINLINE auto kernel() -> QuantumState const&;
+    TCM_FORCEINLINE auto kernel() -> v2::QuantumState const&;
 }; // }}}
 
 // Polynomial IMPLEMENTATION {{{
 template <class Hamiltonian>
 Polynomial<Hamiltonian>::Polynomial(
     std::shared_ptr<Hamiltonian const> hamiltonian,
-    std::vector<complex_type> roots, bool const normalising)
+    std::vector<complex_type> roots, bool const normalising,
+    int const num_threads)
     : _current{}
     , _old{}
     , _hamiltonian{std::move(hamiltonian)}
     , _roots{std::move(roots)}
     , _normalising{normalising}
+    , _num_threads{num_threads > 0 ? num_threads : omp_get_max_threads()}
 {
     TCM_CHECK(_hamiltonian != nullptr, std::invalid_argument,
               "hamiltonian must not be nullptr (or None)");
     TCM_CHECK(!_roots.empty(), std::invalid_argument,
               "zero-degree polynomials are not supported");
-    auto const estimated_size =
-        std::min(static_cast<size_t>(std::round(
-                     std::pow(_hamiltonian->size() / 2, _roots.size()))),
-                 size_t{16384});
-    _old.reserve(estimated_size);
-    _current.reserve(estimated_size);
+    // auto const estimated_size =
+    //     std::min(static_cast<size_t>(std::round(
+    //                  std::pow(_hamiltonian->size() / 2, _roots.size()))),
+    //              size_t{16384});
+    // _old.reserve(estimated_size);
+    // _current.reserve(estimated_size);
 }
 
 template <class Hamiltonian>
@@ -204,34 +255,38 @@ auto Polynomial<Hamiltonian>::hamiltonian() const noexcept
 template <class Hamiltonian>
 auto Polynomial<Hamiltonian>::operator()(bits512 const& spin,
                                          complex_type   coeff)
-    -> QuantumState const&
+    -> v2::QuantumState const&
 {
     TCM_CHECK(std::isfinite(coeff.real()) && std::isfinite(coeff.imag()),
               std::runtime_error,
               fmt::format("invalid coefficient {} + {}j; expected a finite "
                           "(i.e. either normal, subnormal or zero)",
                           coeff.real(), coeff.imag()));
+    _old.unfreeze();
+    _current.unfreeze();
     // `|_old⟩ := - coeff * root|spin⟩`
     _old.clear();
-    _old.emplace(spin, -coeff * _roots[0]);
+    _old += {spin, -coeff * _roots[0]};
     // `|_old⟩ += coeff * H|spin⟩`
     apply_hamiltonian(coeff, spin, _old);
     return kernel<1>();
 }
 
 template <class Hamiltonian>
-auto Polynomial<Hamiltonian>::operator()(QuantumState const& state)
-    -> QuantumState const&
+auto Polynomial<Hamiltonian>::operator()(v2::QuantumState const& state)
+    -> v2::QuantumState const&
 {
+    _old.unfreeze();
+    _current.unfreeze();
     if (std::addressof(state) == std::addressof(_old)) { return kernel<0>(); }
     iteration(_roots[0], /*current=*/_old, /*old=*/state);
     return kernel<1>();
 }
 
 template <class Hamiltonian>
-auto Polynomial<Hamiltonian>::apply_hamiltonian(complex_type   coeff,
-                                                bits512 const& spin,
-                                                QuantumState&  state) const
+auto Polynomial<Hamiltonian>::apply_hamiltonian(complex_type      coeff,
+                                                bits512 const&    spin,
+                                                v2::QuantumState& state) const
     -> void
 {
     (*_hamiltonian)(spin, [coeff, &state](auto const& x, auto const c) {
@@ -240,45 +295,31 @@ auto Polynomial<Hamiltonian>::apply_hamiltonian(complex_type   coeff,
 }
 
 template <class Hamiltonian>
-auto Polynomial<Hamiltonian>::iteration(complex_type        root,
-                                        QuantumState&       current,
-                                        QuantumState const& old) const -> void
+auto Polynomial<Hamiltonian>::iteration(complex_type      root,
+                                        v2::QuantumState& current,
+                                        v2::QuantumState& old) const -> void
 {
+    constexpr auto chunk_size = 256UL;
     TCM_ASSERT(current.empty(), "precondition violated");
-    if (_normalising) {
-        auto norm = real_type{0};
-        // Performs `|current⟩ := (H - root)|old⟩ / ‖old‖₂` in two steps:
-        // 1) `|current⟩ := - root|old⟩`
-        for (auto const& item : old) {
-            current.emplace(item.first, -root * item.second);
-            norm += std::norm(item.second);
+    auto scale = real_type{1};
+    old.freeze();
+    if (_normalising) { scale = real_type{1} / std::sqrt(old.norm()); }
+    // Performs `|current⟩ := (H - root)|old⟩` in two steps:
+    // 1) `|current⟩ := - root|old⟩ / ‖old‖₂`
+    // 2) `|current⟩ += H |old⟩ / ‖old‖₂`
+    auto const fn = [this, &current, root, scale](auto first, auto last) {
+        for (; first != last; ++first) {
+            current += {first->first, -scale * root * first->second};
+            apply_hamiltonian(first->second * scale, first->first, current);
         }
-        // `|current⟩ := |current⟩ / ‖old‖₂`
-        auto const scale = real_type{1} / std::sqrt(norm);
-        for (auto& item : current) {
-            item.second *= scale;
-        }
-        // 2) `|current⟩ += H |old⟩ / ‖old‖₂`
-        for (auto const& item : old) {
-            apply_hamiltonian(item.second * scale, item.first, current);
-        }
-    }
-    else {
-        // Performs `|current⟩ := (H - root)|old⟩` in two steps:
-        // 1) `|current⟩ := - root|old⟩`
-        for (auto const& item : old) {
-            current.emplace(item.first, -root * item.second);
-        }
-        // 2) `|current⟩ += H |old⟩`
-        for (auto const& item : old) {
-            apply_hamiltonian(item.second, item.first, current);
-        }
-    }
+    };
+    old.parallel_for(fn, chunk_size, _num_threads);
+    old.unfreeze();
 }
 
 template <class Hamiltonian>
 template <size_t Offset>
-auto Polynomial<Hamiltonian>::kernel() -> QuantumState const&
+auto Polynomial<Hamiltonian>::kernel() -> v2::QuantumState const&
 {
     using std::swap;
     for (auto i = Offset; i < _roots.size(); ++i) {
@@ -289,6 +330,7 @@ auto Polynomial<Hamiltonian>::kernel() -> QuantumState const&
         swap(_old, _current);
         _current.clear();
     }
+    _old.freeze();
     return _old;
 }
 // }}}
