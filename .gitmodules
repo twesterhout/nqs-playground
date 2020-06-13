@@ -34,3 +34,6 @@
 [submodule "external/ThreadPool"]
 	path = external/ThreadPool
 	url = https://github.com/progschj/ThreadPool
+[submodule "external/libcuckoo"]
+	path = external/libcuckoo
+	url = https://github.com/efficient/libcuckoo
