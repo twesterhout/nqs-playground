@@ -398,22 +398,45 @@ TCM_EXPORT auto bfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
 {
     __m128i x0, x1, x2, x3;
     __m128i m0, m1, m2, m3;
-    x0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x));
-    x1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 1);
-    x2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 2);
-    x3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 3);
+    x0 = _mm_load_si128(reinterpret_cast<__m128i const*>(x));
+    x1 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 1);
+    x2 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 2);
+    x3 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 3);
     for (auto i = 0; i < 6; ++i) {
-        m0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]));
-        m1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
-        m2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
-        m3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
+        m0 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]));
+        m1 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
+        m2 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
+        m3 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
         bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
                          _mm_cvtsi32_si128(1 << i));
     }
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x), x0);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
+    _mm_store_si128(reinterpret_cast<__m128i*>(x), x0);
+    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
+    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
+    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
+}
+
+TCM_EXPORT auto bfly_simd(uint64_t const x, uint64_t out[8],
+                          uint64_t const (*masks)[8]) noexcept -> void
+{
+    __m128i x0, x1, x2, x3;
+    __m128i m0, m1, m2, m3;
+    x0 = _mm_set1_epi64x(static_cast<int64_t>(x));
+    x1 = x0;
+    x2 = x0;
+    x3 = x0;
+    for (auto i = 0; i < 6; ++i) {
+        m0 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]));
+        m1 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
+        m2 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
+        m3 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
+        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
+                         _mm_cvtsi32_si128(1 << i));
+    }
+    _mm_store_si128(reinterpret_cast<__m128i*>(out), x0);
+    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 1, x1);
+    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 2, x2);
+    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 3, x3);
 }
 
 TCM_EXPORT auto ibfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
@@ -446,6 +469,16 @@ TCM_EXPORT auto bfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void
     if (cpuid.avx()) { bfly_avx(x, masks); }
     else {
         bfly_sse2(x, masks);
+    }
+}
+
+TCM_EXPORT auto bfly(uint64_t const x, uint64_t out[8],
+                     uint64_t const (*masks)[8]) noexcept -> void
+{
+    auto& cpuid = caffe2::GetCpuId();
+    if (cpuid.avx()) { bfly_avx(x, out, masks); }
+    else {
+        bfly_sse2(x, out, masks);
     }
 }
 
