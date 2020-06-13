@@ -86,6 +86,8 @@ class TCM_IMPORT ProposalGenerator {
 
   private:
     auto generate(bits512 const& src, std::vector<bits512>& dst) const -> void;
+    auto generate(bits512 const& spin, gsl::span<bits512> out) const
+        -> unsigned;
 };
 
 // auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void;
@@ -103,8 +105,7 @@ class TCM_IMPORT ProposalGenerator {
 auto zanella_next_state_index(torch::Tensor               jump_rates,
                               torch::Tensor               jump_rates_sum,
                               std::vector<int64_t> const& counts,
-                              c10::Device                 device)
-    -> torch::Tensor;
+                              c10::Device device) -> torch::Tensor;
 
 #if 0
 auto zanella_jump_rates(torch::Tensor               current_log_prob,

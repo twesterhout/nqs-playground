@@ -273,6 +273,25 @@ ProposalGenerator::ProposalGenerator(std::shared_ptr<BasisBase const> basis,
               "basis must not be nullptr");
 }
 
+namespace {
+template <class T>
+TCM_NOINLINE auto compress(gsl::span<T> xs, gsl::span<int64_t const> counts,
+                           unsigned const block_size) -> int64_t
+{
+    if (counts.empty()) { return 0; }
+    auto dest = xs.data() + counts[0];
+    auto src  = xs.data() + block_size;
+    for (auto i = 1U; i < counts.size(); ++i) {
+        auto const n = static_cast<uint64_t>(counts[i]);
+        std::memmove(dest, src, sizeof(T) * n);
+        dest += n;
+        src += block_size;
+    }
+    return dest - xs.data();
+}
+} // namespace
+
+#if 0
 TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     -> std::tuple<torch::Tensor, std::vector<int64_t>>
 {
@@ -281,7 +300,8 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     auto const batch_size = x.size(0);
     if (device.type() != torch::DeviceType::CPU) {
         pin_memory = true;
-        x          = x.to(x.options().device(torch::DeviceType::CPU), /*non_blocking=*/true);
+        x          = x.to(x.options().device(torch::DeviceType::CPU),
+                 /*non_blocking=*/true);
     }
     TCM_CHECK(_basis->hamming_weight().has_value(), std::runtime_error,
               "ProposalGenerator currently only supports bases with fixed "
@@ -313,6 +333,71 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
         y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
     }
     return {std::move(y), std::move(counts)};
+}
+#else
+TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
+    -> std::tuple<torch::Tensor, std::vector<int64_t>>
+{
+    auto       pin_memory = false;
+    auto const device     = x.device();
+    auto const batch_size = x.size(0);
+    if (device.type() != torch::DeviceType::CPU) {
+        pin_memory = true;
+        x          = x.to(x.options().device(torch::DeviceType::CPU),
+                 /*non_blocking=*/true);
+    }
+    TCM_CHECK(_basis->hamming_weight().has_value(), std::runtime_error,
+              "ProposalGenerator currently only supports bases with fixed "
+              "magnetisation");
+    auto const max_states =
+        *_basis->hamming_weight()
+        * (_basis->number_spins() - *_basis->hamming_weight());
+    auto y = torch::empty(
+        std::initializer_list<int64_t>{batch_size * max_states, 8L},
+        torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory));
+    std::vector<int64_t> counts(static_cast<size_t>(batch_size));
+
+    auto const x_info = obtain_tensor_info<bits512 const>(x, "x");
+    auto const y_info = obtain_tensor_info<bits512, false>(y);
+
+#    pragma omp parallel for
+    for (auto i = 0L; i < x_info.size(); ++i) {
+        counts[static_cast<size_t>(i)] =
+            generate(x_info[i], gsl::span<bits512>{y_info.data + i * max_states,
+                                                   max_states});
+    }
+    auto const size = compress(
+        gsl::span<bits512>{y_info.data, static_cast<size_t>(y_info.size())},
+        counts, max_states);
+
+    y = torch::narrow(y, /*dim=*/0, /*start=*/0, /*length=*/size);
+    if (device.type() != torch::DeviceType::CPU) {
+        y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
+    }
+    return {std::move(y), std::move(counts)};
+}
+#endif
+
+TCM_EXPORT auto ProposalGenerator::generate(bits512 const&     spin,
+                                            gsl::span<bits512> out) const
+    -> unsigned
+{
+    TCM_ASSERT(_basis->number_spins() > 0, "");
+    auto count = 0U;
+
+    for (auto i = 0U; i < _basis->number_spins() - 1; ++i) {
+        for (auto j = i + 1U; j < _basis->number_spins(); ++j) {
+            if (are_not_aligned(spin, i, j)) {
+                auto const [repr, _, norm] =
+                    _basis->full_info(flipped(spin, i, j));
+                if (norm > 0 && repr != spin) { out[count++] = repr; }
+            }
+        }
+    }
+
+    std::sort(out.data(), out.data() + count);
+    std::unique(out.data(), out.data() + count);
+    return count;
 }
 
 TCM_EXPORT auto ProposalGenerator::generate(bits512 const&        spin,
@@ -543,10 +628,10 @@ auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
 TCM_EXPORT auto zanella_next_state_index(torch::Tensor jump_rates,
                                          torch::Tensor jump_rates_sum,
                                          std::vector<int64_t> const& counts,
-                                         c10::Device const device)
+                                         c10::Device const           device)
     -> torch::Tensor
 {
-    using scalar_t    = float;
+    using scalar_t = float;
     TCM_CHECK(jump_rates.device().is_cpu(), std::invalid_argument,
               "jump_rates must reside on the CPU");
     TCM_CHECK(jump_rates_sum.device().is_cpu(), std::invalid_argument,
