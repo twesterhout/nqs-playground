@@ -324,8 +324,11 @@ auto BasisCache::index(uint64_t const x, unsigned const number_spins) const
 // BasisBase {{{
 TCM_EXPORT
 BasisBase::BasisBase(unsigned const                number_spins,
-                     std::optional<unsigned> const hamming_weight)
-    : _number_spins{number_spins}, _hamming_weight{hamming_weight}
+                     std::optional<unsigned> const hamming_weight,
+                     bool const                    has_symmetries)
+    : _number_spins{number_spins}
+    , _hamming_weight{hamming_weight}
+    , _has_symmetries{has_symmetries}
 {
     TCM_CHECK(
         0 < _number_spins, std::invalid_argument,
@@ -354,7 +357,7 @@ SmallSpinBasis::SmallSpinBasis(
     std::vector<v2::Symmetry<64>> symmetries, unsigned number_spins,
     std::optional<unsigned>             hamming_weight,
     std::unique_ptr<detail::BasisCache> _unsafe_cache)
-    : BasisBase{number_spins, hamming_weight}
+    : BasisBase{number_spins, hamming_weight, !symmetries.empty()}
     , _symmetries{std::move(symmetries)}
     , _cache{std::move(_unsafe_cache)}
 {
@@ -379,15 +382,21 @@ TCM_EXPORT SmallSpinBasis::~SmallSpinBasis() = default;
 TCM_EXPORT auto SmallSpinBasis::full_info(uint64_t const x) const
     -> std::tuple<StateT, std::complex<double>, double>
 {
-    // auto r1 = ::TCM_NAMESPACE::full_info(_symmetries, x);
-    auto r2 = representative(_alternative._chunks, _alternative._rest, x);
-    // TCM_CHECK(std::get<0>(r1) == std::get<0>(r2), std::runtime_error, "");
-    // TCM_CHECK(std::get<2>(r1) == std::get<1>(r2), std::runtime_error,
-    //           fmt::format("{} != {}", std::get<2>(r1), std::get<1>(r2)));
-    auto const eigenvalue =
-        _symmetries[static_cast<uint64_t>(std::get<2>(r2))].eigenvalue();
-    // TCM_CHECK(std::get<1>(r1) == eigenvalue, std::runtime_error, "");
-    return {std::get<0>(r2), eigenvalue, std::get<1>(r2)};
+#if 0
+    return ::TCM_NAMESPACE::full_info(_symmetries, x);
+#else
+    if (has_symmetries()) {
+        auto r2 = representative(_alternative._chunks, _alternative._rest, x);
+        // TCM_CHECK(std::get<0>(r1) == std::get<0>(r2), std::runtime_error, "");
+        // TCM_CHECK(std::get<2>(r1) == std::get<1>(r2), std::runtime_error,
+        //           fmt::format("{} != {}", std::get<2>(r1), std::get<1>(r2)));
+        auto const eigenvalue =
+            _symmetries[static_cast<uint64_t>(std::get<2>(r2))].eigenvalue();
+        // TCM_CHECK(std::get<1>(r1) == eigenvalue, std::runtime_error, "");
+        return {std::get<0>(r2), eigenvalue, std::get<1>(r2)};
+    }
+    return {x, 1.0, 1.0};
+#endif
 }
 
 TCM_EXPORT auto SmallSpinBasis::full_info(bits512 const& x) const
@@ -472,7 +481,7 @@ TCM_EXPORT auto SmallSpinBasis::_from_internal_state(_PickleStateT const& state)
 TCM_EXPORT BigSpinBasis::BigSpinBasis(std::vector<v2::Symmetry<512>> symmetries,
                                       unsigned                number_spins,
                                       std::optional<unsigned> hamming_weight)
-    : BasisBase{number_spins, hamming_weight}
+    : BasisBase{number_spins, hamming_weight, !symmetries.empty()}
     , _symmetries{std::move(symmetries)}
 {
     TCM_CHECK(_number_spins <= 512, std::invalid_argument,

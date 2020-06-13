@@ -156,7 +156,6 @@ TCM_EXPORT auto representative(gsl::span<Symmetry8x64 const>     symmetries,
                                uint64_t const                    x) noexcept
     -> std::tuple<uint64_t, double, ptrdiff_t>
 {
-    TCM_ASSERT(!symmetries.empty(), "");
     alignas(32) uint64_t buffer[8];
 
     auto repr = x;

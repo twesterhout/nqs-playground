@@ -41,9 +41,11 @@ class TCM_EXPORT BasisBase : public std::enable_shared_from_this<BasisBase> {
   protected:
     unsigned                _number_spins;
     std::optional<unsigned> _hamming_weight;
+    bool                    _has_symmetries;
 
   public:
-    BasisBase(unsigned number_spins, std::optional<unsigned> hamming_weight);
+    BasisBase(unsigned number_spins, std::optional<unsigned> hamming_weight,
+              bool has_symmetries);
     BasisBase(BasisBase const&)     = delete;
     BasisBase(BasisBase&&) noexcept = delete;
     auto operator=(BasisBase const&) -> BasisBase& = delete;
@@ -51,6 +53,7 @@ class TCM_EXPORT BasisBase : public std::enable_shared_from_this<BasisBase> {
 
     constexpr auto number_spins() const noexcept -> unsigned;
     constexpr auto hamming_weight() const noexcept -> std::optional<unsigned>;
+    constexpr auto has_symmetries() const noexcept -> bool;
 
     virtual auto full_info(bits512 const& x) const
         -> std::tuple<bits512, std::complex<double>, double> = 0;
@@ -68,6 +71,11 @@ constexpr auto BasisBase::hamming_weight() const noexcept
     -> std::optional<unsigned>
 {
     return _hamming_weight;
+}
+
+constexpr auto BasisBase::has_symmetries() const noexcept -> bool
+{
+    return _has_symmetries;
 }
 // }}}
 
