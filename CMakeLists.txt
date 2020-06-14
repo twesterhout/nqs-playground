@@ -179,6 +179,8 @@ if(NOT TARGET flat_hash_map)
 endif()
 
 if(NOT TARGET libcuckoo)
+    execute_process(COMMAND git submodule update --init -- external/libcuckoo
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
 
