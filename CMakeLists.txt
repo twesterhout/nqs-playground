@@ -179,15 +179,9 @@ if(NOT TARGET flat_hash_map)
 endif()
 
 if(NOT TARGET libcuckoo)
-    execute_process(COMMAND git submodule update --init -- external/libcuckoo
+    execute_process(COMMAND git submodule update --init -- external/robin-hood-hashing
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    set(THREADS_PREFER_PTHREAD_FLAG ON)
-    find_package(Threads REQUIRED)
-
-    add_library(libcuckoo INTERFACE)
-    target_include_directories(libcuckoo
-        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/libcuckoo)
-    target_link_libraries(libcuckoo INTERFACE Threads::Threads)
+    add_subdirectory(external/robin-hood-hashing)
 endif()
 
 # vectorclass library
@@ -253,7 +247,7 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               fmt::fmt
               gsl::gsl-lite
               flat_hash_map
-              libcuckoo
+              robin_hood::robin_hood
               Boost::boost
               SG14
               OpenMP::OpenMP_CXX

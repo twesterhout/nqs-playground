@@ -78,36 +78,36 @@ TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
 #else
     py::class_<v2::QuantumState>(m, "ExplicitState", DOC(R"EOF(
             Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a Dict[int, complex].
-        )EOF"))
-        .def(
-            "__contains__",
-            [](v2::QuantumState const& self, bits512 const& spin) {
-                auto const& table = self.unsafe_locked_table();
-                return table.count(spin) > 0;
-            },
-            py::arg{"spin"})
-        .def(
-            "__getitem__",
-            [](v2::QuantumState const& self, bits512 const& spin) {
-                auto const& table = self.unsafe_locked_table();
-                auto        i     = table.find(spin);
-                if (i != table.cend()) { return i->second; }
-                throw py::key_error{};
-            },
-            py::arg{"spin"})
-        .def(
-            "__len__",
-            [](v2::QuantumState const& self) {
-                return self.unsafe_locked_table().size();
-            },
-            R"EOF(Returns number of elements in |ψ⟩.)EOF")
-        .def(
-            "__iter__",
-            [](v2::QuantumState const& self) {
-                auto const& table = self.unsafe_locked_table();
-                return py::make_iterator(table.cbegin(), table.cend());
-            },
-            py::keep_alive<0, 1>());
+        )EOF"));
+    // .def(
+    //     "__contains__",
+    //     [](v2::QuantumState const& self, bits512 const& spin) {
+    //         auto const& table = self.unsafe_locked_table();
+    //         return table.count(spin) > 0;
+    //     },
+    //     py::arg{"spin"})
+    // .def(
+    //     "__getitem__",
+    //     [](v2::QuantumState const& self, bits512 const& spin) {
+    //         auto const& table = self.unsafe_locked_table();
+    //         auto        i     = table.find(spin);
+    //         if (i != table.cend()) { return i->second; }
+    //         throw py::key_error{};
+    //     },
+    //     py::arg{"spin"})
+    // .def(
+    //     "__len__",
+    //     [](v2::QuantumState const& self) {
+    //         return self.unsafe_locked_table().size();
+    //     },
+    //     R"EOF(Returns number of elements in |ψ⟩.)EOF")
+    // .def(
+    //     "__iter__",
+    //     [](v2::QuantumState const& self) {
+    //         auto const& table = self.unsafe_locked_table();
+    //         return py::make_iterator(table.cbegin(), table.cend());
+    //     },
+    //     py::keep_alive<0, 1>());
 #endif
 
     make_polynomial<Heisenberg>(m, "Polynomial");

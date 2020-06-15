@@ -32,7 +32,7 @@
 #include "errors.hpp"
 #include "parallel.hpp"
 
-#include <libcuckoo/cuckoohash_map.hh>
+#include <robin_hood.h>
 
 #include <cmath>
 #include <memory>
@@ -43,14 +43,26 @@ TCM_NAMESPACE_BEGIN
 namespace v2 {
 class QuantumState {
   private:
-    using table_type = libcuckoo::cuckoohash_map<bits512, std::complex<double>>;
+    using table_type =
+        robin_hood::unordered_flat_map<bits512, std::complex<double>>;
 
-    table_type                              _table;
-    std::optional<table_type::locked_table> _locked_table;
+    struct alignas(64) Part {
+        table_type _table;
+        std::mutex _mutex;
+
+        Part()            = default;
+        Part(Part const&) = delete;
+        Part(Part&&) noexcept;
+        auto operator=(Part const&) -> Part& = delete;
+        auto operator=(Part &&) -> Part& = delete;
+    };
+
+    std::vector<Part> _parts;
+    unsigned          _mask;
 
   public:
     QuantumState();
-    QuantumState(QuantumState const&) = default;
+    QuantumState(QuantumState const&) = delete;
     QuantumState(QuantumState&&)      = default;
     QuantumState& operator=(QuantumState const&) = delete;
     QuantumState& operator=(QuantumState&&) = delete;
@@ -62,60 +74,46 @@ class QuantumState {
         -> QuantumState&;
 
     auto norm() const -> double;
-    auto empty() const noexcept -> bool { return _table.empty(); }
-    auto freeze() -> void;
-    auto unfreeze() -> void;
+    auto empty() const noexcept -> bool;
     auto clear() -> void;
 
-    auto unsafe_locked_table() const -> table_type::locked_table const&;
-
     template <class Function>
-    auto parallel_for(Function fn, uint64_t chunk_size, int num_threads) const
-        -> void;
+    auto parallel_for(Function fn, int num_threads) const -> void;
 
-    template <class Function> auto for_each(Function&& fn) const -> void;
+    template <class Function> auto for_each(Function fn) const -> void;
 
     friend auto swap(QuantumState& x, QuantumState& y) -> void;
 };
 
 template <class Function>
-auto QuantumState::parallel_for(Function fn, uint64_t const chunk_size,
-                                int num_threads) const -> void
+auto QuantumState::parallel_for(Function fn, int num_threads) const -> void
 {
-    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
-              "table is not frozen");
-    if (_locked_table->empty()) { return; }
     if (num_threads <= 0) { num_threads = omp_get_max_threads(); }
 
     omp_task_handler task_handler;
-#pragma omp parallel default(none) num_threads(num_threads)                    \
-    firstprivate(fn, chunk_size) shared(task_handler)
+#pragma omp parallel default(none) num_threads(num_threads) firstprivate(fn)   \
+    shared(task_handler)
     {
 #pragma omp single nowait
         {
-            auto const count = _locked_table->size() / chunk_size;
-            auto       first = _locked_table->cbegin();
-            for (auto i = uint64_t{0}; i < count; ++i) {
-                auto next = first;
-                for (auto _j = uint64_t{0}; _j < chunk_size; ++_j) {
-                    ++next;
+            for (auto const& part : _parts) {
+                if (!part._table.empty()) {
+                    task_handler.submit(
+                        [fn, first = std::begin(part._table),
+                         last = std::end(part._table)]() { fn(first, last); });
                 }
-                task_handler.submit([first, next, fn]() { fn(first, next); });
-                first = next;
             }
-            fn(first, _locked_table->cend());
         }
     }
     task_handler.check_errors();
-}
+} // namespace v2
 
-template <class Function>
-auto QuantumState::for_each(Function&& fn) const -> void
+template <class Function> auto QuantumState::for_each(Function fn) const -> void
 {
-    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
-              "table is not frozen");
-    for (auto const& item : (*_locked_table)) {
-        fn(item.first, item.second);
+    for (auto const& part : _parts) {
+        for (auto const& item : part._table) {
+            fn(item.first, item.second);
+        }
     }
 }
 } // namespace v2
@@ -262,8 +260,6 @@ auto Polynomial<Hamiltonian>::operator()(bits512 const& spin,
               fmt::format("invalid coefficient {} + {}j; expected a finite "
                           "(i.e. either normal, subnormal or zero)",
                           coeff.real(), coeff.imag()));
-    _old.unfreeze();
-    _current.unfreeze();
     // `|_old⟩ := - coeff * root|spin⟩`
     _old.clear();
     _old += {spin, -coeff * _roots[0]};
@@ -276,8 +272,6 @@ template <class Hamiltonian>
 auto Polynomial<Hamiltonian>::operator()(v2::QuantumState const& state)
     -> v2::QuantumState const&
 {
-    _old.unfreeze();
-    _current.unfreeze();
     if (std::addressof(state) == std::addressof(_old)) { return kernel<0>(); }
     iteration(_roots[0], /*current=*/_old, /*old=*/state);
     return kernel<1>();
@@ -299,10 +293,8 @@ auto Polynomial<Hamiltonian>::iteration(complex_type      root,
                                         v2::QuantumState& current,
                                         v2::QuantumState& old) const -> void
 {
-    constexpr auto chunk_size = 256UL;
     TCM_ASSERT(current.empty(), "precondition violated");
     auto scale = real_type{1};
-    old.freeze();
     if (_normalising) { scale = real_type{1} / std::sqrt(old.norm()); }
     // Performs `|current⟩ := (H - root)|old⟩` in two steps:
     // 1) `|current⟩ := - root|old⟩ / ‖old‖₂`
@@ -313,8 +305,7 @@ auto Polynomial<Hamiltonian>::iteration(complex_type      root,
             apply_hamiltonian(first->second * scale, first->first, current);
         }
     };
-    old.parallel_for(fn, chunk_size, _num_threads);
-    old.unfreeze();
+    old.parallel_for(fn, _num_threads);
 }
 
 template <class Hamiltonian>
@@ -330,7 +321,6 @@ auto Polynomial<Hamiltonian>::kernel() -> v2::QuantumState const&
         swap(_old, _current);
         _current.clear();
     }
-    _old.freeze();
     return _old;
 }
 // }}}

@@ -31,64 +31,64 @@
 TCM_NAMESPACE_BEGIN
 
 namespace v2 {
-TCM_EXPORT QuantumState::QuantumState() = default;
+
+TCM_EXPORT QuantumState::Part::Part(Part&&) noexcept : _table{}, _mutex{}
+{
+    detail::assert_fail("false", __FILE__, __LINE__, TCM_CURRENT_FUNCTION,
+                        "Part(Part&&) should never be called");
+}
+
+TCM_EXPORT QuantumState::QuantumState() : _parts{}, _mask{16 - 1}
+{
+    _parts.reserve(16);
+    for (auto i = 0; i < 16; ++i) {
+        _parts.emplace_back();
+    }
+}
 
 TCM_EXPORT auto QuantumState::operator+=(
     std::pair<bits512 const, std::complex<double>> const& item) -> QuantumState&
 {
-    TCM_CHECK(!_locked_table.has_value(), std::runtime_error,
-              "table is frozen");
-    _table.upsert(
-        item.first,
-        [c = item.second](std::complex<double>& value) { value += c; },
-        item.second);
+    auto const index = item.first.words[0] & _mask;
+    auto&      part  = _parts.at(index);
+    {
+        std::lock_guard<std::mutex> guard{part._mutex};
+        part._table[item.first] += item.second;
+    }
     return *this;
 }
 
 TCM_EXPORT auto QuantumState::clear() -> void
 {
-    TCM_CHECK(!_locked_table.has_value(), std::runtime_error,
-              "table is frozen");
-    _table.clear();
-}
-
-TCM_EXPORT auto QuantumState::freeze() -> void
-{
-    if (!_locked_table.has_value()) {
-        _locked_table.emplace(_table.lock_table());
+    for (auto& part : _parts) {
+        part._table.clear();
     }
 }
 
-TCM_EXPORT auto QuantumState::unfreeze() -> void
+TCM_EXPORT auto QuantumState::empty() const noexcept -> bool
 {
-    if (_locked_table.has_value()) { _locked_table.reset(); }
+    for (auto const& part : _parts) {
+        if (!part._table.empty()) { return false; }
+    }
+    return true;
 }
 
 TCM_EXPORT auto QuantumState::norm() const -> double
 {
-    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
-              "table is not frozen");
     auto norm = 0.0;
-    for (auto const& item : unsafe_locked_table()) {
-        norm += std::norm(item.second);
+    for (auto const& part : _parts) {
+        for (auto const& item : part._table) {
+            norm += std::norm(item.second);
+        }
     }
     return norm;
 }
 
-TCM_EXPORT auto QuantumState::unsafe_locked_table() const
-    -> table_type::locked_table const&
-{
-    TCM_CHECK(_locked_table.has_value(), std::runtime_error,
-              "table is not frozen");
-    return *_locked_table;
-}
-
 TCM_EXPORT auto swap(QuantumState& x, QuantumState& y) -> void
 {
-    x._table.swap(y._table);
-    x._locked_table.swap(y._locked_table);
+    using std::swap;
+    swap(x._parts, y._parts);
 }
-
 } // namespace v2
 
 TCM_NAMESPACE_END
