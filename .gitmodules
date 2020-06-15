@@ -37,3 +37,6 @@
 [submodule "external/libcuckoo"]
 	path = external/libcuckoo
 	url = https://github.com/efficient/libcuckoo
+[submodule "external/robin-hood-hashing"]
+	path = external/robin-hood-hashing
+	url = https://github.com/martinus/robin-hood-hashing
