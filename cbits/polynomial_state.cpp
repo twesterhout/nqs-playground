@@ -64,7 +64,7 @@ TCM_EXPORT auto diag(torch::Tensor spins, Heisenberg const& hamiltonian)
                   /*copy=*/false);
 }
 
-#if 1
+#if 0
 TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
                       v2::ForwardT psi, uint32_t const batch_size)
     -> torch::Tensor
@@ -102,6 +102,48 @@ TCM_IMPORT auto apply(torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
     }
     acc.finalize();
     //    });
+
+    if (!device.is_cpu()) {
+        buffer =
+            buffer.to(buffer.options().device(device), /*non_blocking=*/true);
+    }
+    return buffer;
+}
+#else
+TCM_IMPORT auto apply(torch::Tensor spins, Polynomial& polynomial,
+                      v2::ForwardT psi, uint32_t const batch_size)
+    -> torch::Tensor
+{
+    auto const device = spins.device();
+    if (!device.is_cpu()) { spins = spins.cpu(); }
+    auto const spins_info = obtain_tensor_info<bits512 const>(spins);
+
+    auto buffer =
+        torch::empty(std::initializer_list<int64_t>{spins_info.size(), 2L},
+                     torch::TensorOptions{}.dtype(torch::kFloat32));
+
+    torch::NoGradGuard no_grad;
+    auto               out = gsl::span<std::complex<float>>{
+        static_cast<std::complex<float>*>(buffer.data_ptr()),
+        static_cast<size_t>(spins_info.size())};
+
+    detail::Accumulator acc{
+        std::move(psi), out, batch_size, device,
+        [](auto&& f) { return async(std::forward<decltype(f)>(f)); }};
+
+    aligned_vector<bits512>      temp_spins(polynomial.max_states());
+    aligned_vector<complex_type> temp_coeffs(polynomial.max_states());
+
+    for (auto i = int64_t{0}; i < spins_info.size(); ++i) {
+        auto const written =
+            polynomial(spins_info[i], 1.0, temp_spins, temp_coeffs);
+        acc([&temp_spins, &temp_coeffs, written](auto&& f) {
+            for (auto j = uint64_t{0}; j < written; ++j) {
+                f(temp_spins.at(j), temp_coeffs.at(j));
+            }
+        });
+    }
+    acc.finalize();
 
     if (!device.is_cpu()) {
         buffer =

@@ -1,6 +1,6 @@
 #include "bind_polynomial.hpp"
 #include "../heisenberg.hpp"
-#include "../polynomial.hpp"
+#include "../simple_polynomial.hpp"
 #include "../trim.hpp"
 #include "pybind11_helpers.hpp"
 
@@ -15,9 +15,10 @@ namespace py = pybind11;
 
 TCM_NAMESPACE_BEGIN
 
-template <class Hamiltonian>
+// template <class Hamiltonian>
 auto make_polynomial(py::module m, char const* class_name)
 {
+#if 0
     py::class_<Polynomial<Hamiltonian>,
                std::shared_ptr<Polynomial<Hamiltonian>>>(m, "Polynomial")
         .def(py::init<std::shared_ptr<Hamiltonian const>,
@@ -29,6 +30,27 @@ auto make_polynomial(py::module m, char const* class_name)
             [](Polynomial<Hamiltonian>& self, bits512 const& spin)
                 -> v2::QuantumState const& { return self(spin); },
             py::return_value_policy::reference_internal);
+#else
+    py::class_<Polynomial, std::shared_ptr<Polynomial>>(m, "Polynomial")
+        .def(py::init([](std::shared_ptr<Heisenberg const> hamiltonian,
+                         std::vector<complex_type> roots, bool normalising) {
+                 auto const max_states = static_cast<uint64_t>(std::ceil(
+                     std::pow(hamiltonian->max_states() + 1, roots.size())));
+                 return std::make_shared<Polynomial>(
+                     [f_ptr = std::move(hamiltonian)](auto&&... args) {
+                         return (*f_ptr)(std::forward<decltype(args)>(args)...);
+                     },
+                     std::move(roots), normalising, max_states);
+             }),
+             py::arg{"hamiltonian"}, py::arg{"roots"},
+             py::arg{"normalising"} = false);
+    // .def(
+    //     "__call__",
+    //     [](Polynomial<Hamiltonian>& self, bits512 const& spin)
+    //         -> v2::QuantumState const& { return self(spin); },
+    //     py::return_value_policy::reference_internal);
+
+#endif
 }
 
 TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
@@ -76,9 +98,9 @@ TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
             },
             py::keep_alive<0, 1>());
 #else
-    py::class_<v2::QuantumState>(m, "ExplicitState", DOC(R"EOF(
-            Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a Dict[int, complex].
-        )EOF"));
+    // py::class_<v2::QuantumState>(m, "ExplicitState", DOC(R"EOF(
+    //         Quantum state |ψ⟩=∑cᵢ|σᵢ⟩ backed by a Dict[int, complex].
+    //     )EOF"));
     // .def(
     //     "__contains__",
     //     [](v2::QuantumState const& self, bits512 const& spin) {
@@ -110,7 +132,7 @@ TCM_EXPORT auto bind_polynomial(PyObject* _module) -> void
     //     py::keep_alive<0, 1>());
 #endif
 
-    make_polynomial<Heisenberg>(m, "Polynomial");
+    make_polynomial(m, "Polynomial");
 
 #undef DOC
 }

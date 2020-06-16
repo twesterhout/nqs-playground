@@ -28,11 +28,11 @@
 
 #pragma once
 
-#include "config.hpp"
+#include "bits512.hpp"
 // #include "errors.hpp"
 #include <boost/align/aligned_allocator.hpp>
 // #include <boost/align/is_aligned.hpp>
-// #include <gsl/gsl-lite.hpp>
+#include <gsl/gsl-lite.hpp>
 #include <SG14/inplace_function.h>
 // #include <c10/core/CPUAllocator.h>
 #include <torch/types.h>
@@ -155,6 +155,12 @@ using aligned_vector =
 //     stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
 //                              /*capacity=*/32, /*alignment=*/8>;
 // static_assert(sizeof(RawForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
+
+using OperatorT =
+    stdext::inplace_function<auto(bits512 const&, complex_type coeff,
+                                  gsl::span<bits512>, gsl::span<complex_type>)
+                                 ->uint64_t,
+                             /*capacity=*/32, /*alignment=*/8>;
 
 namespace v2 {
 using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,
