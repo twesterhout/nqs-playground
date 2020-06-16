@@ -191,6 +191,29 @@ auto Heisenberg::_to_sparse() const -> std::tuple<torch::Tensor, torch::Tensor>
     return std::make_tuple(std::move(values), std::move(indices));
 }
 
+TCM_EXPORT auto Heisenberg::operator()(bits512 const& spin, complex_type coeff,
+                                       gsl::span<bits512>      out_spins,
+                                       gsl::span<complex_type> out_coeffs) const
+    -> uint64_t
+{
+    TCM_CHECK(out_spins.size() == out_coeffs.size(), std::invalid_argument,
+              fmt::format("output buffers have different lengths: {} != {}",
+                          out_spins.size(), out_coeffs.size()));
+    auto i        = uint64_t{0};
+    auto callback = [spins = out_spins.data(), coeffs = out_coeffs.data(),
+                     scale = coeff, buffer_size = out_spins.size(),
+                     &i](auto const& s, auto const& c) {
+        TCM_CHECK(i < buffer_size, std::runtime_error,
+                  fmt::format("output buffer has insufficient length: {}",
+                              buffer_size));
+        spins[i]  = s;
+        coeffs[i] = scale * c;
+        ++i;
+    };
+    operator()(spin, callback);
+    return i;
+}
+
 template TCM_EXPORT auto Heisenberg::_to_sparse<double>() const
     -> std::tuple<torch::Tensor, torch::Tensor>;
 

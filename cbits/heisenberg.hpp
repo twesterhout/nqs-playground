@@ -90,6 +90,8 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         return _basis;
     }
 
+    auto max_states() const noexcept -> uint64_t { return _edges.size() + 1; }
+
   private:
     template <class Basis, class StateT, class Callback>
     auto call_impl(StateT const& spin, Callback&& callback) const -> void
@@ -161,6 +163,10 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         }
         return coeff;
     }
+
+    auto operator()(bits512 const& spin, complex_type coeff,
+                    gsl::span<bits512>      out_spins,
+                    gsl::span<complex_type> out_coeffs) const -> uint64_t;
 
     template <class T, class = std::enable_if_t<
                            std::is_floating_point_v<T> || is_complex_v<T>>>

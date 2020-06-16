@@ -93,7 +93,7 @@ struct TaskBuilder {
     auto finish() -> void
     {
         _next_task.complete = true;
-        if (empty()) { _next_task.counts.push_back(0); }
+        // if (empty()) { _next_task.counts.push_back(0); }
     }
 
     auto submit(bool prepare_next = true) -> Task;
@@ -208,21 +208,21 @@ auto Accumulator::drain_if_needed() -> void
     if (_futures.size() == hard_max) { drain(hard_max - soft_max); }
 }
 
-template <class Iterator>
-auto Accumulator::operator()(Iterator first, Iterator last) -> void
-{
-    TCM_ASSERT(!_builder.full(), "precondition violated");
-    _builder.start();
-    for (; first != last; ++first) {
-        _builder.add(first->first, first->second);
-        if (_builder.full()) {
-            drain_if_needed();
-            _futures.push(_async(_builder.submit()));
-        }
-    }
-    _builder.finish();
-    TCM_ASSERT(!_builder.full(), "postcondition violated");
-}
+// template <class Iterator>
+// auto Accumulator::operator()(Iterator first, Iterator last) -> void
+// {
+//     TCM_ASSERT(!_builder.full(), "precondition violated");
+//     _builder.start();
+//     for (; first != last; ++first) {
+//         _builder.add(first->first, first->second);
+//         if (_builder.full()) {
+//             drain_if_needed();
+//             _futures.push(_async(_builder.submit()));
+//         }
+//     }
+//     _builder.finish();
+//     TCM_ASSERT(!_builder.full(), "postcondition violated");
+// }
 
 template <class ForEach>
 auto Accumulator::operator()(ForEach&& for_each) -> void
@@ -230,13 +230,17 @@ auto Accumulator::operator()(ForEach&& for_each) -> void
     TCM_ASSERT(!_builder.full(), "precondition violated");
     _builder.start();
     std::forward<ForEach>(for_each)([this](auto const& spin, auto const coeff) {
-        _builder.add(spin, coeff);
         if (_builder.full()) {
             drain_if_needed();
             _futures.push(_async(_builder.submit()));
         }
+        _builder.add(spin, coeff);
     });
     _builder.finish();
+    if (_builder.full()) {
+        drain_if_needed();
+        _futures.push(_async(_builder.submit()));
+    }
     TCM_ASSERT(!_builder.full(), "postcondition violated");
 }
 
