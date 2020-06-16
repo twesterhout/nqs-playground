@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "bits512.hpp"
 #include "errors.hpp"
 #include <gsl/gsl-lite.hpp>
 #include <torch/types.h>
@@ -94,16 +95,14 @@ struct TensorInfo {
     constexpr TensorInfo& operator=(TensorInfo&&) noexcept = default;
 #endif
 
-    template <class D = void,
-              class   = typename std::enable_if<
-                  std::is_same<D, D>::value && !std::is_const<T>::value>::type>
-    operator TensorInfo<T const, Dims, Index>() const noexcept
+    template <class D = T,
+              class   = typename std::enable_if<!std::is_const<D>::value>::type>
+    operator TensorInfo<D const, Dims, Index>() const noexcept
     {
         return {data, sizes, strides};
     }
 
-    template <class D = void, class = typename std::enable_if<
-                                  std::is_same<D, D>::value && Dims == 1>::type>
+    template <size_t D = Dims, class = typename std::enable_if<D == 1>::type>
     explicit operator gsl::span<T>() const
     {
         TCM_CHECK(
@@ -197,8 +196,12 @@ TCM_FORCEINLINE auto slice(TensorInfo<T> const& x, int64_t const start,
     return TensorInfo<T>{x.data + start * x.stride(), end - start, x.stride()};
 }
 
-template <class T, bool Checks = true>
+template <class T>
 auto obtain_tensor_info(torch::Tensor x, char const* name = nullptr)
     -> TensorInfo<T>;
+
+// template <class T, bool Checks = true>
+// auto obtain_tensor_info(torch::Tensor x, char const* name = nullptr)
+//     -> TensorInfo<T>;
 
 TCM_NAMESPACE_END

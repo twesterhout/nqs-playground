@@ -39,7 +39,7 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
         -Wno-c++98-c++11-compat -Wno-weak-vtables -Wno-unused
         -Wno-exit-time-destructors -Wno-documentation-unknown-command
         -Wno-float-equal -Wno-global-constructors -Wno-padded
-        )
+        -Wno-undefined-func-template)
 elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     set(TCM_WARNING_FLAGS -pedantic -W -Wall -Wextra -Wcast-align -Wcast-qual
         -Wctor-dtor-privacy -Wdisabled-optimization -Wformat=2 -Winit-self
