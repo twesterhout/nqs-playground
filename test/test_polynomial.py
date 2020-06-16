@@ -1,125 +1,135 @@
 import numpy as np
 import torch
 
-import nqs_playground
-import nqs_playground._C as _C
 from nqs_playground import *
+from nqs_playground.core import _get_device
+import nqs_playground._C as _C
 
-def test_call():
+np.random.seed(32974395)
+torch.manual_seed(20245898)
+manual_seed(3345724)
+
+
+@torch.no_grad()
+def buffers_to_explicit(spins, coeffs):
+    assert spins.dtype == torch.int64
+    assert coeffs.dtype == torch.float64
+    spins = spins[:, 0].cpu().numpy().view(np.uint64)
+    coeffs = coeffs.cpu().numpy().view(np.complex128)
+    explicit = dict()
+    for s, c in zip(spins, coeffs):
+        s = int(s)
+        if s in explicit:
+            explicit[s] += c
+        else:
+            explicit[s] = c
+    return explicit
+
+
+def test_polynomial():
     basis = SpinBasis([], 10, 5)
     basis.build()
     hamiltonian = Heisenberg([(1, i, (i + 1) % 10) for i in range(10)], basis)
+
     dense = hamiltonian.to_csr().todense()
-    dense = (dense - 10 * np.eye(dense.shape[0])) @ (dense - (5.0 + 3j) * np.eye(dense.shape[0]))
-    polynomial = _C.Polynomial(hamiltonian, [10.0, 5.0 + 3j])
-    for i in range(basis.number_states):
-        for j in range(basis.number_states):
-            x = dense[i, j]
-            _state = polynomial(int(basis.states[j]))
-            y = _state[basis.states[i]] if int(basis.states[i]) in _state else 0.0
-            assert x == y
+    roots = [10.0, 5.0 + 3j, -2.4 + 0.8j]
+    P = np.eye(dense.shape[0])
+    for r in roots:
+        P = (dense - r * np.eye(dense.shape[0])) @ P
+
+    polynomial = _C.Polynomial(hamiltonian, roots)
+    for j in range(basis.number_states):
+        explicit = buffers_to_explicit(*polynomial(int(basis.states[j]), 1.0))
+        for i in range(basis.number_states):
+            expected = P[i, j]
+            predicted = explicit.get(basis.states[i], 0.0)
+            assert np.isclose(predicted, expected)
 
 
 class SlowPolynomialState:
     def __init__(self, hamiltonian, roots, log_psi):
-        self.hamiltonian = hamiltonian
         self.basis = hamiltonian.basis
         self.basis.build()
         self.state, self.scale = self._make_state(log_psi)
-        self.roots = roots
 
+        dense = hamiltonian.to_csr().todense()
+        self.polynomial = np.eye(dense.shape[0])
+        for r in roots:
+            self.polynomial = (dense - r * np.eye(dense.shape[0])) @ self.polynomial
+
+    @torch.no_grad()
     def _make_state(self, log_psi):
-        with torch.no_grad():
-            spins = torch.from_numpy(self.basis.states.view(np.int64))
-            out = log_psi(spins)
-            scale = torch.max(out[:, 0]).item()
-            out[:, 0] -= scale
-            out = out.numpy().view(np.complex64).squeeze().astype(np.complex128)
-            out = np.exp(out)
-            return out, scale
+        device = _get_device(log_psi)
+        spins = torch.from_numpy(self.basis.states.view(np.int64)).to(device)
+        out = forward_with_batches(log_psi, spins, 4096)
+        scale = torch.max(out[:, 0]).item()
+        out[:, 0] -= scale
+        out = out.cpu().numpy().view(np.complex64).squeeze().astype(np.complex128)
+        out = np.exp(out)
+        return out, scale
 
     def _forward_one(self, x):
-        basis = self.hamiltonian.basis
-        i = basis.index(x)
-        vector = np.zeros((basis.number_states,), dtype=np.complex128)
+        if isinstance(x, torch.Tensor):
+            x = x.numpy().view(np.uint64)
+        if isinstance(x, np.ndarray):
+            x = x[0]
+        x = int(x)
+
+        i = self.basis.index(x)
+        vector = np.zeros((self.basis.number_states,), dtype=np.complex128)
         vector[i] = 1.0
-        for r in self.roots:
-            vector = self.hamiltonian(vector) - r * vector
-        return self.scale + np.log(np.dot(self.state, vector))
+        return self.scale + np.log(np.dot(self.polynomial @ vector, self.state))
 
     def __call__(self, spins):
-        if isinstance(spins, torch.Tensor):
-            assert spins.dtype == torch.int64
-            spins = spins.numpy().view(np.uint64)
-        return torch.from_numpy(
-            np.array([self._forward_one(x) for x in spins], dtype=np.complex64)
-            .view(np.float32)
-            .reshape(-1, 2)
-        )
+        device = spins.device
+        spins = spins.cpu().numpy().view(np.uint64)
+        out = np.empty(spins.shape[0], dtype=np.complex128)
+        for i in range(spins.shape[0]):
+            out[i] = self._forward_one(spins[i])
+        out = out.astype(np.complex64).view(np.float32).reshape(-1, 2)
+        return torch.from_numpy(out).to(device)
 
-def test_apply():
-    basis = SpinBasis([], 14, 7)
+
+def test_apply(device):
+    basis = SpinBasis([], 10, 5)
     basis.build()
-    hamiltonian = Heisenberg([(1, i, (i + 1) % 14) for i in range(14)], basis)
-    log_psi = torch.jit.script(torch.nn.Sequential(
-        nqs_playground.core.Unpack(14),
-        torch.nn.Linear(14, 5),
-        torch.nn.Tanh(),
-        torch.nn.Linear(5, 2)
-    ))
-    roots = [8.0, 5.0 + 3j, 1.0 -0.5j]
+    hamiltonian = Heisenberg(
+        [(1, i, (i + 1) % basis.number_spins) for i in range(basis.number_spins)], basis
+    )
+    log_psi = torch.jit.script(
+        torch.nn.Sequential(
+            Unpack(basis.number_spins),
+            torch.nn.Linear(basis.number_spins, 5),
+            torch.nn.Tanh(),
+            torch.nn.Linear(5, 2),
+        )
+    )
+    log_psi = log_psi.to(device)
+    roots = [1.0, 5.0 + 1.2j, 1.0 - 0.5j]
     spins = torch.from_numpy(basis.states.view(np.int64))
+    spins = torch.cat(
+        [spins.view(-1, 1), torch.zeros((spins.size(0), 7), dtype=torch.int64)], dim=1
+    )
+    spins = spins.to(device)
+
     expected = SlowPolynomialState(hamiltonian, roots, log_psi)(spins)
-    spins = torch.cat([spins.view(-1, 1), torch.zeros((spins.size(0), 7), dtype=torch.int64)], dim=1)
-    predicted = _C.apply(spins, _C.Polynomial(hamiltonian, roots), log_psi._c._get_method("forward"))
-    assert torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6)
-    if torch.cuda.is_available():
-        spins = spins.cuda()
-        log_psi.cuda()
-        predicted = _C.apply(spins, _C.Polynomial(hamiltonian, roots), log_psi._c._get_method("forward"))
-        predicted = predicted.cpu()
+    for batch_size in [1, 2, 3, 128, 253, 254, 255, 256]:
+        predicted = _C.apply_new(
+            spins,
+            _C.Polynomial(hamiltonian, roots),
+            log_psi._c._get_method("forward"),
+            batch_size,
+            2,
+        )
+        # if not torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6):
+        #     for i in range(spins.size(0)):
+        #         if not torch.allclose(predicted[i], expected[i], rtol=1e-4,
+        #                 atol=1e-6):
+        #             print(i, predicted[i], expected[i])
         assert torch.allclose(predicted, expected, rtol=1e-4, atol=1e-6)
 
-def _site_positions(shape):
-    L_x, L_y = shape
-    sites = np.arange(L_x * L_y, dtype=np.int32)
-    x = sites % L_x
-    y = sites // L_x
-    return sites, x, y
 
-def _make_hamiltonian(shape, basis):
-    sites, x, y = _site_positions(shape)
-    L_x, L_y = shape
-
-    j1_edges = []
-    if L_x > 1:
-        j1_edges += list(zip(sites, (x + 1) % L_x + L_x * y))
-    if L_y > 1:
-        j1_edges += list(zip(sites, x + L_x * ((y + 1) % L_y)))
-    return Heisenberg([(1, *e) for e in j1_edges], basis)
-
-
-def test_buggy_apply():
-    import pickle
-
-    basis = with_file_like("ED/with/basis_5x5.pickle", "rb", pickle.load)
-    hamiltonian = _make_hamiltonian((5, 5), basis)
-    roots = [-40.0, -15.0, 10.0, 40.0]
-
-    amplitude = torch.jit.load("SWO/5x5/6/199/amplitude.pt")
-    sign = torch.jit.load("SWO/5x5/6/199/sign.pt")
-    combined_state = combine_amplitude_and_sign(amplitude, sign, apply_log=False, out_dim=2)
-    log_ψ = combined_state._c._get_method("forward")
-
-    spins = torch.load("test_data_spins.pickle")
-    # expected = SlowPolynomialState(hamiltonian, roots, log_ψ)(spins[:100, 0])
-    # torch.save(expected, "test_data_expected.pickle")
-    expected = torch.load("test_data_expected.pickle")
-    print(expected[:10])
-    predicted = _C.apply(spins[:10], _C.Polynomial(hamiltonian, roots), log_ψ)
-    print(predicted)
-
-
-test_apply()
-# test_buggy_apply()
-
+test_polynomial()
+test_apply("cpu")
+if torch.cuda.is_available():
+    test_apply("cuda")
