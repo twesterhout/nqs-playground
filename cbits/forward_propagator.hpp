@@ -120,8 +120,8 @@ class Accumulator {
         double               _scale;
 
       public:
-        constexpr state_type(std::complex<double> const sum   = {0.0f, 0.0f},
-                             double const               scale = 0.0f) noexcept
+        constexpr state_type(std::complex<double> const sum   = {0.0, 0.0},
+                             double const               scale = 0.0) noexcept
             : _sum{sum}, _scale{scale}
         {}
         constexpr state_type(state_type const&) noexcept = default;

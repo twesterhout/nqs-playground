@@ -145,8 +145,8 @@ TCM_EXPORT auto MetropolisKernel::operator()(torch::Tensor x) const
                              torch::TensorOptions{}
                                  .dtype(torch::kFloat32)
                                  .pinned_memory(pin_memory));
-    kernel_cpu(x_info, obtain_tensor_info<bits512, false>(y),
-               obtain_tensor_info<float, false>(norm));
+    kernel_cpu(x_info, obtain_tensor_info<bits512>(y),
+               obtain_tensor_info<float>(norm));
     if (device.type() != torch::DeviceType::CPU) {
         y = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
         norm =
@@ -358,7 +358,7 @@ TCM_EXPORT auto ProposalGenerator::operator()(torch::Tensor x) const
     std::vector<int64_t> counts(static_cast<size_t>(batch_size));
 
     auto const x_info = obtain_tensor_info<bits512 const>(x, "x");
-    auto const y_info = obtain_tensor_info<bits512, false>(y);
+    auto const y_info = obtain_tensor_info<bits512>(y);
 
 #    pragma omp parallel for
     for (auto i = 0L; i < x_info.size(); ++i) {
@@ -468,7 +468,7 @@ TCM_EXPORT auto zanella_waiting_time(torch::Tensor                rates,
     if (!out.has_value()) {
         out.emplace(torch::empty({static_cast<int64_t>(rates_info.size())},
                                  torch::kFloat32));
-        out_info = obtain_tensor_info<float, false>(*out, "out");
+        out_info = obtain_tensor_info<float>(*out, "out");
     }
     else {
         // If out is present, make sure it lives on CPU as well, has the right
@@ -486,8 +486,8 @@ TCM_EXPORT auto zanella_waiting_time(torch::Tensor                rates,
     for (auto i = 0L; i < rates_info.size(); ++i) {
         auto const waiting =
             -std::log1p(-std::uniform_real_distribution<double>{}(generator))
-            / rates_info.data[i * rates_info.stride()];
-        out_info.data[i * out_info.stride()] = static_cast<float>(waiting);
+            / static_cast<double>(rates_info[i]);
+        out_info[i] = static_cast<float>(waiting);
     }
 
     return *out;
@@ -582,8 +582,9 @@ zanella_choose_samples(torch::Tensor weights, int64_t const number_samples,
             auto index        = int64_t{0};
             indices_info[0]   = index;
             for (auto size = int64_t{1}; size < number_samples; ++size) {
-                while (time + weights_info[index] <= time_step) {
-                    time += weights_info[index];
+                while (time + static_cast<double>(weights_info[index])
+                       <= time_step) {
+                    time += static_cast<double>(weights_info[index]);
                     ++index;
                     TCM_CHECK(index < weights_info.size(), std::runtime_error,
                               "time step is too big");
@@ -604,19 +605,20 @@ auto sample_one_from_multinomial(TensorInfo<scalar_t const> weights,
         sum >= scalar_t{0}, std::invalid_argument,
         fmt::format("invalid sum: {}; expected a non-negative number", sum));
     for (;;) {
-        std::uniform_real_distribution<long double> dist{0.0, sum};
+        std::uniform_real_distribution<long double> dist{0.0L, sum};
         auto const u = dist(global_random_generator());
         auto       s = 0.0L;
         for (auto i = int64_t{0}; i < weights.size(); ++i) {
             auto const w = weights[i];
             TCM_CHECK(w >= scalar_t{0}, std::invalid_argument,
                       fmt::format("encountered a negative weight: {}", w));
-            s += w;
+            s += static_cast<long double>(w);
             if (s >= u) { return i; }
         }
         // Check that this is indeed an extremely unlikely numerical instability
         // rather than a bug
-        TCM_CHECK(std::abs(s - sum) < 1e-5L * std::max<long double>(s, sum),
+        TCM_CHECK(std::abs(s - static_cast<long double>(sum))
+                      < 1e-5L * std::max<long double>(s, sum),
                   std::runtime_error,
                   fmt::format(
                       "provided sum does not match the computed one: {} != {}",

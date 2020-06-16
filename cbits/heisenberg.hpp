@@ -104,7 +104,7 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
         TCM_CHECK(norm > 0.0, std::runtime_error,
                   fmt::format("state does not belong to the basis"));
         auto coeff = complex_type{0, 0};
-        for (auto const [coupling, first, second] : edges()) {
+        for (auto const& [coupling, first, second] : edges()) {
             // Heisenberg hamiltonian works more or less like this:
             //
             //     K|↑↑⟩ = J|↑↑⟩
@@ -157,7 +157,7 @@ class TCM_IMPORT Heisenberg : public std::enable_shared_from_this<Heisenberg> {
     auto diag(StateT const& spin) const noexcept -> complex_type
     {
         auto coeff = complex_type{0, 0};
-        for (auto const [coupling, first, second] : edges()) {
+        for (auto const& [coupling, first, second] : edges()) {
             auto const not_aligned = are_not_aligned(spin, first, second);
             coeff += static_cast<real_type>(1 - 2 * not_aligned) * coupling;
         }

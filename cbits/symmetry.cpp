@@ -1,4 +1,3 @@
-#define __MATH_LONG_DOUBLE_CONSTANTS
 #include "symmetry.hpp"
 #include "cpu/kernels.hpp"
 // #include <boost/math/special_functions/cos_pi.hpp>
@@ -24,9 +23,9 @@ TCM_EXPORT SymmetryBase::SymmetryBase(unsigned const sector,
     if (arg == std::trunc(arg)) {
         auto const n = static_cast<int>(arg);
         switch (n) {
-        case 0: _eigenvalue = std::complex{1.0, 0.0}; break;
+        case 0: _eigenvalue = std::complex<double>{1.0, 0.0}; break;
         case 1: TCM_FALLTHROUGH;
-        case -1: _eigenvalue = std::complex{-1.0, 0.0}; break;
+        case -1: _eigenvalue = std::complex<double>{-1.0, 0.0}; break;
         default:
             TCM_ERROR(
                 std::runtime_error,
