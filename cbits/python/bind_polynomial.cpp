@@ -1,6 +1,7 @@
 #include "bind_polynomial.hpp"
 #include "../heisenberg.hpp"
 #include "../simple_polynomial.hpp"
+#include "../tensor_info.hpp"
 #include "../trim.hpp"
 #include "pybind11_helpers.hpp"
 
@@ -43,12 +44,25 @@ auto make_polynomial(py::module m, char const* class_name)
                      std::move(roots), normalising, max_states);
              }),
              py::arg{"hamiltonian"}, py::arg{"roots"},
-             py::arg{"normalising"} = false);
-    // .def(
-    //     "__call__",
-    //     [](Polynomial<Hamiltonian>& self, bits512 const& spin)
-    //         -> v2::QuantumState const& { return self(spin); },
-    //     py::return_value_policy::reference_internal);
+             py::arg{"normalising"} = false)
+        .def("__call__", [](Polynomial& self, bits512 const& spin,
+                            complex_type coeff) {
+            auto out_spins = torch::empty(
+                {static_cast<int64_t>(self.max_states()), 8L}, torch::kInt64);
+            auto out_coeffs = torch::empty(
+                {static_cast<int64_t>(self.max_states()), 2L}, torch::kFloat64);
+            auto spins_span = static_cast<gsl::span<bits512>>(
+                obtain_tensor_info<bits512>(out_spins));
+            auto coeffs_span = static_cast<gsl::span<std::complex<double>>>(
+                obtain_tensor_info<std::complex<double>>(out_coeffs));
+            auto const written = static_cast<int64_t>(
+                self(spin, coeff, spins_span, coeffs_span));
+            out_spins  = out_spins.narrow(/*dim=*/0, /*start=*/0,
+                                         /*length=*/written);
+            out_coeffs = out_coeffs.narrow(/*dim=*/0, /*start=*/0,
+                                           /*length=*/written);
+            return std::make_tuple(std::move(out_spins), std::move(out_coeffs));
+        });
 
 #endif
 }

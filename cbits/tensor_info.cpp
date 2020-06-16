@@ -24,7 +24,8 @@ TCM_FORCEINLINE auto packed_spins_checks(torch::Tensor x, char const* name)
     TCM_CHECK_TYPE(arg_name, x, torch::kInt64);
 }
 
-TCM_FORCEINLINE auto complex_checks(torch::Tensor x, char const* name)
+TCM_FORCEINLINE auto complex_checks(torch::Tensor x, char const* name,
+                                    torch::ScalarType scalar_type)
 {
     auto const arg_name = name != nullptr ? name : "tensor";
     auto const sizes    = x.sizes();
@@ -38,7 +39,7 @@ TCM_FORCEINLINE auto complex_checks(torch::Tensor x, char const* name)
               fmt::format("{} has wrong strides: [{}]; complex tensor must be "
                           "contiguous along the second dimension",
                           arg_name, fmt::join(strides, ",")));
-    TCM_CHECK_TYPE(arg_name, x, torch::kFloat32);
+    TCM_CHECK_TYPE(arg_name, x, scalar_type);
 }
 } // namespace detail
 
@@ -73,10 +74,10 @@ TCM_EXPORT auto obtain_tensor_info<bits512, true>(torch::Tensor x,
     return obtain_tensor_info<bits512, false>(std::move(x), name);
 }
 
-template <>
-TCM_EXPORT auto obtain_tensor_info<std::complex<float>, false>(torch::Tensor x,
-                                                               char const* name)
-    -> TensorInfo<std::complex<float>>
+template <class T>
+TCM_FORCEINLINE auto unchecked_complex_tensor_info(torch::Tensor x,
+                                                   char const*   name)
+    -> TensorInfo<T>
 {
     auto const arg_name = name != nullptr ? name : "tensor";
     auto*      data     = x.data_ptr();
@@ -90,8 +91,24 @@ TCM_EXPORT auto obtain_tensor_info<std::complex<float>, false>(torch::Tensor x,
         // Because complex<float> consists of 2 floats
         return delta / 2L;
     }();
-    return TensorInfo<std::complex<float>>{
-        static_cast<std::complex<float>*>(data), &size, &stride};
+    return TensorInfo<T>{static_cast<T*>(data), &size, &stride};
+}
+
+template <>
+TCM_EXPORT auto obtain_tensor_info<std::complex<float>, false>(torch::Tensor x,
+                                                               char const* name)
+    -> TensorInfo<std::complex<float>>
+{
+    return unchecked_complex_tensor_info<std::complex<float>>(std::move(x),
+                                                              name);
+}
+
+template <>
+TCM_EXPORT auto obtain_tensor_info<std::complex<double>, false>(
+    torch::Tensor x, char const* name) -> TensorInfo<std::complex<double>>
+{
+    return unchecked_complex_tensor_info<std::complex<double>>(std::move(x),
+                                                               name);
 }
 
 template <>
@@ -99,8 +116,17 @@ TCM_EXPORT auto obtain_tensor_info<std::complex<float>, true>(torch::Tensor x,
                                                               char const* name)
     -> TensorInfo<std::complex<float>>
 {
-    detail::complex_checks(x, name);
+    detail::complex_checks(x, name, torch::kFloat32);
     return obtain_tensor_info<std::complex<float>, false>(std::move(x), name);
+}
+
+template <>
+TCM_EXPORT auto obtain_tensor_info<std::complex<double>, true>(torch::Tensor x,
+                                                               char const* name)
+    -> TensorInfo<std::complex<double>>
+{
+    detail::complex_checks(x, name, torch::kFloat64);
+    return obtain_tensor_info<std::complex<double>, false>(std::move(x), name);
 }
 
 template <>
@@ -177,6 +203,7 @@ ADD_CONST_OVERLOADS(double)
 ADD_CONST_OVERLOADS(uint64_t)
 ADD_CONST_OVERLOADS(bits512)
 ADD_CONST_OVERLOADS(std::complex<float>)
+ADD_CONST_OVERLOADS(std::complex<double>)
 
 #undef TRIVIAL_IMPLEMENTATION
 #undef ADD_CONST_OVERLOADS

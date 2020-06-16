@@ -29,6 +29,7 @@
 #pragma once
 
 #include "errors.hpp"
+#include <gsl/gsl-lite.hpp>
 #include <torch/types.h>
 #include <type_traits>
 #include <utility>
@@ -99,6 +100,30 @@ struct TensorInfo {
     operator TensorInfo<T const, Dims, Index>() const noexcept
     {
         return {data, sizes, strides};
+    }
+
+    template <class D = void, class = typename std::enable_if<
+                                  std::is_same<D, D>::value && Dims == 1>::type>
+    explicit operator gsl::span<T>() const
+    {
+        TCM_CHECK(
+            stride() == 1, std::runtime_error,
+            fmt::format("cannot cast TensorInfo with stride {} to gsl::span",
+                        stride()));
+        return gsl::span<T>{data, static_cast<uint64_t>(size())};
+    }
+
+    template <class D = void,
+              class   = typename std::enable_if<std::is_same<D, D>::value
+                                              && !std::is_const<T>::value
+                                              && Dims == 1>::type>
+    explicit operator gsl::span<T const>() const
+    {
+        TCM_CHECK(
+            stride() == 1, std::runtime_error,
+            fmt::format("cannot cast TensorInfo with stride {} to gsl::span",
+                        stride()));
+        return gsl::span<T const>{data, static_cast<uint64_t>(size())};
     }
 
   private:
