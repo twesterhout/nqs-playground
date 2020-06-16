@@ -1,3 +1,4 @@
+#define __MATH_LONG_DOUBLE_CONSTANTS
 #include "symmetry.hpp"
 #include "cpu/kernels.hpp"
 // #include <boost/math/special_functions/cos_pi.hpp>
@@ -18,10 +19,25 @@ TCM_EXPORT SymmetryBase::SymmetryBase(unsigned const sector,
     TCM_CHECK(sector < periodicity, std::invalid_argument,
               fmt::format("invalid sector: {}; expected an integer in [0, {})",
                           sector, periodicity));
-    auto const arg =
-        -static_cast<double>(2U * sector) / static_cast<double>(periodicity);
-    _eigenvalue =
-        std::complex<double>{std::cos(M_PI * arg), std::sin(M_PI * arg)};
+    auto const arg = -static_cast<long double>(2U * sector)
+                     / static_cast<long double>(periodicity);
+    if (arg == std::trunc(arg)) {
+        auto const n = static_cast<int>(arg);
+        switch (n) {
+        case 0: _eigenvalue = std::complex{1.0, 0.0}; break;
+        case 1: TCM_FALLTHROUGH;
+        case -1: _eigenvalue = std::complex{-1.0, 0.0}; break;
+        default:
+            TCM_ERROR(
+                std::runtime_error,
+                fmt::format("this should not have happened: arg={}", arg));
+        }
+    }
+    else {
+        _eigenvalue =
+            std::complex<double>{static_cast<double>(std::cos(M_PIl * arg)),
+                                 static_cast<double>(std::sin(M_PIl * arg))};
+    }
 }
 
 namespace v2 {
