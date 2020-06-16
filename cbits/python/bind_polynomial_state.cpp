@@ -1,5 +1,6 @@
 #include "bind_polynomial_state.hpp"
 #include "../polynomial_state.hpp"
+#include "../simple_accumulator.hpp"
 #include "../trim.hpp"
 #include "pybind11_helpers.hpp"
 
@@ -41,10 +42,16 @@ auto bind_polynomial_state(PyObject* _module) -> void
         },
         py::call_guard<py::gil_scoped_release>());
 
-    m.def("apply", [](torch::Tensor spins, Polynomial<Heisenberg>& polynomial,
+    m.def("apply", [](torch::Tensor spins, Polynomial& polynomial,
                       v2::ForwardT forward, uint32_t const batch_size) {
         return apply(std::move(spins), polynomial, std::move(forward),
                      batch_size);
+    });
+    m.def("apply_new", [](torch::Tensor spins, Polynomial& polynomial,
+                          v2::ForwardT psi, uint32_t batch_size,
+                          int32_t num_threads) {
+        return apply(std::move(spins), std::ref(polynomial), std::move(psi),
+                     polynomial.max_states(), batch_size, num_threads);
     });
 
     m.def(

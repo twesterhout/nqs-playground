@@ -312,8 +312,10 @@ add_library(nqs SHARED
     cbits/jacobian.cpp
     cbits/heisenberg.cpp
     cbits/forward_propagator.cpp
-    cbits/polynomial.cpp
+    cbits/simple_polynomial.cpp
+    # cbits/polynomial.cpp
     cbits/polynomial_state.cpp
+    cbits/simple_accumulator.cpp
     cbits/random.cpp
     cbits/unpack.cpp
     cbits/dotu.cpp
