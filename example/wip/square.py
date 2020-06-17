@@ -10,6 +10,10 @@ import torch
 
 from nqs_playground import *
 
+# Fix random number generator seeds for reproducible runs
+np.random.seed(1273982371)
+torch.manual_seed(378549284)
+manual_seed(5772842)
 
 CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
@@ -134,13 +138,13 @@ def make_amplitude_network(n, p):
 def make_sign_network(n, p):
     m = torch.nn.Sequential(
         Unpack(n),
-        torch.nn.Linear(n, 128),
+        torch.nn.Linear(n, 256),
         torch.nn.ReLU(),
         torch.nn.Dropout(p),
-        torch.nn.Linear(128, 128),
+        torch.nn.Linear(256, 256),
         torch.nn.ReLU(),
         torch.nn.Dropout(p),
-        torch.nn.Linear(128, 2, bias=False),
+        torch.nn.Linear(256, 2, bias=False),
     )
     logger.info("Constructed sign network with {} parameters", _num_parameters(m))
     return torch.jit.script(m)
@@ -237,7 +241,9 @@ def do_6x6():
     while pathlib.Path("SWO/{}x{}/{}".format(*shape, i)).exists():
         i += 1
 
-    m1, m2 = make_amplitude_network(n, 0.2), make_sign_network(n, 0.3)
+    # m1, m2 = make_amplitude_network(n, 0.2), make_sign_network(n, 0.3)
+    m1 = torch.jit.load("SWO/6x6/2/49/amplitude.pt")
+    m2 = torch.jit.load("SWO/6x6/2/49/sign.pt")
     if torch.cuda.is_available():
         m1 = m1.cuda()
         m2 = m2.cuda()
@@ -265,14 +271,14 @@ def do_6x6():
         ),
         exact=ground_state,
     )
-    nqs_playground.swo.run(config)
+    # nqs_playground.swo.run(config)
     initial_iteration += config.epochs
 
-    config = config_with_poly_and_dropout(lambda _: [-20, 30], (0.1, 0.3), config)
+    config = config_with_poly_and_dropout(lambda _: [-30, 50], (0.1, 0.3), config)
     nqs_playground.swo.run(config, initial_iteration)
     initial_iteration += config.epochs
 
-    config = config_with_poly_and_dropout(lambda _: [-20, 30], (0.0, 0.1), config)
+    config = config_with_poly_and_dropout(lambda _: [-30, 50], (0.0, 0.1), config)
     config = config._replace(
         amplitude=lambda _: nqs_playground.swo.TrainingOptions(
             train_batch_size=1024,
