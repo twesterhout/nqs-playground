@@ -188,8 +188,8 @@ inline auto generate_states(gsl::span<v2::Symmetry<64> const> symmetries,
         if (*hamming_weight == 64U) { return {~uint64_t{0}}; }
         auto const current = (~uint64_t{0}) >> (64U - *hamming_weight);
         auto const bound   = number_spins > *hamming_weight
-                               ? (current << (number_spins - *hamming_weight))
-                               : current;
+                                 ? (current << (number_spins - *hamming_weight))
+                                 : current;
 #pragma omp parallel default(none) firstprivate(current, bound, number_chunks) \
     shared(symmetries, states, task_handler)
         {
@@ -210,8 +210,8 @@ inline auto generate_states(gsl::span<v2::Symmetry<64> const> symmetries,
     else {
         auto current = uint64_t{0};
         auto bound   = number_spins == 64U
-                         ? (~uint64_t{0})
-                         : ((~uint64_t{0}) >> (64U - number_spins));
+                           ? (~uint64_t{0})
+                           : ((~uint64_t{0}) >> (64U - number_spins));
 #pragma omp parallel default(none) firstprivate(current, bound, number_chunks) \
     shared(symmetries, states, task_handler)
         {
@@ -379,7 +379,8 @@ SmallSpinBasis::SmallSpinBasis(
 
 TCM_EXPORT SmallSpinBasis::~SmallSpinBasis() = default;
 
-TCM_EXPORT auto SmallSpinBasis::full_info(uint64_t const x) const
+TCM_EXPORT auto SmallSpinBasis::full_info(uint64_t const x,
+                                          unsigned*      symmetry_index) const
     -> std::tuple<StateT, std::complex<double>, double>
 {
 #if 0
@@ -393,16 +394,20 @@ TCM_EXPORT auto SmallSpinBasis::full_info(uint64_t const x) const
         auto const eigenvalue =
             _symmetries[static_cast<uint64_t>(std::get<2>(r2))].eigenvalue();
         // TCM_CHECK(std::get<1>(r1) == eigenvalue, std::runtime_error, "");
+        if (symmetry_index != nullptr) {
+            *symmetry_index = static_cast<unsigned>(std::get<2>(r2));
+        }
         return {std::get<0>(r2), eigenvalue, std::get<1>(r2)};
     }
     return {x, 1.0, 1.0};
 #endif
 }
 
-TCM_EXPORT auto SmallSpinBasis::full_info(bits512 const& x) const
+TCM_EXPORT auto SmallSpinBasis::full_info(bits512 const& x,
+                                          unsigned*      symmetry_index) const
     -> std::tuple<bits512, std::complex<double>, double>
 {
-    auto const [_r, eigenvalue, norm] = full_info(x.words[0]);
+    auto const [_r, eigenvalue, norm] = full_info(x.words[0], symmetry_index);
     bits512 representative;
     representative.words[0] = _r;
     std::fill(representative.words + 1, representative.words + 8, 0UL);
@@ -492,7 +497,8 @@ TCM_EXPORT BigSpinBasis::BigSpinBasis(std::vector<v2::Symmetry<512>> symmetries,
 
 TCM_EXPORT BigSpinBasis::~BigSpinBasis() = default;
 
-TCM_EXPORT auto BigSpinBasis::full_info(bits512 const& x) const
+TCM_EXPORT auto BigSpinBasis::full_info(bits512 const& x,
+                                        unsigned*      symmetry_index) const
     -> std::tuple<bits512, std::complex<double>, double>
 {
     return ::TCM_NAMESPACE::full_info(_symmetries, x);

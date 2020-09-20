@@ -49,13 +49,14 @@ class TCM_EXPORT BasisBase : public std::enable_shared_from_this<BasisBase> {
     BasisBase(BasisBase const&)     = delete;
     BasisBase(BasisBase&&) noexcept = delete;
     auto operator=(BasisBase const&) -> BasisBase& = delete;
-    auto operator=(BasisBase &&) -> BasisBase& = delete;
+    auto operator=(BasisBase&&) -> BasisBase& = delete;
 
     constexpr auto number_spins() const noexcept -> unsigned;
     constexpr auto hamming_weight() const noexcept -> std::optional<unsigned>;
     constexpr auto has_symmetries() const noexcept -> bool;
 
-    virtual auto full_info(bits512 const& x) const
+    virtual auto full_info(bits512 const& x,
+                           unsigned*      symmetry_index = nullptr) const
         -> std::tuple<bits512, std::complex<double>, double> = 0;
     virtual auto is_real() const noexcept -> bool            = 0;
 
@@ -115,16 +116,16 @@ class TCM_EXPORT SmallSpinBasis : public BasisBase {
     SmallSpinBasis(SmallSpinBasis const&)     = delete;
     SmallSpinBasis(SmallSpinBasis&&) noexcept = delete;
     auto operator=(SmallSpinBasis const&) -> SmallSpinBasis& = delete;
-    auto operator=(SmallSpinBasis &&) -> SmallSpinBasis& = delete;
+    auto operator=(SmallSpinBasis&&) -> SmallSpinBasis& = delete;
 
     // We actually want the desctructor to be implicitly defined, but then
     // the definition of BasisCache should be available. So we defer this step.
     ~SmallSpinBasis() override;
 
-    auto full_info(uint64_t x) const
+    auto full_info(uint64_t x, unsigned* symmetry_index = nullptr) const
         -> std::tuple<uint64_t, std::complex<double>, double>;
 
-    auto full_info(bits512 const& x) const
+    auto full_info(bits512 const& x, unsigned* symmetry_index = nullptr) const
         -> std::tuple<bits512, std::complex<double>, double> override;
 
     auto is_real() const noexcept -> bool override;
@@ -155,11 +156,11 @@ class TCM_EXPORT BigSpinBasis : public BasisBase {
     BigSpinBasis(BigSpinBasis const&) = delete;
     BigSpinBasis(BigSpinBasis&&)      = delete;
     auto operator=(BigSpinBasis const&) -> BigSpinBasis& = delete;
-    auto operator=(BigSpinBasis &&) -> BigSpinBasis& = delete;
+    auto operator=(BigSpinBasis&&) -> BigSpinBasis& = delete;
 
     ~BigSpinBasis() override;
 
-    auto full_info(bits512 const& x) const
+    auto full_info(bits512 const& x, unsigned* symmetry_index = nullptr) const
         -> std::tuple<bits512, std::complex<double>, double> override;
 
     auto is_real() const noexcept -> bool override;

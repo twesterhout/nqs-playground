@@ -54,7 +54,7 @@ auto bind_spin_basis(PyObject* _module) -> void
             2) character of the group element maps ``x`` to its representative;
             3) normalisation of the basis state (i.e. length of the
                corresponding orbit).)EOF"),
-             py::arg{"spin"})
+             py::arg{"spin"}, py::arg{"symmetry_index"} = nullptr)
         .def(
             "norm",
             [](BasisBase const& self, bits512 const& spin) {

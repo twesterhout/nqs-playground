@@ -295,12 +295,13 @@ struct alignas(64) Symmetry8x64 {
 };
 
 TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<64> const> symmetries,
-                          uint64_t                          spin)
+                          uint64_t spin, unsigned* symmetry_index = nullptr)
     -> std::tuple</*representative=*/uint64_t,
                   /*eigenvalue=*/std::complex<double>, /*norm=*/double>;
 
 TCM_IMPORT auto full_info(gsl::span<v2::Symmetry<512> const> symmetries,
-                          bits512 const&                     spin)
+                          bits512 const&                     spin,
+                          unsigned* symmetry_index = nullptr)
     -> std::tuple</*representative=*/bits512,
                   /*eigenvalue=*/std::complex<double>, /*norm=*/double>;
 

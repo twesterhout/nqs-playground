@@ -99,8 +99,8 @@ Symmetry8x64::Symmetry8x64(gsl::span<v2::Symmetry<64> const> original)
     }
 }
 
-TCM_EXPORT auto Symmetry8x64::operator()(uint64_t x, uint64_t out[8]) const
-    noexcept -> void
+TCM_EXPORT auto Symmetry8x64::operator()(uint64_t x,
+                                         uint64_t out[8]) const noexcept -> void
 {
     bfly(x, out, _fwds);
     ibfly(out, _bwds);
@@ -257,7 +257,7 @@ TCM_FORCEINLINE auto _make_eigenvalue(double const norm, double const phase)
 template <bool Representative = true, bool Eigenvalue = true, bool Norm = true,
           class Symmetry = v2::Symmetry<512>>
 auto _full_info(gsl::span<Symmetry const>        symmetries,
-                typename Symmetry::StateT const& x)
+                typename Symmetry::StateT const& x, unsigned* symmetry_index)
 {
     if (symmetries.empty()) {
         return std::tuple_cat(
@@ -268,21 +268,22 @@ auto _full_info(gsl::span<Symmetry const>        symmetries,
     auto repr  = x;
     auto phase = 0.0;
     auto norm  = 0.0;
-    for (auto const& symmetry : symmetries) {
-        _kernel<Representative, Eigenvalue, Norm, Symmetry>(symmetry, x, repr,
-                                                            phase, norm);
-#if 0
-        auto const y = symmetry(x);
-        if (y < repr) {
-            repr  = y;
-            phase = symmetry.phase();
+    auto index = 0U;
+    for (auto i = 0UL; i < symmetries.size(); ++i) {
+        auto const& symmetry = symmetries[i];
+        auto const  y        = symmetry(x);
+        if constexpr (Representative || Eigenvalue) {
+            if (y < repr) {
+                if constexpr (Representative) { repr = y; }
+                if constexpr (Eigenvalue) { phase = symmetry.phase(); }
+                index = i;
+            }
         }
-        else if (y == x) {
-            // We're actually interested in
-            // std::conj(first->eigenvalue()).real(), but Re[z*] == Re[z].
-            norm += symmetry.eigenvalue().real();
+        if constexpr (Norm) {
+            if (y == x) { norm += symmetry.eigenvalue().real(); }
         }
-#endif
+        // _kernel<Representative, Eigenvalue, Norm, Symmetry>(symmetry, x, repr,
+        //                                                     phase, norm);
     }
 
     if constexpr (Norm) {
@@ -317,6 +318,7 @@ auto _full_info(gsl::span<Symmetry const>        symmetries,
     }
 #endif
 
+    if (symmetry_index != nullptr) { *symmetry_index = index; }
     return std::tuple_cat(_to_tuple_if<Representative>(repr),
                           _make_eigenvalue<Eigenvalue>(norm, phase),
                           _to_tuple_if<Norm>(norm));
@@ -334,19 +336,19 @@ auto _full_info(gsl::span<Symmetry const>        symmetries,
 }
 
 TCM_EXPORT auto full_info(gsl::span<v2::Symmetry<64> const> symmetries,
-                          uint64_t                          x)
+                          uint64_t x, unsigned* symmetry_index)
     -> std::tuple</*representative=*/uint64_t,
                   /*eigenvalue=*/std::complex<double>, /*norm=*/double>
 {
-    return _full_info<true, true, true>(symmetries, x);
+    return _full_info<true, true, true>(symmetries, x, symmetry_index);
 }
 
 TCM_EXPORT auto full_info(gsl::span<v2::Symmetry<512> const> symmetries,
-                          bits512 const&                     x)
+                          bits512 const& x, unsigned* symmetry_index)
     -> std::tuple</*representative=*/bits512,
                   /*eigenvalue=*/std::complex<double>, /*norm=*/double>
 {
-    return _full_info<true, true, true>(symmetries, x);
+    return _full_info<true, true, true>(symmetries, x, symmetry_index);
 }
 
 TCM_NAMESPACE_END
