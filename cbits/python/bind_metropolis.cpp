@@ -1,7 +1,9 @@
 #include "bind_metropolis.hpp"
 #include "../metropolis.hpp"
 #include "../spin_basis.hpp"
+#include "../tabu.hpp"
 #include "../trim.hpp"
+#include "pybind11_helpers.hpp"
 
 #include "../cpu/kernels.hpp"
 
@@ -52,6 +54,7 @@ auto bind_metropolis(PyObject* _module) -> void
             },
             py::arg{"x"}.noconvert());
 
+    m.def("tabu_process", &tabu_process);
 #if 0
     m.def("zanella_next_state_index", &zanella_next_state_index, DOC(R"EOF(
 
@@ -60,15 +63,17 @@ auto bind_metropolis(PyObject* _module) -> void
           py::arg{"out"}.noconvert() = py::none());
 #endif
 
-    m.def("zanella_next_state_index",
-          [](torch::Tensor jump_rates, torch::Tensor jump_rates_sum,
-             std::vector<int64_t> const& counts, py::object device) {
-                return zanella_next_state_index(std::move(jump_rates), std::move(jump_rates_sum),
-                    counts, torch::python::detail::py_object_to_device(device));
-          },
-          py::arg{"jump_rates"}.noconvert(),
-          py::arg{"jump_rates_sum"}.noconvert(),
-          py::arg{"counts"}, py::arg{"device"}.noconvert());
+    m.def(
+        "zanella_next_state_index",
+        [](torch::Tensor jump_rates, torch::Tensor jump_rates_sum,
+           std::vector<int64_t> const& counts, py::object device) {
+            return zanella_next_state_index(
+                std::move(jump_rates), std::move(jump_rates_sum), counts,
+                torch::python::detail::py_object_to_device(device));
+        },
+        py::arg{"jump_rates"}.noconvert(),
+        py::arg{"jump_rates_sum"}.noconvert(), py::arg{"counts"},
+        py::arg{"device"}.noconvert());
 
     m.def("zanella_jump_rates", &zanella_jump_rates, DOC(R"EOF(
 

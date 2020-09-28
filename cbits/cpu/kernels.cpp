@@ -218,6 +218,31 @@ TCM_EXPORT auto zanella_jump_rates(torch::Tensor current_log_prob,
         });
     return std::make_tuple(std::move(rates), std::move(rates_sum));
 } // }}}
+
+template <class scalar_t>
+auto tabu_jump_rates(gsl::span<scalar_t const> proposed_log_prob,
+                     scalar_t const current_log_prob) -> std::vector<scalar_t>
+{ // {{{
+    auto       rates = std::vector<scalar_t>(proposed_log_prob.size());
+    auto const jump_rates_one_ptr = []() -> jump_rates_one_for_t<scalar_t> {
+        auto& cpuid = caffe2::GetCpuId();
+        if (cpuid.avx2()) { return &jump_rates_one_avx2; }
+        if (cpuid.avx()) { return &jump_rates_one_avx; }
+        return &jump_rates_one_sse2;
+    }();
+    (*jump_rates_one_ptr)(TensorInfo<scalar_t>{rates},
+                          TensorInfo<scalar_t const>{proposed_log_prob},
+                          current_log_prob);
+    return rates;
+} // }}}
+
+template TCM_EXPORT auto
+tabu_jump_rates(gsl::span<float const> proposed_log_prob,
+                float                  current_log_prob) -> std::vector<float>;
+
+template TCM_EXPORT auto
+tabu_jump_rates(gsl::span<double const> proposed_log_prob,
+                double current_log_prob) -> std::vector<double>;
 #endif
 
 #if defined(INCLUDE_DISPATCH_CODE)
@@ -242,7 +267,7 @@ TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
 }
 
 #    endif // AT_MKL_ENABLED
-#endif     // INCLUDE_DISPATCH_CODE
+#endif // INCLUDE_DISPATCH_CODE
 
 namespace {
 TCM_FORCEINLINE auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f

@@ -309,6 +309,7 @@ add_library(nqs SHARED
     cbits/bits512.cpp
     cbits/errors.cpp
     cbits/metropolis.cpp
+    cbits/tabu.cpp
     cbits/jacobian.cpp
     cbits/heisenberg.cpp
     cbits/forward_propagator.cpp

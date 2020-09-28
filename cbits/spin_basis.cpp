@@ -414,6 +414,19 @@ TCM_EXPORT auto SmallSpinBasis::full_info(bits512 const& x,
     return std::make_tuple(representative, eigenvalue, norm);
 }
 
+TCM_EXPORT auto SmallSpinBasis::apply_nth(bits512 const& x,
+                                          unsigned const symmetry_index) const
+    -> bits512
+{
+    if (!has_symmetries()) { return x; }
+    TCM_CHECK(symmetry_index < _symmetries.size(), std::invalid_argument,
+              fmt::format("symmetry index out of bounds: {}; expected <{}",
+                          symmetry_index, _symmetries.size()));
+    auto y     = x;
+    y.words[0] = _symmetries[symmetry_index](x.words[0]);
+    return y;
+}
+
 TCM_EXPORT auto SmallSpinBasis::index(uint64_t const x) const -> uint64_t
 {
     TCM_CHECK(_cache != nullptr, std::runtime_error,
@@ -510,6 +523,17 @@ TCM_EXPORT auto BigSpinBasis::is_real() const noexcept -> bool
     return std::all_of(begin(_symmetries), end(_symmetries), [](auto const& s) {
         return s.eigenvalue().imag() == 0;
     });
+}
+
+TCM_EXPORT auto BigSpinBasis::apply_nth(bits512 const& x,
+                                        unsigned const symmetry_index) const
+    -> bits512
+{
+    if (!has_symmetries()) { return x; }
+    TCM_CHECK(symmetry_index < _symmetries.size(), std::invalid_argument,
+              fmt::format("symmetry index out of bounds: {}; expected <{}",
+                          symmetry_index, _symmetries.size()));
+    return _symmetries[symmetry_index](x);
 }
 // }}}
 

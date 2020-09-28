@@ -84,6 +84,12 @@ struct TensorInfo {
         : data{_data}, sizes{_size}, strides{_stride}
     {}
 
+    template <class D = void, class = typename std::enable_if<
+                                  std::is_same<D, D>::value && Dims == 1>::type>
+    /*implicit*/ constexpr TensorInfo(gsl::span<T> other) noexcept
+        : data{other.data()}, sizes{other.size()}, strides{1}
+    {}
+
     constexpr TensorInfo(TensorInfo const&) noexcept = default;
     constexpr TensorInfo(TensorInfo&&) noexcept      = default;
 #if defined(                                                                   \

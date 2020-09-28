@@ -13,6 +13,10 @@ auto zanella_jump_rates(torch::Tensor               current_log_prob,
                         std::vector<int64_t> const& counts)
     -> std::tuple<torch::Tensor, torch::Tensor>;
 
+template <class scalar_t>
+auto tabu_jump_rates(gsl::span<scalar_t const> proposed_log_prob,
+                     scalar_t current_log_prob) -> std::vector<scalar_t>;
+
 template <class T>
 auto jump_rates_one_avx2(TensorInfo<T> const&, TensorInfo<T const> const&,
                          T) noexcept -> T;

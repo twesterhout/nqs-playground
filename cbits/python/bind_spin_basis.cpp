@@ -47,14 +47,19 @@ auto bind_spin_basis(PyObject* _module) -> void
         .def_property_readonly("hamming_weight", &BasisBase::hamming_weight,
                                DOC(R"EOF(
             Hamming weight of basis states. ``None`` if it is not fixed.)EOF"))
-        .def("full_info", &BasisBase::full_info, DOC(R"EOF(
+        .def(
+            "full_info",
+            [](BasisBase const& self, bits512 const& spin) {
+                return self.full_info(spin);
+            },
+            DOC(R"EOF(
             All available information about a basis state. Returns a tuple of
 
             1) representative state;
             2) character of the group element maps ``x`` to its representative;
             3) normalisation of the basis state (i.e. length of the
                corresponding orbit).)EOF"),
-             py::arg{"spin"}, py::arg{"symmetry_index"} = nullptr)
+            py::arg{"spin"})
         .def(
             "norm",
             [](BasisBase const& self, bits512 const& spin) {
