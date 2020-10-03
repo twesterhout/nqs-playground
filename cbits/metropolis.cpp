@@ -207,15 +207,19 @@ auto MetropolisKernel::kernel_cpu(TensorInfo<bits512 const> const& src_info,
     };
     if (_basis->hamming_weight().has_value()) {
         loop([this](auto const& x) -> std::tuple<bits512, float> {
-            auto const i = detail::find_nth_one(
-                x, random_bounded(*_basis->hamming_weight(), *_generator));
-            auto const j = detail::find_nth_zero(
-                x, random_bounded(_basis->number_spins()
-                                      - *_basis->hamming_weight(),
-                                  *_generator));
-            auto const [y, _, normalization] =
-                _basis->full_info(flipped(x, i, j));
-            return {y, static_cast<float>(normalization)};
+            for (;;) {
+                auto const i = detail::find_nth_one(
+                    x, random_bounded(*_basis->hamming_weight(), *_generator));
+                auto const j = detail::find_nth_zero(
+                    x, random_bounded(_basis->number_spins()
+                                          - *_basis->hamming_weight(),
+                                      *_generator));
+                auto const [y, _, normalization] =
+                    _basis->full_info(flipped(x, i, j));
+                if (normalization > 0.0 && y != x) {
+                    return {y, static_cast<float>(normalization)};
+                }
+            }
         });
     }
     else {
@@ -396,7 +400,7 @@ TCM_EXPORT auto ProposalGenerator::generate(bits512 const&     spin,
     }
 
     std::sort(out.data(), out.data() + count);
-    std::unique(out.data(), out.data() + count);
+    count = std::unique(out.data(), out.data() + count) - out.data();
     return count;
 }
 
