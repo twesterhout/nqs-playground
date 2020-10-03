@@ -192,22 +192,22 @@ auto choose_direction(gsl::span<scalar_t const> weights,
     TCM_CHECK(
         sum >= 0, std::invalid_argument,
         fmt::format("invalid sum: {}; expected a non-negative number", sum));
-    std::cout << "weights: [";
-    for (auto const w : weights) {
-        std::cout << w << ", ";
-    }
-    std::cout << "]\n";
-    std::cout << "flags: [";
-    for (auto const f : flags) {
-        std::cout << static_cast<int>(f) << ", ";
-    }
-    std::cout << "]\n";
+    // std::cout << "weights: [";
+    // for (auto const w : weights) {
+    //     std::cout << w << ", ";
+    // }
+    // std::cout << "]\n";
+    // std::cout << "flags: [";
+    // for (auto const f : flags) {
+    //     std::cout << static_cast<int>(f) << ", ";
+    // }
+    // std::cout << "]\n";
     for (;;) {
         std::uniform_real_distribution<double> dist{0.0, sum};
         auto const u = dist(global_random_generator());
         auto       s = 0.0;
         for (auto i = uint64_t{0}; i < weights.size(); ++i) {
-            if (flags[i]) {
+            if (flags[i] == 1) {
                 auto const w = weights[i];
                 TCM_CHECK(w >= scalar_t{0}, std::invalid_argument,
                           fmt::format("encountered a negative weight: {}", w));
@@ -242,7 +242,7 @@ auto tabu_sum_rates(gsl::span<scalar_t const> jump_rates,
     auto sum_min  = 0.0;
     for (auto i = 0U; i < jump_rates.size(); ++i) {
         auto const rate = static_cast<double>(jump_rates[i]);
-        if (flags[i]) { sum_plus += rate; }
+        if (flags[i] == 1) { sum_plus += rate; }
         else {
             sum_min += rate;
         }
@@ -257,9 +257,17 @@ auto transform_pair(std::array<int, 3> const& indices, BasisBase const& basis)
     std::memset(spin.words, 0, sizeof(spin.words));
     set_bit_to(spin, std::get<0>(indices), true);
     set_bit_to(spin, std::get<1>(indices), true);
+    // for (auto i = 0U; i < basis.number_spins(); ++i) {
+    //     std::cout << static_cast<int>(test_bit(spin, i));
+    // }
+    // std::cout << " --> ";
     spin = basis.apply_nth(spin, static_cast<unsigned>(std::get<2>(indices)));
     std::array<int, 2> out;
     auto               size = 0U;
+    // for (auto i = 0U; i < basis.number_spins(); ++i) {
+    //     std::cout << static_cast<int>(test_bit(spin, i));
+    // }
+    // std::cout << " --> ";
     for (auto i = 0; i < static_cast<int>(std::size(spin.words)); ++i) {
         if (spin.words[i] == 0) { continue; }
         auto const first = __builtin_ctzl(spin.words[i]);
@@ -271,6 +279,7 @@ auto transform_pair(std::array<int, 3> const& indices, BasisBase const& basis)
             break;
         }
     }
+    // std::cout << out[0] << ", " << out[1] << '\n';
     TCM_CHECK(size == 2U, std::runtime_error, "Bug! Bug! Bug!");
     return out;
 }
@@ -278,6 +287,7 @@ auto transform_pair(std::array<int, 3> const& indices, BasisBase const& basis)
 auto transform_alphas(gsl::span<int8_t>         alphas,
                       std::array<int, 3> const& indices, BasisBase const& basis)
 {
+    // return;
     std::vector<int8_t> old_alphas(std::begin(alphas), std::end(alphas));
     auto const          number_spins = basis.number_spins();
     old_alphas[compressed_index(std::get<0>(indices), std::get<1>(indices),
@@ -294,6 +304,41 @@ auto transform_alphas(gsl::span<int8_t>         alphas,
     }
 }
 
+auto rescale_duplicates(gsl::span<bits512 const> states, gsl::span<float> rates,
+                        gsl::span<int8_t const> flags) -> void
+{
+    std::vector<unsigned> counts(states.size());
+    std::fill(std::begin(counts), std::end(counts), 0U);
+    for (auto i = 0U; i < states.size(); ++i) {
+        if (counts[i] == 0U) {
+            auto n_plus = 0U;
+            auto n_min  = 0U;
+            for (auto j = i; j < states.size(); ++j) {
+                if (states[j] == states[i]) {
+                    if (flags[j] == 1) { ++n_plus; }
+                    else {
+                        TCM_ASSERT(flags[j] == -1, "");
+                        ++n_min;
+                    }
+                }
+            }
+            for (auto j = i; j < states.size(); ++j) {
+                if (states[j] == states[i]) {
+                    if (flags[j] == 1) { counts[j] = n_plus; }
+                    else {
+                        TCM_ASSERT(flags[j] == -1, "");
+                        counts[j] = n_min;
+                    }
+                }
+            }
+        }
+    }
+    for (auto i = 0U; i < states.size(); ++i) {
+        TCM_ASSERT(counts[i] != 0, "");
+        rates[i] /= static_cast<float>(counts[i]);
+    }
+}
+
 template <class scalar_t> struct TabuWorker {
     gsl::span<bits512 const>            possible_states;
     gsl::span<scalar_t const>           possible_log_probs;
@@ -306,32 +351,36 @@ template <class scalar_t> struct TabuWorker {
 
     auto run() -> void
     {
-        auto const jump_rates =
-            tabu_jump_rates(possible_log_probs, current_log_prob);
+        auto jump_rates = tabu_jump_rates(possible_log_probs, current_log_prob);
         auto flags = tabu_compute_flags(indices, alphas, basis.number_spins());
+        rescale_duplicates(possible_states, jump_rates, flags);
         auto [rates_sum_plus, rates_sum_minus] =
-            tabu_sum_rates(gsl::span{jump_rates}, flags);
+            tabu_sum_rates(gsl::span<float const>{jump_rates}, flags);
+        // TCM_ASSERT(rates_sum_minus == 0.0, "");
         auto const rates_sum_max = std::max(rates_sum_plus, rates_sum_minus);
         auto&      generator     = global_random_generator();
 
-        for (;;) {
-            if (std::uniform_real_distribution<double>{}(
-                    generator)*rates_sum_max
-                <= rates_sum_plus) {
+        for (auto done = false; !done;) {
+            current_weight +=
+                -std::log1p(
+                    -std::uniform_real_distribution<double>{}(generator))
+                / rates_sum_max;
+            auto u = std::uniform_real_distribution<double>{}(generator);
+            if (u * rates_sum_max <= rates_sum_plus) {
                 auto const i = static_cast<uint64_t>(choose_direction(
-                    gsl::span{jump_rates}, flags, rates_sum_plus));
-                current_weight =
-                    -std::log1p(
-                        -std::uniform_real_distribution<double>{}(generator))
-                    / rates_sum_max;
+                    gsl::span<float const>{jump_rates}, flags, rates_sum_plus));
+                // TCM_ASSERT(current_weight == 0.0, "");
                 current_state    = possible_states[i];
                 current_log_prob = possible_log_probs[i];
                 transform_alphas(alphas, indices[i], basis);
-                break;
+                done = true;
+                // break;
             }
-            else {
+            u = std::uniform_real_distribution<double>{}(generator);
+            if (u * rates_sum_max <= (rates_sum_max - rates_sum_plus)) {
+                // else {
                 // flipping tau
-                std::cout << "flipping tau..." << '\n';
+                // std::cout << "flipping tau..." << '\n';
                 std::for_each(std::begin(alphas), std::end(alphas),
                               [](auto& a) { a *= -1; });
                 std::for_each(std::begin(flags), std::end(flags),
@@ -407,10 +456,10 @@ auto TabuProcess::init_output(torch::Tensor init_state) -> void
 {
     auto init_log_prob = log_prob_fn(init_state);
     if (init_log_prob.dim() > 1) { init_log_prob.squeeze_(/*dim=*/1); }
-    states    = _prepend_dim(init_state, number_samples);
-    log_probs = _prepend_dim(init_log_prob, number_samples);
+    states    = _prepend_dim(init_state, number_samples + 1);
+    log_probs = _prepend_dim(init_log_prob, number_samples + 1);
     weights =
-        torch::empty({static_cast<int64_t>(number_samples), init_state.size(0)},
+        torch::zeros({static_cast<int64_t>(number_samples), init_state.size(0)},
                      torch::TensorOptions{}
                          .dtype(torch::kFloat32)
                          .device(c10::DeviceType::CPU));
@@ -457,8 +506,8 @@ auto TabuProcess::run() -> void
     auto       iteration     = 0L;
     auto       discarded     = 0L;
     for (;;) {
-        std::cout << "iteration=" << iteration << ", discarded=" << discarded
-                  << '\n';
+        // std::cout << "iteration=" << iteration << ", discarded=" << discarded
+        //           << '\n';
         auto const [possible_state, indices, counts] =
             generate_fn(states[iteration], device);
         auto const possible_log_prob = forward(possible_state);
@@ -481,32 +530,40 @@ auto TabuProcess::run() -> void
             auto const _alphas =
                 gsl::span<int8_t>{alphas[i].data_ptr<int8_t>(),
                                   static_cast<uint64_t>(alphas.size(1))};
+            // if (i == 0) {
+            //     for (auto const a : _alphas) {
+            //         std::cout << static_cast<int>(a) << ", ";
+            //     }
+            //     std::cout << "\n";
+            // }
             auto& _current_weight = weights_accessor[iteration][i];
+            _current_weight       = 0.0f;
             auto& _current_state  = *reinterpret_cast<bits512*>(
+                states_accessor[iteration + 1][i].data());
+            _current_state = *reinterpret_cast<bits512*>(
                 states_accessor[iteration][i].data());
-            auto& _current_log_prob = log_probs_accessor[iteration][i];
-            std::cout << _current_weight << ", " << _current_state.words[0]
-                      << ", " << _current_log_prob << '\n';
+            auto& _current_log_prob = log_probs_accessor[iteration + 1][i];
+            _current_log_prob       = log_probs_accessor[iteration][i];
+            // std::cout << _current_weight << ", " << _current_state.words[0]
+            //           << ", " << _current_log_prob << '\n';
 
             TabuWorker<float> worker{_possible_states,  _possible_log_probs,
                                      _indices,          _alphas,
                                      _current_weight,   _current_state,
                                      _current_log_prob, generate_fn.basis()};
             worker.run();
+            // if (i == 0) {
+            //     for (auto const a : _alphas) {
+            //         std::cout << static_cast<int>(a) << ", ";
+            //     }
+            //     std::cout << "\n";
+            // }
         }
 
         if (discarded < number_discarded) { ++discarded; }
         else {
             ++iteration;
             if (iteration == number_samples) { break; }
-            for (auto i = 0U; i < number_chains; ++i) {
-                *reinterpret_cast<bits512*>(
-                    states_accessor[iteration][i].data()) =
-                    *reinterpret_cast<bits512*>(
-                        states_accessor[iteration - 1][i].data());
-                log_probs_accessor[iteration][i] =
-                    log_probs_accessor[iteration - 1][i];
-            }
         }
     }
 }
@@ -514,6 +571,10 @@ auto TabuProcess::run() -> void
 auto TabuProcess::result()
     -> std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 {
+    states    = torch::narrow(states, /*dim=*/0, /*start=*/0,
+                           /*length=*/number_samples);
+    log_probs = torch::narrow(log_probs, /*dim=*/0, /*start=*/0,
+                              /*length=*/number_samples);
     return {states, log_probs, weights};
 }
 

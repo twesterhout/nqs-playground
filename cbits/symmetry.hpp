@@ -358,6 +358,20 @@ TCM_FORCEINLINE constexpr auto are_not_aligned(bits512 const& spin,
 }
 
 template <class UInt>
+TCM_FORCEINLINE constexpr auto test_bit(uint64_t const spin,
+                                        UInt const     i) noexcept -> bool
+{
+    return (spin >> i) & 1U;
+}
+
+template <class UInt>
+TCM_FORCEINLINE constexpr auto test_bit(bits512 const& spin,
+                                        UInt const     i) noexcept -> bool
+{
+    return test_bit(spin.words[i / UInt{64}], i % UInt{64});
+}
+
+template <class UInt>
 TCM_FORCEINLINE constexpr auto gather_bits(uint64_t const spin, UInt const i,
                                            UInt const j) noexcept -> unsigned
 {
