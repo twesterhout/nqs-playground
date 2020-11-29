@@ -653,7 +653,8 @@ class Runner(object):
             roots = self.config.roots(self._iteration)
         else:
             roots = self.config.roots
-        polynomial = _C.Polynomial(self.config.hamiltonian, roots)
+        polynomial = _C.Polynomial(self.config.hamiltonian, roots,
+                normalising=False, num_threads=1)
         values = _C.apply(spins.view(-1, 8), polynomial, log_ψ, self._batch_size)
         values = _safe_real_exp(values, normalise=True)
         logger.info("Applying polynomial took {:.1f}s", time.time() - timer)

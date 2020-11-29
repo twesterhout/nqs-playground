@@ -61,6 +61,24 @@ auto bind_spin_basis(PyObject* _module) -> void
                corresponding orbit).)EOF"),
             py::arg{"spin"})
         .def(
+            "representative",
+            [](BasisBase const& self, torch::Tensor spins) {
+                TCM_CHECK(spins.device().type() == c10::DeviceType::CPU,
+                          std::invalid_argument,
+                          "spins tensor must reside on the CPU");
+                auto spins_info = obtain_tensor_info<bits512 const>(spins);
+                auto out =
+                    torch::empty({spins_info.size(), 8L},
+                                 torch::TensorOptions{}.dtype(torch::kInt64));
+                auto out_info = obtain_tensor_info<bits512>(out);
+                for (auto i = 0L; i < spins_info.size(); ++i) {
+                    out_info.data[i * out_info.stride()] =
+                        std::get<0>(self.full_info(spins_info[i]));
+                }
+                return out;
+            },
+            py::arg{"spins"})
+        .def(
             "norm",
             [](BasisBase const& self, bits512 const& spin) {
                 return std::get<2>(self.full_info(spin));
