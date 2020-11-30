@@ -19,6 +19,3 @@
 [submodule "external/vectorclass/add-on"]
 	path = external/vectorclass/add-on
 	url = https://github.com/vectorclass/add-on
-[submodule "external/ThreadPool"]
-	path = external/ThreadPool
-	url = https://github.com/progschj/ThreadPool
