@@ -25,6 +25,3 @@
 [submodule "external/ThreadPool"]
 	path = external/ThreadPool
 	url = https://github.com/progschj/ThreadPool
-[submodule "external/robin-hood-hashing"]
-	path = external/robin-hood-hashing
-	url = https://github.com/martinus/robin-hood-hashing
