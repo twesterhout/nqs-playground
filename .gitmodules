@@ -16,6 +16,3 @@
 [submodule "external/vectorclass/version2"]
 	path = external/vectorclass/version2
 	url = https://github.com/vectorclass/version2
-[submodule "external/vectorclass/add-on"]
-	path = external/vectorclass/add-on
-	url = https://github.com/vectorclass/add-on
