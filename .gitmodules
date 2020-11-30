@@ -13,9 +13,6 @@
 [submodule "external/SG14"]
 	path = external/SG14
 	url = https://github.com/WG21-SG14/SG14.git
-[submodule "external/ska_sort"]
-	path = external/ska_sort
-	url = https://github.com/skarupke/ska_sort
 [submodule "external/vectorclass/version2"]
 	path = external/vectorclass/version2
 	url = https://github.com/vectorclass/version2
