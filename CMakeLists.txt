@@ -52,7 +52,11 @@ endif()
 # Torch
 if(TRUE)
     # This requires at least CMake 3.12
-    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    find_package(Python3 COMPONENTS Development REQUIRED)
+    if (NOT DEFINED Python3_EXECUTABLE)
+        message(STATUS "Setting Python3_EXECUTABLE manually...")
+        set(Python3_EXECUTABLE "python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}")
+    endif()
 
     # Runs python command _COMMAND and stores its output into _RESULT
     function(run_python_command _COMMAND _RESULT)
@@ -167,23 +171,6 @@ if(NOT TARGET gsl::gsl-lite)
     add_library(gsl::gsl-lite ALIAS gsl-lite)
 endif()
 
-# flat_hash_map library
-if(NOT TARGET flat_hash_map)
-    # Can't use submodules here anymore, thanks to PyTorch deciding to include
-    # flat_hash_map in their codebase...
-    # execute_process(COMMAND git submodule update --init -- external/flat_hash_map
-    #     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    add_library(flat_hash_map INTERFACE)
-    target_include_directories(flat_hash_map
-        SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/flat_hash_map)
-endif()
-
-if(NOT TARGET libcuckoo)
-    execute_process(COMMAND git submodule update --init -- external/robin-hood-hashing
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    add_subdirectory(external/robin-hood-hashing)
-endif()
-
 # vectorclass library
 if(NOT TARGET vectorclass)
     execute_process(COMMAND git submodule update --init -- external/vectorclass/version2
@@ -246,8 +233,6 @@ target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE torch
               fmt::fmt
               gsl::gsl-lite
-              flat_hash_map
-              robin_hood::robin_hood
               Boost::boost
               SG14
               OpenMP::OpenMP_CXX
@@ -317,6 +302,7 @@ add_library(nqs SHARED
     # cbits/polynomial.cpp
     cbits/polynomial_state.cpp
     cbits/simple_accumulator.cpp
+    cbits/v2/accumulator.cpp
     cbits/random.cpp
     cbits/unpack.cpp
     cbits/dotu.cpp
