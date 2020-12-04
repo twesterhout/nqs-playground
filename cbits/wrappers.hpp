@@ -1,4 +1,4 @@
-// Copyright (c) 2019, Tom Westerhout
+// Copyright (c) 2020, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -26,41 +26,38 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// #include "bind_heisenberg.hpp"
-// #include "bind_jacobian.hpp"
-// #include "bind_metropolis.hpp"
-// #include "bind_operator.hpp"
-// #include "bind_polynomial.hpp"
-// #include "bind_polynomial_state.hpp"
-// #include "bind_spin_basis.hpp"
-// #include "bind_symmetry.hpp"
-#include "bind_v2.hpp"
-#include <pybind11/pybind11.h>
+#pragma once
 
-namespace py = pybind11;
+#include "config.hpp"
+#include "errors.hpp"
+#include <lattice_symmetries/lattice_symmetries.h>
+#include <memory>
 
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wmissing-prototypes"
-#endif
-PYBIND11_MODULE(_C, m)
+TCM_NAMESPACE_BEGIN
+
+inline auto check_status_code(ls_error_code const code) -> void
 {
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic pop
-#endif
-
-    m.doc() = R"EOF()EOF";
-
-    using namespace TCM_NAMESPACE;
-
-    // bind_spin(m.ptr());
-    // bind_symmetry(m.ptr());
-    // bind_spin_basis(m.ptr());
-    // bind_heisenberg(m.ptr());
-    // bind_jacobian(m.ptr());
-    // bind_metropolis(m.ptr());
-    // bind_operator(m.ptr());
-    // bind_polynomial(m.ptr());
-    // bind_polynomial_state(m.ptr());
-    bind_v2(m.ptr());
+    if (TCM_UNLIKELY(code != LS_SUCCESS)) {
+        auto deleter = [](auto const* s) { ls_destroy_string(s); };
+        auto c_str   = std::unique_ptr<char const, decltype(deleter)>{
+            ls_error_to_string(code), deleter};
+        TCM_ERROR(
+            std::runtime_error,
+            fmt::format("lattice_symmetries failed with error code {}: {}",
+                        code, c_str.get()));
+    }
 }
+
+namespace detail {
+struct ls_operator_deleter {
+    auto operator()(ls_operator* p) const noexcept -> void
+    {
+        ls_destroy_operator(p);
+    }
+};
+} // namespace detail
+
+struct ls_operator_wrapper
+    : std::unique_ptr<ls_operator, detail::ls_operator_deleter> {};
+
+TCM_NAMESPACE_END
