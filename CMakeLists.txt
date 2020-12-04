@@ -169,6 +169,9 @@ if(NOT TARGET fmt::fmt)
     get_property(v TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
     set_property(TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
     target_include_directories(fmt SYSTEM BEFORE INTERFACE ${v})
+    get_property(v TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+    set_property(TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+    target_include_directories(fmt-header-only SYSTEM BEFORE INTERFACE ${v})
 endif()
 
 # gsl-lite library
@@ -326,7 +329,7 @@ add_library(nqs SHARED
     cbits/v2/accumulator.cpp
     # cbits/random.cpp
     cbits/unpack.cpp
-    cbits/dotu.cpp
+    # cbits/dotu.cpp
     # cbits/operator.cpp
     # cbits/symmetry.cpp
     # cbits/spin_basis.cpp
