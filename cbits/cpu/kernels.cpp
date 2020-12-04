@@ -88,9 +88,7 @@ TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
     }
     return a;
 } // }}}
-} // namespace
 
-namespace {
 template <class T>
 TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
                             vector_t<T> a) noexcept -> void
@@ -112,6 +110,7 @@ TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
 } // }}}
 } // namespace
 
+#if 0
 template <class T>
 auto jump_rates_one_simd(TensorInfo<T> const&       out,
                          TensorInfo<T const> const& log_prob, T scale) noexcept
@@ -148,7 +147,7 @@ template TCM_EXPORT auto jump_rates_one_simd(TensorInfo<double> const&,
                                              TensorInfo<double const> const&,
                                              double) noexcept -> double;
 
-#if defined(INCLUDE_DISPATCH_CODE)
+#    if defined(INCLUDE_DISPATCH_CODE)
 template <class T>
 using jump_rates_one_for_t = auto (*)(TensorInfo<T> const&,
                                       TensorInfo<T const> const&, T) noexcept
@@ -243,6 +242,7 @@ tabu_jump_rates(gsl::span<float const> proposed_log_prob,
 template TCM_EXPORT auto
 tabu_jump_rates(gsl::span<double const> proposed_log_prob,
                 double current_log_prob) -> std::vector<double>;
+#    endif
 #endif
 
 #if defined(INCLUDE_DISPATCH_CODE)
@@ -267,10 +267,10 @@ TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
 }
 
 #    endif // AT_MKL_ENABLED
-#endif // INCLUDE_DISPATCH_CODE
+#endif     // INCLUDE_DISPATCH_CODE
 
 namespace {
-TCM_FORCEINLINE auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f
+auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f
 {
     auto const  up   = vcl::Vec8f{1.0f};
     auto const  down = vcl::Vec8f{-1.0f};
@@ -279,7 +279,7 @@ TCM_FORCEINLINE auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f
     return vcl::select(mask, up, down);
 }
 
-TCM_FORCEINLINE auto unpack_word(uint64_t x, float* out) noexcept -> void
+auto unpack_word(uint64_t x, float* out) noexcept -> void
 {
     for (auto i = 0; i < 8; ++i, out += 8, x >>= 8) {
         unpack_byte(static_cast<uint8_t>(x & 0xFF)).store(out);
@@ -287,101 +287,54 @@ TCM_FORCEINLINE auto unpack_word(uint64_t x, float* out) noexcept -> void
 }
 } // namespace
 
-TCM_EXPORT auto unpack_one_simd(uint64_t x, unsigned const number_spins,
+TCM_EXPORT auto unpack_one_simd(uint64_t const x[], unsigned const number_spins,
                                 float* out) noexcept -> void
 {
-    auto const chunks = number_spins / 8U;
-    auto const rest   = number_spins % 8U;
-    for (auto i = 0U; i < chunks; ++i, out += 8, x >>= 8U) {
-        unpack_byte(static_cast<uint8_t>(x & 0xFF)).store(out);
+    constexpr auto block = 64U;
+    auto const     words = number_spins / block;
+    for (auto i = 0U; i < words; ++i, out += block) {
+        unpack_word(x[i], out);
     }
-    if (rest != 0) {
-        auto const t = unpack_byte(static_cast<uint8_t>(x & 0xFF));
-        t.store_partial(static_cast<int>(rest), out);
+    auto const bytes = (words % block) / 8U;
+    auto const rest  = (words % block) % 8U;
+    if (bytes != 0) {
+        auto y = x[words];
+        for (auto i = 0U; i < bytes; ++i, out += 8, y >>= 8U) {
+            unpack_byte(static_cast<uint8_t>(y & 0xFF)).store(out);
+        }
+        if (rest != 0) {
+            auto const t = unpack_byte(static_cast<uint8_t>(y & 0xFF));
+            t.store_partial(static_cast<int>(rest), out);
+        }
     }
-}
-
-TCM_EXPORT auto unpack_one_simd(bits512 const& bits, unsigned const count,
-                                float* out) noexcept -> void
-{
-    constexpr auto block  = 64U;
-    auto const     chunks = count / block;
-    auto const     rest   = count % block;
-
-    auto i = 0U;
-    for (; i < chunks; ++i, out += block) {
-        unpack_word(bits.words[i], out);
-    }
-    if (rest != 0) { unpack_one_simd(bits.words[i], rest, out); }
 }
 
 #if defined(INCLUDE_DISPATCH_CODE)
-struct _IdentityProjection {
-    template <class T> constexpr decltype(auto) operator()(T&& x) const noexcept
-    {
-        return std::forward<T>(x);
-    }
-};
-
-template <class Bits> struct unpack_one_for;
-template <> struct unpack_one_for<uint64_t> {
-    using type = auto (*)(uint64_t, unsigned, float*) noexcept -> void;
-};
-template <> struct unpack_one_for<bits512> {
-    using type = auto (*)(bits512 const&, unsigned, float*) noexcept -> void;
-};
-template <class Bits>
-using unpack_one_for_t = typename unpack_one_for<Bits>::type;
-
-template <class Bits, class Projection = _IdentityProjection>
-auto unpack_impl(TensorInfo<Bits const> const& src_info,
-                 TensorInfo<float, 2> const&   dst_info,
-                 Projection                    proj = Projection{}) -> void
+TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
+                           TensorInfo<float, 2> const& dst_info) -> void
 {
-    if (TCM_UNLIKELY(src_info.size() == 0)) { return; }
+    if (src_info.size<0>() == 0) { return; }
     TCM_CHECK(
-        dst_info.strides[0] == dst_info.sizes[1], std::invalid_argument,
-        fmt::format("unpack_cpu_avx does not support strided output tensors"));
+        dst_info.strides[0] == dst_info.size<1>(), std::invalid_argument,
+        fmt::format("unpack_cpu does not support strided output tensors"));
 
-    auto unpack_ptr = []() -> unpack_one_for_t<Bits> {
-        auto& cpuid = caffe2::GetCpuId();
-        if (cpuid.avx2()) { return &unpack_one_avx2; }
-        if (cpuid.avx()) { return &unpack_one_avx; }
+    using unpack_one_fn_t =
+        auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
+    auto unpack_ptr = []() -> unpack_one_fn_t {
+        if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
+        if (__builtin_cpu_supports("avx")) { return &unpack_one_avx; }
         return &unpack_one_sse2;
     }();
 
     auto const number_spins = static_cast<unsigned>(dst_info.sizes[1]);
-    auto const rest         = number_spins % 8;
-    auto const tail         = std::min<int64_t>(
-        ((8U - rest) + number_spins - 1U) / number_spins, src_info.size());
-    auto* src = src_info.data;
-    auto* dst = dst_info.data;
-    auto  i   = int64_t{0};
-    for (; i < src_info.size() - tail;
-         ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
-        // unpack_one</*Unsafe=*/true>(proj(*src), number_spins, dst);
-        (*unpack_ptr)(proj(*src), number_spins, dst);
-    }
-    for (; i < src_info.size();
-         ++i, src += src_info.stride(), dst += dst_info.strides[0]) {
-        // unpack_one</*Unsafe=*/false>(proj(*src), number_spins, dst);
-        (*unpack_ptr)(proj(*src), number_spins, dst);
+    for (auto i = int64_t{0}; i < src_info.size<0>(); ++i) {
+        (*unpack_ptr)(src_info.data + i * src_info.stride<0>(), number_spins,
+                      dst_info.data + i * dst_info.stride<0>());
     }
 }
-
-template <class Bits>
-auto unpack_cpu(TensorInfo<Bits const> const& src_info,
-                TensorInfo<float, 2> const&   dst_info) -> void
-{
-    unpack_impl(src_info, dst_info);
-}
-
-template TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const> const&,
-                                    TensorInfo<float, 2> const&) -> void;
-template TCM_EXPORT auto unpack_cpu(TensorInfo<bits512 const> const&,
-                                    TensorInfo<float, 2> const&) -> void;
 #endif
 
+#if 0
 namespace {
 /// Performs one step of the Butterfly network. It exchanges bits with distance
 /// \p d between them if the corresponding bits in the mask \p m are set.
@@ -487,7 +440,7 @@ TCM_EXPORT auto ibfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
     _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
 }
 
-#if defined(INCLUDE_DISPATCH_CODE)
+#    if defined(INCLUDE_DISPATCH_CODE)
 TCM_EXPORT auto bfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void
 {
     auto& cpuid = caffe2::GetCpuId();
@@ -516,6 +469,7 @@ TCM_EXPORT auto ibfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
         ibfly_sse2(x, masks);
     }
 }
+#    endif
 #endif
 
 TCM_NAMESPACE_END
