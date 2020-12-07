@@ -365,7 +365,8 @@ auto Accumulator::process_result_helper(
     TCM_ASSERT(coeffs.size(0) > 0, "");
     auto i = int64_t{0};
     if (!_complete) {
-        _output.back() = log_plus_log(_output.back(), coeffs[i]);
+        _output.back() = log_plus_log(
+            _output.back(), static_cast<std::complex<double>>(coeffs[i]));
         ++i;
     }
     _output.reserve(_output.size() + static_cast<uint64_t>(coeffs.size(0) - i));
@@ -380,12 +381,12 @@ auto Accumulator::process_result(std::invoke_result_t<Task> result) -> void
     auto const& [coeffs, complete] = result;
     switch (coeffs.scalar_type()) {
     case torch::ScalarType::ComplexFloat:
-        process_result_helper<std::complex<float>>(
-            coeffs.accessor<std::complex<float>, 1>(), complete);
+        process_result_helper<c10::complex<float>>(
+            coeffs.accessor<c10::complex<float>, 1>(), complete);
         break;
     case torch::ScalarType::ComplexDouble:
-        process_result_helper<std::complex<double>>(
-            coeffs.accessor<std::complex<double>, 1>(), complete);
+        process_result_helper<c10::complex<double>>(
+            coeffs.accessor<c10::complex<double>, 1>(), complete);
         break;
     default:
         TCM_ERROR(

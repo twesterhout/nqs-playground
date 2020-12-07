@@ -145,6 +145,27 @@ struct TensorInfo {
     {}
 
   public:
+    template <int D = -1,
+              class = typename std::enable_if<(D == -1 && Dims == 1)
+                                              || (D >= 0 && Dims >= 1)>::type>
+    constexpr auto size() const noexcept -> Index
+    {
+        static_assert(D < static_cast<int>(Dims), "index out of bounds");
+        constexpr auto i = D == -1 ? 0 : D;
+        return sizes[i];
+    }
+
+    template <int D = -1,
+              class = typename std::enable_if<(D == -1 && Dims == 1)
+                                              || (D >= 0 && Dims >= 1)>::type>
+    constexpr auto stride() const noexcept -> Index
+    {
+        static_assert(D < static_cast<int>(Dims), "index out of bounds");
+        constexpr auto i = D == -1 ? 0 : D;
+        return strides[i];
+    }
+
+#if 0
     template <class D = void, class = typename std::enable_if<
                                   std::is_same<D, D>::value && Dims == 1>::type>
     constexpr auto size() const noexcept -> Index
@@ -158,6 +179,7 @@ struct TensorInfo {
     {
         return strides[0];
     }
+#endif
 
     template <class D = void, class = typename std::enable_if<
                                   std::is_same<D, D>::value && Dims == 1>::type>
@@ -200,6 +222,54 @@ TCM_FORCEINLINE auto slice(TensorInfo<T> const& x, int64_t const start,
     TCM_ASSERT(0 <= start && start < x.size(), "index out of bounds");
     TCM_ASSERT(start <= end && end <= x.size(), "index out of bounds");
     return TensorInfo<T>{x.data + start * x.stride(), end - start, x.stride()};
+}
+
+namespace detail {
+template <class T, size_t Dims, class = void> struct obtain_tensor_info_fn {
+    auto operator()(torch::Tensor x, char const* name) const
+        -> TensorInfo<T, Dims>
+    {
+        auto const arg_name = name != nullptr ? name : "tensor";
+        auto const sizes    = x.sizes();
+        TCM_CHECK(
+            sizes.size() == Dims, std::invalid_argument,
+            fmt::format(
+                "{} has wrong shape: [{}]; expected a {}-dimensional tensor",
+                arg_name, fmt::join(sizes, ","), Dims));
+        auto* data = x.data_ptr<T>();
+        return {data, sizes.data(), x.strides().data()};
+    }
+};
+
+template <class T, size_t Dims>
+struct obtain_tensor_info_fn<T const, Dims>
+    : public obtain_tensor_info_fn<T, Dims> {
+    auto operator()(torch::Tensor const& x, char const* name) const
+        -> TensorInfo<T const, Dims>
+    {
+        return static_cast<obtain_tensor_info_fn<T, Dims> const&>(*this)(x,
+                                                                         name);
+    }
+};
+
+template <size_t Dims>
+struct obtain_tensor_info_fn<uint64_t, Dims>
+    : public obtain_tensor_info_fn<int64_t, Dims> {
+    auto operator()(torch::Tensor const& x, char const* name) const
+        -> TensorInfo<uint64_t, Dims>
+    {
+        auto const i = static_cast<obtain_tensor_info_fn<int64_t, Dims> const&>(
+            *this)(x, name);
+        return {reinterpret_cast<uint64_t*>(i.data), i.sizes, i.strides};
+    }
+};
+} // namespace detail
+
+template <class T, size_t Dims = 1>
+auto tensor_info(torch::Tensor x, char const* name = nullptr)
+    -> TensorInfo<T, Dims>
+{
+    return detail::obtain_tensor_info_fn<T, Dims>{}(std::move(x), name);
 }
 
 template <class T>

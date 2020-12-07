@@ -112,11 +112,31 @@ print(1000 * (1000 * a + b) + c)" _TEMP)
     # target_compile_options(Torch INTERFACE -Wno-missing-include-dirs)
     add_library(torch ALIAS Torch)
 
+    message(STATUS "PATH: $ENV{CONDA_PREFIX}/lib/python3.8/lib/site-packages/torch/lib")
+    find_library(libc10 c10
+        HINTS $ENV{CONDA_PREFIX}/lib/python3.8/site-packages/torch/lib
+        REQUIRED
+    )
+    find_library(libtorch torch
+        HINTS $ENV{CONDA_PREFIX}/lib/python3.8/site-packages/torch/lib
+        REQUIRED
+    )
+    message(STATUS "libc10: ${libc10}")
+
+    target_link_libraries(Torch INTERFACE ${libtorch} ${libc10})
+
 else()
     # This doesn't work properly, because PyTorch is hardcoding some paths in
     # Caffe2Config.cmake
     find_package(Torch REQUIRED)
 endif()
+
+if(TRUE)
+    find_package(PkgConfig REQUIRED) 
+    pkg_check_modules(lattice_symmetries REQUIRED IMPORTED_TARGET lattice_symmetries)
+endif()
+
+
 
 function(nqs_cbits_add_low_level_flags MY_TARGET)
     if (TCM_USE_CXX11_ABI)
@@ -149,6 +169,9 @@ if(NOT TARGET fmt::fmt)
     get_property(v TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
     set_property(TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
     target_include_directories(fmt SYSTEM BEFORE INTERFACE ${v})
+    get_property(v TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+    set_property(TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+    target_include_directories(fmt-header-only SYSTEM BEFORE INTERFACE ${v})
 endif()
 
 # gsl-lite library
@@ -231,11 +254,12 @@ find_package(OpenMP REQUIRED)
 
 target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE torch
-              fmt::fmt
+              fmt::fmt-header-only
               gsl::gsl-lite
               Boost::boost
               SG14
               OpenMP::OpenMP_CXX
+              PkgConfig::lattice_symmetries
 )
 
 
@@ -250,7 +274,7 @@ if(CMAKE_CUDA_COMPILER)
         cbits/gpu/dotu.cu)
     nqs_cbits_add_low_level_flags(nqs_gpu)
     target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
-    target_link_libraries(nqs_gpu PUBLIC Boost::boost gsl::gsl-lite fmt::fmt torch)
+    target_link_libraries(nqs_gpu PUBLIC Boost::boost gsl::gsl-lite fmt::fmt-header-only torch)
 endif()
 
 
@@ -279,7 +303,7 @@ foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
     add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
     nqs_cbits_add_low_level_flags(${my_target})
     target_compile_options(${my_target} PRIVATE ${TCM_WARNING_FLAGS})
-    target_link_libraries(${my_target} PUBLIC torch gsl::gsl-lite fmt::fmt Boost::boost)
+    target_link_libraries(${my_target} PUBLIC torch gsl::gsl-lite fmt::fmt-header-only Boost::boost)
     target_link_libraries(${my_target} PRIVATE vectorclass)
 endforeach()
 target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
@@ -293,22 +317,22 @@ target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
 add_library(nqs SHARED
     cbits/bits512.cpp
     cbits/errors.cpp
-    cbits/metropolis.cpp
-    cbits/tabu.cpp
-    cbits/jacobian.cpp
-    cbits/heisenberg.cpp
-    cbits/forward_propagator.cpp
-    cbits/simple_polynomial.cpp
+    # cbits/metropolis.cpp
+    # cbits/tabu.cpp
+    # cbits/jacobian.cpp
+    # cbits/heisenberg.cpp
+    # cbits/forward_propagator.cpp
+    # cbits/simple_polynomial.cpp
     # cbits/polynomial.cpp
-    cbits/polynomial_state.cpp
-    cbits/simple_accumulator.cpp
+    # cbits/polynomial_state.cpp
+    # cbits/simple_accumulator.cpp
     cbits/v2/accumulator.cpp
-    cbits/random.cpp
+    # cbits/random.cpp
     cbits/unpack.cpp
-    cbits/dotu.cpp
-    cbits/operator.cpp
-    cbits/symmetry.cpp
-    cbits/spin_basis.cpp
+    # cbits/dotu.cpp
+    # cbits/operator.cpp
+    # cbits/symmetry.cpp
+    # cbits/spin_basis.cpp
     cbits/parallel.cpp
     # cbits/pool.cpp
     cbits/tensor_info.cpp
@@ -329,16 +353,17 @@ if(CMAKE_CUDA_COMPILER)
 endif()
 
 
-pybind11_add_module(_C MODULE SYSTEM NO_EXTRAS
+pybind11_add_module(_C MODULE NO_EXTRAS
     cbits/python/init.cpp
-    cbits/python/bind_jacobian.cpp
-    cbits/python/bind_heisenberg.cpp
-    cbits/python/bind_metropolis.cpp
-    cbits/python/bind_operator.cpp
-    cbits/python/bind_polynomial.cpp
-    cbits/python/bind_polynomial_state.cpp
-    cbits/python/bind_spin_basis.cpp
-    cbits/python/bind_symmetry.cpp
+    # cbits/python/bind_jacobian.cpp
+    # cbits/python/bind_heisenberg.cpp
+    # cbits/python/bind_metropolis.cpp
+    # cbits/python/bind_operator.cpp
+    # cbits/python/bind_polynomial.cpp
+    # cbits/python/bind_polynomial_state.cpp
+    # cbits/python/bind_spin_basis.cpp
+    # cbits/python/bind_symmetry.cpp
+    cbits/python/bind_v2.cpp
 )
 # pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
 #     cbits/nqs.cpp
@@ -368,7 +393,7 @@ target_compile_definitions(_C PUBLIC
 # target_link_libraries(_C PUBLIC nqs nqs_cbits_Common ${TORCH_PYTHON_LIBRARY})
 target_link_libraries(_C PUBLIC nqs)
 
-add_subdirectory(cbits/test/headers)
+# add_subdirectory(cbits/test/headers)
 
 set_property(TARGET _C
     PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
