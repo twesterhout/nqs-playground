@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "common.hpp"
 #include "config.hpp"
 #include "errors.hpp"
 #include <lattice_symmetries/lattice_symmetries.h>
@@ -48,16 +49,48 @@ inline auto check_status_code(ls_error_code const code) -> void
     }
 }
 
-namespace detail {
-struct ls_operator_deleter {
-    auto operator()(ls_operator* p) const noexcept -> void
-    {
-        ls_destroy_operator(p);
-    }
-};
-} // namespace detail
-
-struct ls_operator_wrapper
-    : std::unique_ptr<ls_operator, detail::ls_operator_deleter> {};
+inline auto view_as_operator(ls_operator const& op)
+    -> std::tuple<OperatorT, uint64_t>
+{
+    auto max_required_size = ls_operator_max_buffer_size(&op);
+    auto action            = [&op, max_required_size](
+                      bits512 const& spin, std::complex<double> coeff,
+                      gsl::span<bits512>              out_spins,
+                      gsl::span<std::complex<double>> out_coeffs) {
+        TCM_CHECK(out_spins.size() >= max_required_size, std::runtime_error,
+                  fmt::format(
+                      "out_spins buffer is too short: {}; expected at least {}",
+                      out_spins.size(), max_required_size));
+        TCM_CHECK(
+            out_coeffs.size() >= max_required_size, std::runtime_error,
+            fmt::format(
+                "out_coeffs buffer is too short: {}; expected at least {}",
+                out_coeffs.size(), max_required_size));
+        struct cxt_t {
+            ls_bits512*           spins_ptr;
+            std::complex<double>* coeffs_ptr;
+            uint64_t              offset;
+            uint64_t              max_size;
+        } cxt{reinterpret_cast<ls_bits512*>(out_spins.data()),
+              out_coeffs.data(), 0,
+              max_required_size}; // FIXME: move to ls_bits512 everywhere
+        auto callback = [](ls_bits512 const* spin, void const* coeff,
+                           void* cxt_raw) {
+            auto* _cxt = static_cast<cxt_t*>(cxt_raw);
+            TCM_CHECK(_cxt->offset < _cxt->max_size, std::runtime_error, "");
+            _cxt->spins_ptr[_cxt->offset] = *spin;
+            _cxt->coeffs_ptr[_cxt->offset] =
+                *static_cast<std::complex<double> const*>(coeff);
+            ++(_cxt->offset);
+            return LS_SUCCESS;
+        };
+        check_status_code(ls_operator_apply(
+            &op, reinterpret_cast<ls_bits512 const*>(&spin), callback, &cxt));
+        TCM_CHECK(cxt.offset <= max_required_size, std::runtime_error,
+                  "buffer overflow");
+        return cxt.offset;
+    };
+    return {std::move(action), max_required_size};
+}
 
 TCM_NAMESPACE_END
