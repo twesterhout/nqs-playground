@@ -110,7 +110,7 @@ print(1000 * (1000 * a + b) + c)" _TEMP)
     # Because PyTorch adds torch/include/THC, but it's not available on cpuonly
     # PyTorch installations
     # target_compile_options(Torch INTERFACE -Wno-missing-include-dirs)
-    add_library(torch ALIAS Torch)
+    # add_library(torch ALIAS Torch)
 
     message(STATUS "PATH: $ENV{CONDA_PREFIX}/lib/python3.8/lib/site-packages/torch/lib")
     find_library(libc10 c10
@@ -121,9 +121,13 @@ print(1000 * (1000 * a + b) + c)" _TEMP)
         HINTS $ENV{CONDA_PREFIX}/lib/python3.8/site-packages/torch/lib
         REQUIRED
     )
+    find_library(libtorch_python torch_python
+        HINTS $ENV{CONDA_PREFIX}/lib/python3.8/site-packages/torch/lib
+        REQUIRED
+    )
     message(STATUS "libc10: ${libc10}")
 
-    target_link_libraries(Torch INTERFACE ${libtorch} ${libc10})
+    target_link_libraries(Torch INTERFACE ${libtorch_python} ${libtorch} ${libc10})
 
 else()
     # This doesn't work properly, because PyTorch is hardcoding some paths in
@@ -146,8 +150,8 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
     if (TORCH_CXX_FLAGS)
         target_compile_options(${MY_TARGET} PUBLIC ${TORCH_CXX_FLAGS})
     endif()
-    set_property(TARGET ${MY_TARGET}
-        PROPERTY CXX_VISIBILITY_PRESET hidden)
+    # set_property(TARGET ${MY_TARGET}
+    #     PROPERTY CXX_VISIBILITY_PRESET hidden)
     set_property(TARGET ${MY_TARGET}
         PROPERTY POSITION_INDEPENDENT_CODE ON)
 endfunction()
@@ -253,7 +257,7 @@ find_package(OpenMP REQUIRED)
 
 
 target_link_libraries(nqs_cbits_Common INTERFACE
-    INTERFACE torch
+    INTERFACE Torch
               fmt::fmt-header-only
               gsl::gsl-lite
               Boost::boost
@@ -274,7 +278,7 @@ if(CMAKE_CUDA_COMPILER)
         cbits/gpu/dotu.cu)
     nqs_cbits_add_low_level_flags(nqs_gpu)
     target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
-    target_link_libraries(nqs_gpu PUBLIC Boost::boost gsl::gsl-lite fmt::fmt-header-only torch)
+    target_link_libraries(nqs_gpu PUBLIC Boost::boost gsl::gsl-lite fmt::fmt-header-only Torch)
 endif()
 
 
@@ -303,7 +307,7 @@ foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
     add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
     nqs_cbits_add_low_level_flags(${my_target})
     target_compile_options(${my_target} PRIVATE ${TCM_WARNING_FLAGS})
-    target_link_libraries(${my_target} PUBLIC torch gsl::gsl-lite fmt::fmt-header-only Boost::boost)
+    target_link_libraries(${my_target} PUBLIC Torch gsl::gsl-lite fmt::fmt-header-only Boost::boost)
     target_link_libraries(${my_target} PRIVATE vectorclass)
 endforeach()
 target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
