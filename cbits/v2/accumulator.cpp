@@ -72,9 +72,10 @@ TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
     torch::NoGradGuard no_grad;
 
     auto const output = forward(spins.to(device));
-    auto const dtype  = output.dtype();
-    auto       real   = torch::real(output);
-    auto const scale  = torch::max(real);
+    if (output.dim() > 1) { output.squeeze_(/*dim=*/1); }
+    auto const dtype = output.dtype();
+    auto       real  = torch::real(output);
+    auto const scale = torch::max(real);
     real -= scale;
     output.exp_();
 
@@ -210,7 +211,11 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
 
     auto chunks = split_counts(_counts, _batch_size);
     TCM_ASSERT(!chunks.empty(), "");
-    for (auto i = uint64_t{0}; i < chunks.size() - 1; ++i) {
+    auto const last =
+        chunks.size()
+        - static_cast<unsigned>(/*complete=*/!chunks.back().second);
+    auto i = uint64_t{0};
+    for (; i < last; ++i) {
         auto const start  = static_cast<int64_t>(i * _batch_size);
         auto const length = static_cast<int64_t>(_batch_size);
         auto       future =
@@ -222,12 +227,11 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
                        std::move(chunks[i].first), _device, chunks[i].second});
         futures.push_back(std::move(future));
     }
-    {
-        _counts = std::move(chunks.back().first);
-        _offset = static_cast<int64_t>(std::accumulate(
+    if (i != chunks.size()) {
+        _counts          = std::move(chunks[i].first);
+        _offset          = static_cast<int64_t>(std::accumulate(
             std::begin(_counts), std::end(_counts), uint64_t{0}));
-        auto const start =
-            static_cast<int64_t>((chunks.size() - 1) * _batch_size);
+        auto const start = static_cast<int64_t>(i * _batch_size);
 
         auto new_spins = make_spins();
         torch::narrow(new_spins, /*dim=*/0, /*start=*/0,
@@ -243,6 +247,13 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
                                  /*length=*/_offset));
         _coeffs = std::move(new_coeffs);
     }
+    else {
+        _counts = {};
+        _offset = {};
+        _spins  = make_spins();
+        _coeffs = make_coeffs();
+    }
+    TCM_ASSERT(_offset < static_cast<int64_t>(_batch_size), "");
     return futures;
 }
 
