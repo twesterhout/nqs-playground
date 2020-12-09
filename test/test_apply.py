@@ -1,14 +1,17 @@
 import numpy as np
 import torch
+import lattice_symmetries as ls
 
 try:
     from nqs_playground import _C
 except ImportError:
+    # For local development when we only compile the C++ extension, but don't
+    # actually install the package using pip
     import os
     import sys
+
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
     from nqs_playground import _C
-import lattice_symmetries as ls
 
 
 def _array_to_int(xs) -> int:
