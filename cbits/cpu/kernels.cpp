@@ -295,16 +295,17 @@ TCM_EXPORT auto unpack_one_simd(uint64_t const x[], unsigned const number_spins,
     for (auto i = 0U; i < words; ++i, out += block) {
         unpack_word(x[i], out);
     }
-    auto const bytes = (words % block) / 8U;
-    auto const rest  = (words % block) % 8U;
-    if (bytes != 0) {
-        auto y = x[words];
+    auto const rest_words = number_spins % block;
+    if (rest_words != 0) {
+        auto const bytes      = rest_words / 8U;
+        auto const rest_bytes = rest_words % 8U;
+        auto       y          = x[words];
         for (auto i = 0U; i < bytes; ++i, out += 8, y >>= 8U) {
             unpack_byte(static_cast<uint8_t>(y & 0xFF)).store(out);
         }
-        if (rest != 0) {
+        if (rest_bytes != 0) {
             auto const t = unpack_byte(static_cast<uint8_t>(y & 0xFF));
-            t.store_partial(static_cast<int>(rest), out);
+            t.store_partial(static_cast<int>(rest_bytes), out);
         }
     }
 }

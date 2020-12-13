@@ -1,10 +1,19 @@
 import numpy as np
 import torch
-from nqs_playground import *
+try:
+    from nqs_playground import *
+except ImportError:
+    # For local development when we only compile the C++ extension, but don't
+    # actually install the package using pip
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+    from nqs_playground import *
 
 np.random.seed(52339877)
 torch.manual_seed(9218823294)
-manual_seed(3362121853)
+# manual_seed(3362121853)
 
 
 @torch.no_grad()
