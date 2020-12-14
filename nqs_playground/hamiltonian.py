@@ -76,13 +76,13 @@ def _array_to_int(xs) -> int:
 def _reference_log_apply_one(spin, operator, log_psi, device):
     spins, coeffs = operator.apply(spin)
     spins = torch.from_numpy(spins.view(np.int64)).to(device)
-    coeffs = torch.from_numpy(coeffs).to(device)
-    output = log_psi(spins).to(coeffs.dtype)
+    output = log_psi(spins)
     if output.dim() > 1:
         output.squeeze_(dim=1)
     scale = torch.max(output.real)
     output.real -= scale
     torch.exp_(output)
+    coeffs = torch.from_numpy(coeffs).to(device=device, dtype=output.dtype)
     return scale + torch.log(torch.dot(coeffs, output))
 
 
