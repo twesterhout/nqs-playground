@@ -73,6 +73,7 @@ TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
 
     auto const output = forward(spins.to(device));
     if (output.dim() > 1) { output.squeeze_(/*dim=*/1); }
+    TCM_ASSERT(!torch::any(torch::isnan(output)).item<bool>(), "");
     auto const dtype = output.dtype();
     auto       real  = torch::real(output);
     auto const scale = torch::max(real);
@@ -83,6 +84,7 @@ TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
         torch::zeros({static_cast<int64_t>(counts.size())},
                      torch::TensorOptions{}.device(torch::kCPU).dtype(dtype));
     auto const cs = coeffs.to(coeffs.options().device(device).dtype(dtype));
+    TCM_ASSERT(!torch::any(torch::isnan(cs)).item<bool>(), "");
 
     auto offset = int64_t{0};
     for (auto j = 0U; j < counts.size(); offset +=
@@ -96,6 +98,7 @@ TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
                 torch::dot(slice(cs), slice(output));
         }
     }
+    TCM_ASSERT(!torch::any(torch::isnan(results)).item<bool>(), "");
 
     results.log_();
     torch::real(results) += scale;
@@ -149,7 +152,7 @@ Buffer::Buffer(v2::ForwardT forward, uint64_t max_required_size,
 
 auto Buffer::make_spins() const -> torch::Tensor
 {
-    return torch::empty(
+    return torch::zeros(
         {static_cast<int64_t>(_batch_size + _max_required_size), 8},
         torch::TensorOptions{}.device(torch::kCPU).dtype(torch::kInt64));
 }
@@ -198,11 +201,13 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
     -> std::vector<std::future<std::invoke_result_t<Task>>>
 {
     TCM_ASSERT(_offset < static_cast<int64_t>(_batch_size), "");
-    auto const written = op(
-        x, 1.0,
-        gsl::span{static_cast<bits512*>(_spins.data_ptr()), _max_required_size},
-        gsl::span{static_cast<std::complex<double>*>(_coeffs.data_ptr()),
-                  _max_required_size});
+    auto const written =
+        op(x, 1.0,
+           gsl::span{static_cast<bits512*>(_spins.data_ptr()) + _offset,
+                     _max_required_size},
+           gsl::span{static_cast<std::complex<double>*>(_coeffs.data_ptr())
+                         + _offset,
+                     _max_required_size});
     _offset += static_cast<int64_t>(written);
     _counts.push_back(written);
 
@@ -376,6 +381,7 @@ auto Accumulator::process_result_helper(
     TCM_ASSERT(coeffs.size(0) > 0, "");
     auto i = int64_t{0};
     if (!_complete) {
+        TCM_ASSERT(!_output.empty(), "");
         _output.back() = log_plus_log(
             _output.back(), static_cast<std::complex<double>>(coeffs[i]));
         ++i;
