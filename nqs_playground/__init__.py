@@ -1,11 +1,9 @@
 # NOTE: We need to import PyTorch first, because we don't explicitly link
 # against it in C++ code.
 import torch as __torch
-# TODO: Link against liblattice_symmetries properly
-import lattice_symmetries as __ls
 
 # from . import _C
-# from .core import *
+from .core import *
 # from .symmetry import *
 
 
@@ -26,10 +24,11 @@ import lattice_symmetries as __ls
 #         )
 
 
-# from .hamiltonian import *
+from .hamiltonian import *
+from .sampling import *
 # from .monte_carlo import *
-# from ._jacobian import *
+from ._jacobian import *
 # from ._C import manual_seed
 
 # This operator becomes available only after loading _C
-# unpack = __torch.ops.tcm.unpack
+unpack = __torch.ops.tcm.unpack

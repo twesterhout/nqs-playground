@@ -30,12 +30,12 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 __all__ = [
-    "with_file_like",
+    # "with_file_like",
     "Unpack",
     "forward_with_batches",
-    "SpinDataset",
-    "combine_amplitude_and_sign",
-    "combine_amplitude_and_sign_classifier",
+    # "SpinDataset",
+    # "combine_amplitude_and_sign",
+    # "combine_amplitude_and_sign_classifier",
     "combine_amplitude_and_phase",
     "load_model",
     "load_device",
@@ -93,7 +93,30 @@ class Unpack(torch.nn.Module):
         return torch.ops.tcm.unpack(x, self.n)
 
 
-def forward_with_batches(f, xs, batch_size: int) -> Tensor:
+def as_spins_tensor(spins: Tensor, force_width: bool = True) -> Tensor:
+    r"""Convert `spins` to a PyTorch Tensor representing spin configurations."""
+    if isinstance(spins, np.ndarray):
+        if not spins.dtype == np.uint64:
+            raise TypeError("'spins' has invalid datatype: {}; expected uint64".format(spins.dtype))
+        spins = torch.from_numpy(spins.view(np.int64))
+    if not isinstance(spins, Tensor):
+        raise TypeError("'spins' has invalid type: {}; expected a torch.Tensor".format(type(spins)))
+    if spins.dtype != torch.int64:
+        raise TypeError("'spins' has invalid datatype: {}; expected int64".format(spins.dtype))
+    if spins.ndim == 0 or spins.ndim == 1:
+        spins = spins.reshape(-1, 1)
+    if force_width:
+        if spins.size(-1) != 8:
+            raise ValueError(
+                "'spins' has invalid shape: {}; size along the last dimension "
+                "must be 8".format(spins.size())
+            )
+        if spins.stride(-1) != 1:
+            raise ValueError("'spins' must be contiguous along the last dimension")
+    return spins
+
+
+def forward_with_batches(f, xs, batch_size: int, device=None) -> Tensor:
     r"""Applies ``f`` to all ``xs`` propagating no more than ``batch_size``
     samples at a time. ``xs`` is split into batches along the first dimension
     (i.e. dim=0). ``f`` must return a torch.Tensor.
@@ -101,15 +124,22 @@ def forward_with_batches(f, xs, batch_size: int) -> Tensor:
     n = xs.shape[0]
     if n == 0:
         raise ValueError("invalid xs: {}; input should not be empty".format(xs))
+    batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
     i = 0
     out = []
     while i + batch_size <= n:
-        out.append(f(xs[i : i + batch_size]))
+        chunk = xs[i : i + batch_size]
+        if device is not None:
+            chunk = chunk.to(device)
+        out.append(f(chunk))
         i += batch_size
     if i != n:  # Remaining part
-        out.append(f(xs[i:]))
+        chunk = xs[i:]
+        if device is not None:
+            chunk = chunk.to(device)
+        out.append(f(chunk))
     return torch.cat(out, dim=0)
 
 
@@ -187,7 +217,8 @@ class SpinDataset(torch.utils.data.IterableDataset):
             spins = self.spins
             values = self.values
         return zip(
-            torch.split(self.spins, self.batch_size), torch.split(self.values, self.batch_size),
+            torch.split(self.spins, self.batch_size),
+            torch.split(self.values, self.batch_size),
         )
 
 
@@ -253,15 +284,12 @@ def combine_amplitude_and_sign(
 
 
 def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Module:
-    r"""Combines PyTorch modules representing amplitude (or logarithm thereof)
-    and phase into a single module representing the logarithm of the
-    wavefunction.
+    r"""Combines PyTorch modules representing log amplitude and phase into a
+    single module representing the logarithm of the wavefunction.
 
     :param modules: a tuple of two modules: ``(amplitude, phase)``. Both
-        modules have ``(batch_size, in_features)`` as input shape and
+        modules receive ``(batch_size, in_features)`` as input shape produce
         ``(batch_size, 1)`` as output shape.
-    :param apply_log: if ``True``, logarithm is applied to the output of
-        ``amplitude`` module.
     :param use_jit: if ``True``, the returned module is a
         ``torch.jit.ScriptModule``.
     """
@@ -275,7 +303,7 @@ def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Modu
         def forward(self, x: Tensor) -> Tensor:
             a = self.amplitude(x)
             b = self.phase(x)
-            return torch.cat([a, b], dim=1)
+            return torch.complex(a, b)
 
     m = CombiningState(*modules)
     if use_jit:
@@ -312,7 +340,7 @@ def combine_amplitude_and_sign_classifier(
     return m
 
 
-def load_model(model, number_spins=None) -> torch.jit.ScriptModule:
+def load_model(model, jit=True, number_spins=None) -> torch.jit.ScriptModule:
     r"""Loads a model for a simulation. If ``model`` is already a
     ``torch.jit.ScriptModule`` nothing is done. If ``model`` is just a
     ``torch.nn.Module`` we compile it to TorchScript. Otherwise ``model`` is
@@ -323,7 +351,9 @@ def load_model(model, number_spins=None) -> torch.jit.ScriptModule:
         return model
     # model is a Module, so we just compile it.
     elif isinstance(model, torch.nn.Module):
-        return torch.jit.script(model)
+        if jit:
+            model = torch.jit.script(model)
+        return model
     # model is a string
     # If model is a Python script, we import the Net class from it,
     # construct the model, and JIT-compile it. Otherwise, we assume
@@ -356,14 +386,12 @@ def load_exact(ground_state):
     if isinstance(ground_state, str):
         # Ground state was saved using NumPy binary format
         ground_state = np.load(ground_state)
-        if ground_state.ndim > 1:
-            raise ValueError("ground state must be a vector")
     ground_state /= np.linalg.norm(ground_state)
     return ground_state.squeeze()
 
 
 def load_device(config) -> torch.device:
-    r"""Determines which device to use for the simulation. We support
+    r"""Determine which device to use for the simulation. We support
     specifying the device as either 'torch.device' (for cases when you e.g.
     have multiple GPUs and want to use some particular one) or as a string with
     device type (i.e. either "gpu" or "cpu").
@@ -381,6 +409,10 @@ def load_device(config) -> torch.device:
 
 @torch.jit.script
 def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
+    r"""Calculate ``exp(x)`` avoiding overflows. Result is not equal to
+    ``exp(x)``, but rather proportional to it. If ``normalise==True``, then
+    this function makes sure that output tensor elements sum up to 1.
+    """
     x = x - torch.max(x)
     torch.exp_(x)
     if normalise:
