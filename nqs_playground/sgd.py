@@ -146,8 +146,6 @@ class Runner:
 
     def calculate_gradient(self, spins, local_loss, weights):
         logger.info("Calculating gradients...")
-        # Reshape spins to flatten dimensions representing Markov chains
-        spins = spins.view(-1, spins.size(-1))
         if local_loss.dtype == torch.complex64 or local_loss.dtype == torch.complex128:
             local_loss = local_loss.real
         mean_loss = torch.dot(local_loss, weights)
@@ -173,16 +171,21 @@ class Runner:
             self.hamiltonian,
             self.combined_state,
             batch_size=self.inference_batch_size,
-            debug=True,
+            debug=False,
         )
-        energy = torch.dot(local_energies, weights.to(local_energies.dtype))
-        logger.info("Energy: {}", energy)
-        variance = torch.dot(torch.abs(local_energies - energy)**2, weights)
-        logger.info("Energy variance: {}", variance)
         # Compute autocorrelation time based on E_loc(σ)
         if self.config.sampling_mode != "full":
             tau = integrated_autocorr_time(local_energies)
             logger.info("Autocorrelation time of local energies: {}", tau)
+        # Reshape spins to flatten dimensions representing Markov chains
+        spins = spins.view(-1, spins.size(-1))
+        local_energies = local_energies.view(-1)
+        weights = weights.view(-1)
+
+        energy = torch.dot(local_energies, weights.to(local_energies.dtype))
+        logger.info("Energy: {}", energy)
+        variance = torch.dot(torch.abs(local_energies - energy)**2, weights)
+        logger.info("Energy variance: {}", variance)
         self.calculate_gradient(spins, local_energies, weights)
         self.optimiser.step()
         self._iteration += 1

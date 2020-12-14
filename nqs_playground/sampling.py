@@ -184,7 +184,7 @@ def sample_exactly(
     padding = torch.zeros(states.size(0), 7, device=device, dtype=torch.int64)
     states = torch.cat([states.unsqueeze(dim=1), padding], dim=1)
     shape = (options.number_samples, options.number_chains)
-    return states.view(*shape, 8), log_prob.view(*shape), None
+    return states.view(*shape, 8), log_prob.view(*shape), {}
 
 
 # class Sampler:

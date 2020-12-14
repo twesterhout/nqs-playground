@@ -168,7 +168,8 @@ auto Buffer::make_coeffs() const -> torch::Tensor
 
 namespace {
     auto split_counts(std::vector<uint64_t> counts, uint64_t const batch_size)
-        -> std::vector<std::pair<std::vector<uint64_t>, bool>>
+        -> std::tuple<std::vector<std::pair<std::vector<uint64_t>, bool>>,
+                      std::optional<std::pair<std::vector<uint64_t>, bool>>>
     {
         std::vector<std::pair<std::vector<uint64_t>, bool>> chunks;
         std::pair<std::vector<uint64_t>, bool>              chunk = {{}, {}};
@@ -192,8 +193,10 @@ namespace {
                 chunk_count += current_count;
             }
         }
-        if (!chunk.first.empty()) { chunks.push_back(std::move(chunk)); }
-        return chunks;
+        std::optional<std::pair<std::vector<uint64_t>, bool>> rest{
+            std::nullopt};
+        if (!chunk.first.empty()) { rest = std::move(chunk); }
+        return {std::move(chunks), std::move(rest)};
     }
 } // namespace
 
@@ -214,16 +217,13 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
     std::vector<std::future<std::invoke_result_t<Task>>> futures;
     if (_offset < static_cast<int64_t>(_batch_size)) { return futures; }
 
-    auto chunks = split_counts(_counts, _batch_size);
-    TCM_ASSERT(!chunks.empty(), "");
-    auto const last =
-        chunks.size()
-        - static_cast<unsigned>(/*complete=*/!chunks.back().second);
-    auto i = uint64_t{0};
-    for (; i < last; ++i) {
+    auto [chunks, rest] = split_counts(_counts, _batch_size);
+    auto i              = uint64_t{0};
+    for (; i < chunks.size(); ++i) {
         auto const start  = static_cast<int64_t>(i * _batch_size);
         auto const length = static_cast<int64_t>(_batch_size);
-        auto       future =
+        TCM_ASSERT(start + length <= _batch_size + _max_required_size, "");
+        auto future =
             async(Task{_forward,
                        torch::narrow(_spins, /*dim=*/0, /*start=*/start,
                                      /*length=*/length),
@@ -232,11 +232,12 @@ auto Buffer::submit(bits512 const& x, OperatorT const& op)
                        std::move(chunks[i].first), _device, chunks[i].second});
         futures.push_back(std::move(future));
     }
-    if (i != chunks.size()) {
-        _counts          = std::move(chunks[i].first);
+    if (rest.has_value()) {
+        _counts          = std::move(rest->first);
         _offset          = static_cast<int64_t>(std::accumulate(
             std::begin(_counts), std::end(_counts), uint64_t{0}));
         auto const start = static_cast<int64_t>(i * _batch_size);
+        TCM_ASSERT(start + _offset <= _batch_size + _max_required_size, "");
 
         auto new_spins = make_spins();
         torch::narrow(new_spins, /*dim=*/0, /*start=*/0,
