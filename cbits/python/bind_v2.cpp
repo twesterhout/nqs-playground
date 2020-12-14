@@ -22,12 +22,6 @@ auto bind_v2(PyObject* _module) -> void
         [](torch::Tensor spins, ls_operator const& _op, v2::ForwardT psi,
            uint64_t batch_size) {
             auto [op, max_required_size] = view_as_operator(_op);
-
-            {
-                py::gil_scoped_acquire acq;
-                py::print(max_required_size);
-            }
-
             return v2::apply(std::move(spins), std::move(op), std::move(psi),
                              max_required_size, batch_size);
         },
