@@ -446,8 +446,9 @@ auto Accumulator::operator()(torch::Tensor spins) -> torch::Tensor
     TCM_CHECK(spins_dim == 2 && spins_shape[1] == 8, std::domain_error,
               fmt::format("spins has wrong shape: [{}]; expected [?, 8]",
                           fmt::join(spins_shape, ", ")));
-    spins         = spins.to(spins.options().device(torch::kCPU));
-    auto accessor = spins.accessor<int64_t, 2>();
+    auto const device = spins.device();
+    spins             = spins.to(spins.options().device(torch::kCPU));
+    auto accessor     = spins.accessor<int64_t, 2>();
     for (auto i = int64_t{0}; i < accessor.size(0); ++i) {
         auto const row = accessor[i];
 
@@ -460,7 +461,8 @@ auto Accumulator::operator()(torch::Tensor spins) -> torch::Tensor
     }
     process_future(_buffer.submit_final());
     drain(_queue.size());
-    return vector_to_tensor(std::move(_output));
+    auto r = vector_to_tensor(std::move(_output));
+    return r.to(r.options().device(device));
 }
 
 TCM_EXPORT auto apply(torch::Tensor spins, OperatorT op, ForwardT psi,

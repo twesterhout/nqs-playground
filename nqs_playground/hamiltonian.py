@@ -61,6 +61,9 @@ def heisenberg_interaction(edges: List[Tuple[int, int]], coupling: complex) -> I
     return Interaction(matrix, coupling)
 
 def _array_to_int(xs) -> int:
+    r"""Convert an array of 8 int64 values (i.e. something like bits512) to a
+    Python integer.
+    """
     if len(xs) == 0:
         return 0
     n = int(xs[-1])
@@ -84,12 +87,17 @@ def _reference_log_apply_one(spin, operator, log_psi, device):
 
 
 def reference_log_apply(spins, operator, log_psi, batch_size=None):
+    r"""Reference implementation of _C.log_apply. It should be semantically the
+    same, but orders of magnitude slower.
+    """
     device = spins.device
     result = torch.empty(spins.size(0), dtype=torch.complex128)
     for (i, spin) in enumerate(spins):
         result[i] = _reference_log_apply_one(_array_to_int(spin), operator, log_psi, device)
     return result
 
+def _isclose(a, b):
+    return torch.isclose(a, b, rtol=5e-5, atol=5e-7)
 
 @torch.no_grad()
 def local_values(
@@ -133,11 +141,15 @@ def local_values(
     logger.debug("Using _C.log_apply...")
     log_h_psi = _C.log_apply(spins, hamiltonian, state, batch_size)
     if debug:
-        logger.info("Checking against reference_log_apply...")
+        logger.debug("Checking against reference_log_apply...")
         _log_h_psi_py = reference_log_apply(spins, hamiltonian, state, batch_size)
-        assert torch.all(torch.isclose(log_h_psi, _log_h_psi_py))
+        if not torch.all(_isclose(log_h_psi, _log_h_psi_py)):
+            for i, (e_cxx, e_py) in enumerate(zip(log_h_psi, _log_h_psi_py)):
+                if not _isclose(e_cxx, e_py).item():
+                    logger.error("{} != {}", e_cxx.item(), e_py.item())
+            assert False
     # Compute ⟨s|H|ψ⟩/⟨s|ψ⟩
     log_h_psi -= log_psi
     log_h_psi.exp_()
     # Reshape log_h_psi to match the original shape of spins
-    return log_h_psi.view(original_shape)
+    return log_h_psi.to(log_psi.dtype).view(original_shape)

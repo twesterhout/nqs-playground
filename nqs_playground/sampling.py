@@ -22,7 +22,7 @@ __all__ = [
     "SamplingOptions",
     # "sample_exactly",
     "sample_some",
-    # "integrated_autocorr_time",
+    "integrated_autocorr_time",
     # "autocorr_function",
     # "are_close_l1"
 ]
@@ -578,7 +578,7 @@ def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
     if isinstance(x, torch.Tensor):
         # NOTE: We do the computation on the CPU because it's not performance
         # critical and x might be complex which PyTorch doesn't support yet
-        x = x.cpu().numpy()
+        x = x.detach().cpu().numpy()
     f = np.zeros(x.shape[0])
     for i in range(x.shape[1]):
         f += autocorr_function(x[:, i])

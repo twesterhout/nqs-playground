@@ -30,21 +30,13 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from collections import namedtuple
-import os
-import time
 from loguru import logger
-from typing import Dict, List, Tuple, Optional, Union
-
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-if torch.has_cuda:
-    import threading
-    from torch._utils import ExceptionWrapper
-
-from nqs_playground import *
+from . import *
 
 Config = namedtuple(
     "Config",
@@ -119,76 +111,78 @@ class Runner:
             return None
         spins = torch.from_numpy(self.basis.states.view(np.int64)).to(self.device)
         state = forward_with_batches(self.combined_state, spins, self.inference_batch_size)
+        if state.dim() > 1:
+            state.squeeze_(dim=1)
         state.real -= torch.max(state.real)
         state.exp_()
         state = state.cpu().numpy()
         overlap = abs(np.dot(state, self.ground_state)) / np.linalg.norm(state)
         return overlap
 
-    def _energy_and_variance(self, local_values, weights) -> Tuple[complex, float]:
-        r"""Given local energies, computes an energy estimate and variance
-        estimate.
-        """
-        if weights is not None:
-            energy = np.dot(weights, local_values)
-            variance = np.dot(weights, np.abs(local_values - energy) ** 2)
-        else:
-            energy = np.mean(local_values)
-            variance = np.var(local_values)
-        return energy, variance
-
     @torch.no_grad()
     def sample(self):
+        logger.info("Sampling from |ψ(σ)|² with sampling_mode={}...", self.config.sampling_mode)
         spins, log_probs, info = sample_some(
             self.amplitude,
             self.basis,
             self.sampling_options,
             mode=self.config.sampling_mode,
         )
-        weights = info["weights"] # torch.ones_like(log_probs)
-        assert not torch.any(torch.isnan(weights))
+        if log_probs is not None:
+            # Compute autocorrelation time based on log(|ψ(s)|²)
+            tau = integrated_autocorr_time(log_probs)
+            logger.info("Autocorrelation time of log(|ψ(σ)|²: {}", tau)
+
+        if "weights" not in info:
+            logger.debug(
+                "Sampler did not return 'weights'. We assume that no importance sampling "
+                "is used and initialize all weights with 1..."
+            )
+            weights = torch.ones_like(log_probs)
+            weights /= torch.sum(weights)
+        else:
+            weights = info["weights"]
         return spins, weights
 
-    def _set_gradient(self, grad):
-        def run(m, i):
-            for p in filter(lambda x: x.requires_grad, m.parameters()):
-                assert p.is_leaf
-                n = p.numel()
-                if p.grad is not None:
-                    p.grad.view(-1).copy_(grad[i : i + n])
-                else:
-                    p.grad = grad[i : i + n].view(p.size())
-                i += n
-            return i
-
-        with torch.no_grad():
-            i = run(self.amplitude, 0)
-            _ = run(self.phase, i)
-
-    def calculate_gradient(self, spins, local_energies, weights):
+    def calculate_gradient(self, spins, local_loss, weights):
+        logger.info("Calculating gradients...")
+        # Reshape spins to flatten dimensions representing Markov chains
         spins = spins.view(-1, spins.size(-1))
-        # jacobian = jacobian_simple(self.amplitude, spins)
-        # print(jacobian)
-        # weights = weights.view(1, -1)
-        # jacobian -= weights @ jacobian
-        # local_energies = local_energies.view(1, -1).real.to(weights.dtype)
-        # grad = local_energies @ jacobian
-        # self._set_gradient(grad.view(-1))
-        grad = (local_energies - torch.mean(local_energies)) * weights
-        # grad.requires_grad = True
-        # print(local_energies.dtype, weights.dtype)
+        if local_loss.dtype == torch.complex64 or local_loss.dtype == torch.complex128:
+            local_loss = local_loss.real
+        mean_loss = torch.dot(local_loss, weights)
+        grad = (local_loss - mean_loss) * weights
+        grad = grad.view(-1, 1)
+
         self.optimiser.zero_grad()
-        self.amplitude(spins).backward(grad.real.view(-1, 1))
-        # self.phase(spins).backward(grad)
+        if any(map(lambda p: p.requires_grad, self.amplitude.parameters())):
+            output = self.amplitude(spins)
+            output.backward(grad)
+        if any(map(lambda p: p.requires_grad, self.phase.parameters())):
+            output = self.phase(spins)
+            output.backward(grad)
 
     def step(self):
+        logger.info("Iteration {}...", self._iteration)
+        overlap = self.compute_overlap()
+        if overlap is not None:
+            logger.info("Overlap with ground state: {}", overlap)
         spins, weights = self.sample()
         local_energies = local_values(
-            spins, self.hamiltonian, self.combined_state, batch_size=self.inference_batch_size
+            spins,
+            self.hamiltonian,
+            self.combined_state,
+            batch_size=self.inference_batch_size,
+            debug=True,
         )
-        assert not torch.any(torch.isnan(local_energies))
-        logger.info("local_energies: {}", local_energies.view(-1))
-        logger.info("{} Energy: {}", self._iteration, torch.sum(weights * local_energies).item())
+        energy = torch.dot(local_energies, weights.to(local_energies.dtype))
+        logger.info("Energy: {}", energy)
+        variance = torch.dot(torch.abs(local_energies - energy)**2, weights)
+        logger.info("Energy variance: {}", variance)
+        # Compute autocorrelation time based on E_loc(σ)
+        if self.config.sampling_mode != "full":
+            tau = integrated_autocorr_time(local_energies)
+            logger.info("Autocorrelation time of local energies: {}", tau)
         self.calculate_gradient(spins, local_energies, weights)
         self.optimiser.step()
         self._iteration += 1
