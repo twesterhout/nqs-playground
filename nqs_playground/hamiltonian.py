@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-
-# Copyright Tom Westerhout (c) 2019
+# Copyright Tom Westerhout (c) 2019-2020
 #
 # All rights reserved.
 #
@@ -31,276 +29,115 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import gc
-import pathlib
 from typing import List, Optional, Tuple
+from lattice_symmetries import Interaction, Operator
+from loguru import logger
 import numpy as np
 import torch
 from torch import Tensor
 
-from . import _C, SpinBasis
-from ._C import Heisenberg as _Heisenberg
-from .core import forward_with_batches
+from . import _C
+from .core import as_spins_tensor, forward_with_batches
 
 __all__ = [
-    "Heisenberg",
-    "read_hamiltonian",
-    "load_hamiltonian",
-    "diagonalise",
+    "heisenberg_interaction",
     "local_values",
-    # "local_values_slow",
-    "local_values_diagonal",
 ]
 
 
-def Heisenberg(specs: List[Tuple[complex, int, int]], basis) -> _Heisenberg:
-    smallest = min(map(lambda t: min(t[1:]), specs))
-    largest = max(map(lambda t: max(t[1:]), specs))
-    if smallest != 0:
-        raise ValueError(
-            "Invalid graph: counting from 0, but the minimal index "
-            "present is {}.".format(smallest)
+def heisenberg_interaction(edges: List[Tuple[int, int]], coupling: complex) -> Interaction:
+    coupling = complex(coupling)
+    if coupling.imag != 0.0:
+        logger.warn(
+            "You are creating Heisenberg interaction term with a complex coupling constant. "
+            "Please, be careful as it might lead to your Hamiltonian being non-Hermitian!"
         )
-    number_spins = largest + 1
-    if basis is None:
-        basis = SpinBasis([], number_spins, hamming_weight=number_spins // 2)
-    elif number_spins > basis.number_spins:
-        raise ValueError(
-            "Invalid graph: there are {} spins in the system, but the "
-            "largest index is {}".format(basis.number_spins, largest)
-        )
-    return _Heisenberg(specs, basis)
+    # fmt: off
+    matrix = np.array([[1,  0,  0, 0],
+                       [0, -1,  2, 0],
+                       [0,  2, -1, 0],
+                       [0,  0,  0, 1]])
+    # fmt: on
+    return Interaction(matrix, coupling)
+
+def _array_to_int(xs) -> int:
+    if len(xs) == 0:
+        return 0
+    n = int(xs[-1])
+    for i in reversed(range(0, len(xs) - 1)):
+        n <<= 64
+        n += int(xs[i])
+    return n
 
 
-Heisenberg.__doc__ = _Heisenberg.__init__.__doc__
+def _reference_log_apply_one(spin, operator, log_psi, device):
+    spins, coeffs = operator.apply(spin)
+    spins = torch.from_numpy(spins.view(np.int64)).to(device)
+    coeffs = torch.from_numpy(coeffs).to(device)
+    output = log_psi(spins).to(coeffs.dtype)
+    if output.dim() > 1:
+        output.squeeze_(dim=1)
+    scale = torch.max(output.real)
+    output.real -= scale
+    torch.exp_(output)
+    return scale + torch.log(torch.dot(coeffs, output))
 
 
-def read_hamiltonian(stream, basis) -> _Heisenberg:
-    r"""Reads the Hamiltonian from ``stream``. ``stream`` could be either a
-    file-like object or a ``str`` file name.
-    """
-
-    def _read_from_txt(stream, basis):
-        specs = []
-        for (coupling, edges) in map(
-            lambda x: x.strip().split(maxsplit=1),
-            filter(lambda x: not x.startswith(b"#") and len(x.strip()) > 0, stream),
-        ):
-            coupling = float(coupling)
-            # TODO: Parse the edges properly, it's not that difficult...
-            edges = eval(edges)
-            for i, j in edges:
-                specs.append((coupling, i, j))
-        return Heisenberg(specs, basis)
-
-    new_fd = False
-    if isinstance(stream, str) or isinstance(stream, pathlib.Path):
-        new_fd = True
-        stream = open(stream, "r")
-    try:
-        return _read_from_txt(stream, basis)
-    finally:
-        if new_fd:
-            stream.close()
-
-
-def load_hamiltonian(config) -> _Heisenberg:
-    r"""Constructs the Heisenberg Hamiltonian for the simulation. If ``config``
-    already contains a constructed _C.Heisenberg object, we simply use it.
-    Otherwise, we assume that ``config`` is a path to the file specifying edges
-    and couplings. We construct a graph based on it and create a basis with no
-    symmetries, but fixed magnetisation.
-    """
-    hamiltonian = config.hamiltonian
-    if isinstance(hamiltonian, _Heisenberg):
-        return hamiltonian
-    if not isinstance(hamiltonian, str):
-        raise TypeError(
-            "config.hamiltonian has wrong type: {}; must be either a "
-            "'_C.Heisenberg' or a 'str' path to Heisenberg Hamiltonian "
-            "specification.".format(type(hamiltonian))
-        )
-    # The following notices that we didn't specify a basis and will try
-    # to construct one automatically
-    hamiltonian = nqs_playground.read_hamiltonian(hamiltonian, basis=None)
-    return hamiltonian
-
-
-def diagonalise(hamiltonian: _Heisenberg, k: int = 1, dtype=None, tol=0):
-    r"""Diagonalises the hamiltonian.
-
-    :param hamiltonian: Heisenberg Hamiltonian to diagonalise.
-    :param k: number eigenstates to calculate.
-    :param dtype: which data type to use.
-    :param tol: relative accuracy for eigenvalues (stopping criterion). The
-        default value of 0 implies machine precision.
-    """
-    import numpy as np
-    import scipy.sparse.linalg
-    import psutil
-
-    hamiltonian.basis.build()
-    n = hamiltonian.basis.number_states
-    if dtype is not None:
-        if dtype not in {np.float32, np.float64, np.complex64, np.complex128}:
-            raise ValueError(
-                "invalid dtype: {}; expected float32, float64, complex64 or complex128"
-                "".format(dtype)
-            )
-        if not hamiltonian.is_real and dtype in {np.float32, np.float64}:
-            raise ValueError(
-                "invalid dtype: {}; Hamiltonian is complex -- expected either complex64 "
-                "or complex128".format(dtype)
-            )
-    else:
-        dtype = np.float64 if hamiltonian.is_real else np.complex128
-
-    def matvec(x):
-        gc.collect()
-        return hamiltonian(x)
-
-    def number_lanczos_vectors():
-        free = psutil.virtual_memory().free
-        usage = np.dtype(dtype).itemsize * n
-        need = 20 * usage
-        if need > free:
-            import warnings
-
-            count = (2 * free // 3) // usage
-            warnings.warn(
-                "Not enough memory to store the default=20 Lanczos vectors. "
-                "Need ~{:.1f}GB, but have only ~{:.1f}GB. Will use {} Lanczos "
-                "vectors instead.".format(need / 1024 ** 3, free / 1024 ** 3, count)
-            )
-            return count
-        return None
-
-    op = scipy.sparse.linalg.LinearOperator(shape=(n, n), matvec=matvec, dtype=dtype)
-    return scipy.sparse.linalg.eigsh(op, k=k, ncv=number_lanczos_vectors(), which="SA", tol=tol)
+def reference_log_apply(spins, operator, log_psi, batch_size=None):
+    device = spins.device
+    result = torch.empty(spins.size(0), dtype=torch.complex128)
+    for (i, spin) in enumerate(spins):
+        result[i] = _reference_log_apply_one(_array_to_int(spin), operator, log_psi, device)
+    return result
 
 
 @torch.no_grad()
 def local_values(
-    spins,
-    hamiltonian: _Heisenberg,
+    spins: Tensor,
+    hamiltonian: Operator,
     state: torch.jit.ScriptModule,
     log_psi: Optional[Tensor] = None,
     batch_size: int = 2048,
-) -> np.ndarray:
-    r"""Computes local values ``⟨s|H|ψ⟩/⟨s|ψ⟩`` for all ``s ∈ spins``.
+    debug: bool = False
+) -> Tensor:
+    r"""Compute local values ``⟨s|H|ψ⟩/⟨s|ψ⟩`` for all ``s ∈ spins``.
 
     :param spins: Spin configurations ``{s}``. Must be either a
         ``numpy.ndarray`` of ``uint64`` or a ``torch.Tensor`` of ``int64``.
-    :param hamiltonian: Heisenberg Hamiltonian.
-    :param state: Quantum state ``ψ`` represented by a TorchScript module,
+    :param hamiltonian: Hamiltonian.
+    :param state: Quantum state ``ψ`` represented by a TorchScript module
         which predicts ``log(ψ(s))``.
     :param log_psi: Pre-computed ``log(ψ(s))`` for all ``s`` in ``spins``.
     :param batch_size: Batch size to use internally for forward propagationn
         through ``state``.
     """
-    if isinstance(spins, np.ndarray):
-        if spins.dtype != np.uint64:
-            raise TypeError(
-                "spins must be either a numpy.ndarray of uint64 or a torch.Tensor "
-                "of int64; got a numpy.ndarray of {}".format(spins.dtype)
-            )
-        spins = torch.from_numpy(spins.view(np.int64))
+    logger.debug("Computing local values using batch_size={}...", batch_size)
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
+    spins = as_spins_tensor(spins, force_width=True)
+    # Flatten all dimensions except for the last
+    original_shape = spins.size()[:-1]
+    spins = spins.view(-1, spins.size(-1))
+    if log_psi is None:
+        # Compute log(⟨s|ψ⟩) for all s.
+        log_psi = forward_with_batches(state, spins, batch_size)
+        assert not torch.any(torch.isnan(log_psi))
+        if log_psi.dim() > 1:
+            log_psi.squeeze_(dim=1)
+    # This is to help C++ recognize that we're dealing with a ScriptModule and
+    # avoid going through Python for every forward pass
     if isinstance(state, torch.jit.ScriptModule):
         state = state._c._get_method("forward")
-    if spins.dim() == 1:
-        # We have an array of int64_t instead of bits512, so pad it with zeros
-        padding = torch.zeros(spins.size(0), 7, dtype=torch.int64, device=spins.device)
-        spins = torch.cat([spins.view(-1, 1), padding], dim=1)
-    if spins.size(-1) != 8:
-        raise ValueError(
-            "spins has wrong shape: {}; expected 8 elements along the last dimension"
-            "".format(spins.size())
-        )
-    shape = spins.size()[:-1]
-    spins = spins.view(-1, 8)
-    # Computes log(⟨s|H|ψ⟩) for all s.
-    if log_psi is None:
-        log_psi = forward_with_batches(state, spins, batch_size)
-    log_h_psi = _C.apply(spins, hamiltonian, state, batch_size)
+    # Compute log(⟨s|H|ψ⟩) for all s.
+    logger.debug("Using _C.log_apply...")
+    log_h_psi = _C.log_apply(spins, hamiltonian, state, batch_size)
+    if debug:
+        logger.info("Checking against reference_log_apply...")
+        _log_h_psi_py = reference_log_apply(spins, hamiltonian, state, batch_size)
+        assert torch.all(torch.isclose(log_h_psi, _log_h_psi_py))
+    # Compute ⟨s|H|ψ⟩/⟨s|ψ⟩
     log_h_psi -= log_psi
-    log_h_psi = log_h_psi.cpu().numpy().view(np.complex64)
-    values = np.exp(log_h_psi, out=log_h_psi)
-    values.shape = shape
-    return values
-
-
-def local_values_diagonal(spins, hamiltonian: _Heisenberg, batch_size: int = 2048) -> np.ndarray:
-    r"""Computes local values ``⟨s|H|s⟩`` for all ``s ∈ spins``.
-
-    :param spins: Spin configurations ``{s}``. Must be either a
-        ``numpy.ndarray`` of ``uint64`` or a ``torch.Tensor`` of ``int64``.
-    :param hamiltonian: Heisenberg Hamiltonian.
-    :param batch_size: Batch size to use internally for forward propagationn
-        through ``state``.
-    """
-    if isinstance(spins, np.ndarray):
-        if spins.dtype != np.uint64:
-            raise TypeError(
-                "spins must be either a numpy.ndarray of uint64 or a torch.Tensor "
-                "of int64; got a numpy.ndarray of {}".format(spins.dtype)
-            )
-        spins = torch.from_numpy(spins.view(np.int64))
-    with torch.no_grad():
-        # Computes log(⟨s|H|s⟩) for all s.
-        h_psi = _C.diag(spins, hamiltonian)
-        return h_psi
-
-
-def local_values_slow(
-    spins,
-    hamiltonian: _Heisenberg,
-    state: torch.jit.ScriptModule,
-    log_psi: Optional[Tensor] = None,
-    batch_size: int = 2048,
-) -> np.ndarray:
-    class SlowPolynomialState:
-        def __init__(self, hamiltonian, roots, log_psi):
-            self.hamiltonian = hamiltonian
-            self.basis = hamiltonian.basis
-            self.basis.build()
-            self.state, self.scale = self._make_state(log_psi)
-            self.roots = roots
-
-        def _make_state(self, log_psi):
-            with torch.no_grad():
-                spins = torch.from_numpy(self.basis.states.view(np.int64))
-                out = log_psi(spins)
-                scale = torch.max(out[:, 0]).item()
-                out[:, 0] -= scale
-                out = out.numpy().view(np.complex64).squeeze()
-                out = np.exp(out)
-                return out, scale
-
-        def _forward_one(self, x):
-            basis = self.hamiltonian.basis
-            i = basis.index(x)
-            vector = np.zeros((basis.number_states,), dtype=np.complex64)
-            vector[i] = 1.0
-            for r in self.roots:
-                vector = self.hamiltonian(vector) - r * vector
-            return self.scale + np.log(np.dot(self.state, vector))
-
-        def __call__(self, spins):
-            if isinstance(spins, torch.Tensor):
-                assert spins.dtype == torch.int64
-                spins = spins.numpy().view(np.uint64)
-            return torch.from_numpy(
-                np.array([self._forward_one(x) for x in spins], dtype=np.complex64)
-                .view(np.float32)
-                .reshape(-1, 2)
-            )
-
-    with torch.no_grad():
-        # Computes log(⟨s|H|ψ⟩) for all s.
-        # TODO: add support for batch size
-        log_h_psi = SlowPolynomialState(hamiltonian, [0.0], state)(spins)
-        # Computes log(⟨s|ψ⟩) for all s.
-        log_psi = forward_with_batches(state, spins, batch_size)
-        log_h_psi -= log_psi
-        log_h_psi = log_h_psi.numpy().view(np.complex64)
-        return np.exp(log_h_psi, out=log_h_psi)
+    log_h_psi.exp_()
+    # Reshape log_h_psi to match the original shape of spins
+    return log_h_psi.view(original_shape)
