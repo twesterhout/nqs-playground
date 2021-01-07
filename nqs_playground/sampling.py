@@ -1,4 +1,5 @@
 # from itertools import islice
+from collections import namedtuple
 import math
 from random import randint
 from typing import Any, Callable, List, Optional, Tuple
@@ -16,59 +17,70 @@ from torch import Tensor
 #     zanella_jump_rates,
 #     zanella_choose_samples,
 # )
-from .core import forward_with_batches, safe_exp
+from .core import forward_with_batches, safe_exp, pack
 
 __all__ = [
     "SamplingOptions",
-    # "sample_exactly",
     "sample_some",
+    "sample_full",
+    "sample_exactly",
+    "sample_autoregressive",
     "integrated_autocorr_time",
     # "autocorr_function",
     # "are_close_l1"
 ]
 
 
-class SamplingOptions:
-    r"""Options for sampling spin configurations
+_SamplingOptionsBase = namedtuple("_SamplingOptions",
+    ["number_samples", "number_chains", "number_discarded", "sweep_size", "device"])
 
-    :attr number_samples:
-    :attr number_chains:
-    :attr number_discarded:
-    :attr sweep_size:
-    :attr device:
-    """
+class SamplingOptions(_SamplingOptionsBase):
+    r"""Options for sampling spin configurations."""
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         number_samples: int,
         number_chains: int = 1,
         number_discarded: Optional[int] = None,
-        sweep_size: int = 1,
+        sweep_size: Optional[int] = None,
         device: torch.device = "cpu",
     ):
-        r"""Initialises the options.
+        r"""Create SamplingOptions.
 
-        :param number_samples: specifies the number of samples per Markov
-            chain. Must be a positive integer.
-        :param number_chains: specifies the number of independent Markov
-            chains. Must be a positive integer.
-        :param number_discarded: specifies the number of samples to discard
-            in the beginning of each Markov chain (i.e. how long should the
-            thermalisation procedure be). If specified, must be a positive
-            integer. Otherwise, 10% of ``number_samples`` is used.
-        :param sweep_size:
-        :param device: on which device to run the sampling.
+        Parameters
+        ----------
+        number_samples: int
+            Number of samples per Markov chain. Must be a positive integer.
+            'full' sampler will ignore this parameter.
+        number_chains: int, optional
+            Number of independent Markov chains. Must be a positive integer.
+            This parameter only makes sense for MCMC samplers such as
+            Metropolis-Hastings algorithm or Zanella process. Exact samplers
+            will just multiply `number_samples` by `number_chains`.
+        number_discarded: int, optional
+            Number of samples to discard at the beginning of each Markov chain
+            (i.e. how long should the thermalization procedure be). If
+            specified, must be a positive integer. Otherwise, 10% of
+            `number_samples` will be used.
+        sweep_size: int, optional
+            Sweep size, i.e. how many Markov chain steps are made until the
+            next sample is saved. `sweep_size = 1` means that every sample is
+            saved. `sweep_size = 5` means that per every 5 steps of the MCMC
+            process we only store one sample. If not specified, the default
+            value of `1` will be used.
+        device:
+            On which device to run the sampling.
         """
-        self.number_samples = int(number_samples)
-        if self.number_samples <= 0:
+        number_samples = int(number_samples)
+        if number_samples <= 0:
             raise ValueError("negative number_samples: {}".format(number_samples))
-        self.number_chains = int(number_chains)
-        if self.number_chains <= 0:
+        number_chains = int(number_chains)
+        if number_chains <= 0:
             raise ValueError("negative number_chains: {}".format(number_chains))
 
         if number_discarded is not None:
-            self.number_discarded = int(number_discarded)
-            if self.number_discarded <= 0:
+            number_discarded = int(number_discarded)
+            if number_discarded <= 0:
                 raise ValueError(
                     "invalid number_discarded: {}; expected either a positive "
                     "integer or None".format(number_chains)
@@ -78,30 +90,46 @@ class SamplingOptions:
                 "`number_discarded` not specified when constructing SamplingOptions, "
                 "1/10 of `number_samples` will be used."
             )
-            self.number_discarded = self.number_samples // 10
-        self.sweep_size = int(sweep_size)
-        if self.sweep_size <= 0:
-            raise ValueError("negative sweep_size: {}".format(sweep_size))
+            number_discarded = number_samples // 10
+        if sweep_size is not None:
+            sweep_size = int(sweep_size)
+            if sweep_size <= 0:
+                raise ValueError("negative sweep_size: {}".format(sweep_size))
+        else:
+            sweep_size = 1
+            logger.warning(
+                "`sweep_size` not specified when constructing SamplingOptions, "
+                "`sweep_size` will be set to 1. Make sure this is what you want!"
+            )
         if not isinstance(device, torch.device):
             device = torch.device(device)
-        self.device = device
+        return super(SamplingOptions, cls).__new__(
+            cls,
+            number_samples,
+            number_chains,
+            number_discarded,
+            sweep_size,
+            device
+        )
 
 
 def sample_full(
     log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions, batch_size: int = 8192
 ):
+    r"""Instead of sampling, take all basis vectors in the Hilbert space."""
     batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
     device = options.device
-    states = torch.from_numpy(basis.states.view(np.int64))
+    states = torch.from_numpy(basis.states.view(np.int64)).to(device)
+    logger.info("Applying log_prob_fn to all basis vectors in the Hilbert space...")
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
     if log_prob.dim() != 1:
         raise ValueError(
             "log_prob_fn should return the logarithm of the probability, "
-            "but output tensor has dimension {}; did you by accident use"
+            "but output tensor has dimension {}; did you by accident use "
             "sign instead of amplitude network?"
             "".format(log_prob.dim())
         )
@@ -111,39 +139,37 @@ def sample_full(
             "tensors residing on {} instead; make sure options.device matched "
             "the location of log_prob_fn".format(device, ys.device)
         )
+    logger.info("Computing weights...")
     weights = safe_exp(log_prob, normalise=True)
 
     # Padding states with zeros to get an array of bits512 instead of int64
     padding = torch.zeros(states.size(0), 7, device=device, dtype=torch.int64)
     states = torch.cat([states.unsqueeze(dim=1), padding], dim=1)
-    return states, None, {"weights": weights}
+    return states, log_prob, {"weights": weights}
 
 
 def sample_exactly(
     log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions, batch_size: int = 8192
 ):
-    r"""Samples states from the Hilbert space basis ``basis`` according to the
-    probability distribution proportional to ``exp(log_prob_fn(s))``.
+    r"""Sample states by explicitly constructing the discrete probability distribution.
 
-    We compute ``log_prob_fn(s)`` for all states ``s`` in ``basis`` and then directly
-    sample from this discrete probability distribution.
-
-    Number of samples is ``options.number_chains * options.number_samples``,
-    and ``options.number_discarded`` is ignored, since there is no need for
-    thermalisation.
+    Number of samples is `options.number_chains * options.number_samples`, and
+    `options.number_discarded` and `options.sweep_size` are ignored, since
+    samples are already i.i.d.
     """
     batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
     device = options.device
-    states = torch.from_numpy(basis.states.view(np.int64))
+    states = torch.from_numpy(basis.states.view(np.int64)).to(device)
+    logger.info("Applying log_prob_fn to all basis vectors in the Hilbert space...")
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
     if log_prob.dim() != 1:
         raise ValueError(
             "log_prob_fn should return the logarithm of the probability, "
-            "but output tensor has dimension {}; did you by accident use"
+            "but output tensor has dimension {}; did you by accident use "
             "sign instead of amplitude network?"
             "".format(log_prob.dim())
         )
@@ -157,6 +183,7 @@ def sample_exactly(
 
     number_samples = options.number_chains * options.number_samples
     if len(prob) < (1 << 24):
+        logger.info("Using torch.multinomial to sample indices...")
         # PyTorch only supports discrete probability distributions
         # shorter than 2²⁴.
         # NOTE: replacement=True is IMPORTANT because it more closely
@@ -167,6 +194,7 @@ def sample_exactly(
             replacement=True,
         )
     else:
+        logger.info("Using numpy.random.choice to sample indices...")
         # If we have more than 2²⁴ different probabilities chances are,
         # NumPy will complain about probabilities not being normalised
         # since float32 precision is not enough. The simplest
@@ -185,6 +213,34 @@ def sample_exactly(
     states = torch.cat([states.unsqueeze(dim=1), padding], dim=1)
     shape = (options.number_samples, options.number_chains)
     return states.view(*shape, 8), log_prob.view(*shape), {}
+
+
+def sample_autoregressive(
+    model: torch.nn.Module, basis, options: SamplingOptions, batch_size: Optional[int] = None
+):
+    if batch_size is not None:
+        logger.warning(
+            "'batch_size' parameter is currently ignored. "
+            "Support for it will be added in the future."
+        )
+    if not hasattr(model, "sample"):
+        raise ValueError(
+            "{} has no 'sample' method. Did you try to use a standard neural "
+            "network with 'autoregressive' sampling mode?"
+        )
+    number_samples = options.number_chains * options.number_samples
+    # logger.debug("Running model.sample...")
+    states = model.sample(number_samples).to(options.device)
+    r = (states, None, None)
+    # logger.debug("Packing states...")
+    states = pack(states)
+    if states.dim() < 2:
+        padding = torch.zeros(states.size(0), 7, device=options.device, dtype=torch.int64)
+        states = torch.cat([states.unsqueeze(dim=1), padding], dim=1)
+    shape = (options.number_samples, options.number_chains)
+    return states.view(*shape, 8), None, {}
+    # return r
+
 
 
 # class Sampler:
@@ -473,7 +529,7 @@ def sample_some(
     mode="exact",
     is_log_prob_fn: bool = False,
 ) -> Tuple[Tensor, Tensor, Optional[Any]]:
-    if is_log_prob_fn:
+    if is_log_prob_fn or mode == "autoregressive":
         log_prob_fn = log_ψ
     else:
 
@@ -486,12 +542,15 @@ def sample_some(
         return sample_exactly(log_prob_fn, basis, options)
     elif mode == "full":
         return sample_full(log_prob_fn, basis, options)
+    elif mode == "autoregressive":
+        return sample_autoregressive(log_prob_fn, basis, options)
+
     # elif mode == "metropolis":
     #     return sample_using_metropolis(log_prob_fn, basis, options)
     # elif mode == "zanella":
     #     return sample_using_zanella(log_prob_fn, basis, options)
     else:
-        supported = {"exact", "full"}
+        supported = {"exact", "full", "autoregressive"}
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
 
 

@@ -32,6 +32,7 @@
 __all__ = [
     # "with_file_like",
     "Unpack",
+    "pack",
     "forward_with_batches",
     # "SpinDataset",
     # "combine_amplitude_and_sign",
@@ -91,6 +92,17 @@ class Unpack(torch.nn.Module):
 
     def forward(self, x):
         return torch.ops.tcm.unpack(x, self.n)
+
+
+def pack(xs: torch.Tensor) -> torch.Tensor:
+    import nqs_playground as nqs
+    assert xs.dim() == 2
+    assert xs.size(1) < 64
+    r = torch.zeros(xs.size(0), dtype=torch.int64, device=xs.device)
+    for i in range(xs.size(1)):
+        r |= (xs[:, i] == 1).long() << i
+    assert torch.all((nqs.unpack(r, xs.size(1)) + 1) / 2 == xs)
+    return r
 
 
 def as_spins_tensor(spins: Tensor, force_width: bool = True) -> Tensor:
@@ -297,7 +309,10 @@ def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Modu
     class CombiningState(torch.nn.Module):
         def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
             super().__init__()
-            self.amplitude = amplitude
+            if hasattr(amplitude, "log_prob"):
+                self.amplitude = lambda x: 0.5 * amplitude.log_prob(x).view(-1, 1)
+            else:
+                self.amplitude = amplitude
             self.phase = phase
 
         def forward(self, x: Tensor) -> Tensor:

@@ -83,7 +83,7 @@ class Runner:
                 "torch.nn.Modules or a pair of filenames".format(type(model))
             )
         amplitude, phase = model
-        load = lambda m: load_model(m, number_spins=self.basis.number_spins).to(self.device)
+        load = lambda m: load_model(m, number_spins=self.basis.number_spins, jit=False).to(self.device)
         amplitude, phase = load(amplitude), load(phase)
         return amplitude, phase
 
@@ -102,7 +102,7 @@ class Runner:
     @property
     def combined_state(self):
         if not hasattr(self, "__combined_state"):
-            self.__combined_state = combine_amplitude_and_phase(self.amplitude, self.phase)
+            self.__combined_state = combine_amplitude_and_phase(self.amplitude, self.phase, use_jit=False)
         return self.__combined_state
 
     @torch.no_grad()
@@ -138,7 +138,10 @@ class Runner:
                 "Sampler did not return 'weights'. We assume that no importance sampling "
                 "is used and initialize all weights with 1..."
             )
-            weights = torch.ones_like(log_probs)
+            if log_probs is not None:
+                weights = torch.ones_like(log_probs)
+            else:
+                weights = torch.ones(spins.size()[:-1], device=self.device)
             weights /= torch.sum(weights)
         else:
             weights = info["weights"]
@@ -154,7 +157,10 @@ class Runner:
 
         self.optimiser.zero_grad()
         if any(map(lambda p: p.requires_grad, self.amplitude.parameters())):
-            output = self.amplitude(spins)
+            if hasattr(self.amplitude, "log_prob"):
+                output = 0.5 * self.amplitude.log_prob(spins).view(-1, 1)
+            else:
+                output = self.amplitude(spins)
             output.backward(grad)
         if any(map(lambda p: p.requires_grad, self.phase.parameters())):
             output = self.phase(spins)
