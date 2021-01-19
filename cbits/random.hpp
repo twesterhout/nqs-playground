@@ -61,8 +61,7 @@ class xoshiro256starstar {
 
     /// Rotate-left operation. It is assumed that the compiler replaces it with a
     /// single instruction.
-    static constexpr auto rotl(uint64_t const x, int const k) noexcept
-        -> uint64_t
+    static constexpr auto rotl(uint64_t const x, int const k) noexcept -> uint64_t
     {
         return (x << k) | (x >> (64 - k));
     }
@@ -83,10 +82,8 @@ class xoshiro256starstar {
         constexpr splitmix64(uint64_t const seed) noexcept : x{seed} {}
         constexpr splitmix64(splitmix64 const&) noexcept = default;
         constexpr splitmix64(splitmix64&&) noexcept      = default;
-        constexpr auto operator=(splitmix64 const&) noexcept
-            -> splitmix64&     = default;
-        constexpr auto operator=(splitmix64&&) noexcept
-            -> splitmix64&     = default;
+        constexpr auto operator=(splitmix64 const&) noexcept -> splitmix64& = default;
+        constexpr auto operator=(splitmix64&&) noexcept -> splitmix64& = default;
 
         constexpr auto operator()() noexcept -> uint64_t
         {
@@ -100,17 +97,12 @@ class xoshiro256starstar {
   public:
     using result_type = uint64_t;
 
-    constexpr xoshiro256starstar(uint64_t const _seed) noexcept : s{0, 0, 0, 0}
-    {
-        seed(_seed);
-    }
+    constexpr xoshiro256starstar(uint64_t const _seed) noexcept : s{0, 0, 0, 0} { seed(_seed); }
 
     constexpr xoshiro256starstar(xoshiro256starstar const&) noexcept = default;
     constexpr xoshiro256starstar(xoshiro256starstar&&) noexcept      = default;
-    constexpr auto operator    =(xoshiro256starstar const&) noexcept
-        -> xoshiro256starstar& = default;
-    constexpr auto operator    =(xoshiro256starstar&&) noexcept
-        -> xoshiro256starstar& = default;
+    constexpr auto operator=(xoshiro256starstar const&) noexcept -> xoshiro256starstar& = default;
+    constexpr auto operator=(xoshiro256starstar&&) noexcept -> xoshiro256starstar& = default;
 
     constexpr auto operator()() noexcept -> uint64_t
     {
@@ -136,8 +128,8 @@ class xoshiro256starstar {
        non-overlapping subsequences for parallel computations. */
     constexpr auto jump() noexcept -> void
     {
-        constexpr uint64_t JUMP[] = {0x180ec6d33cfd0aba, 0xd5a61266f0c9392c,
-                                     0xa9582618e03fc9aa, 0x39abdc4529b1661c};
+        constexpr uint64_t JUMP[] = {0x180ec6d33cfd0aba, 0xd5a61266f0c9392c, 0xa9582618e03fc9aa,
+                                     0x39abdc4529b1661c};
         static_assert(std::size(JUMP) == sizeof JUMP / sizeof *JUMP);
 
         uint64_t s0 = 0;
@@ -168,9 +160,8 @@ class xoshiro256starstar {
        subsequences for parallel distributed computations. */
     constexpr auto long_jump() noexcept -> void
     {
-        constexpr uint64_t LONG_JUMP[] = {
-            0x76e15d3efefdcbbf, 0xc5004e441c522fb3, 0x77710069854ee241,
-            0x39109bb02acbe635};
+        constexpr uint64_t LONG_JUMP[] = {0x76e15d3efefdcbbf, 0xc5004e441c522fb3,
+                                          0x77710069854ee241, 0x39109bb02acbe635};
 
         uint64_t s0 = 0;
         uint64_t s1 = 0;
@@ -208,11 +199,9 @@ using RandomGenerator = xoshiro256starstar;
 
 TCM_IMPORT auto global_random_generator() -> RandomGenerator&;
 
-constexpr auto random_bounded(uint32_t const range, RandomGenerator& g) noexcept
-    -> uint32_t
+constexpr auto random_bounded(uint32_t const range, RandomGenerator& g) noexcept -> uint32_t
 {
-    static_assert(noexcept(std::declval<RandomGenerator&>()()),
-                  TCM_STATIC_ASSERT_BUG_MESSAGE);
+    static_assert(noexcept(std::declval<RandomGenerator&>()()), TCM_STATIC_ASSERT_BUG_MESSAGE);
     auto const random32 = [&g]() -> uint64_t {
         static_assert(std::is_same_v<RandomGenerator::result_type, uint64_t>);
         return g() & uint64_t{0xFFFFFFFF};

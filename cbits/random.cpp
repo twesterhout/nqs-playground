@@ -45,8 +45,7 @@ namespace {
 
 TCM_EXPORT auto global_random_generator() -> RandomGenerator&
 {
-    static thread_local RandomGenerator generator{
-        detail::really_need_that_random_seed_now()};
+    static thread_local RandomGenerator generator{detail::really_need_that_random_seed_now()};
     return generator;
 }
 
