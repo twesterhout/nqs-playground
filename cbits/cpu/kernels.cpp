@@ -1,41 +1,32 @@
 #include "kernels.hpp"
+#include "../config.hpp"
 #include "../errors.hpp"
 
 #include <torch/types.h>
 #include <vectorclass/version2/vectorclass.h>
 #include <vectorclass/version2/vectormath_exp.h>
 
-// Define name of entry function depending on which instruction set we compile for
-#if INSTRSET >= 8 // AVX2
+#if TCM_HAS_AVX2()
 // #    define zanella_jump_rates_simd zanella_jump_rates_avx2
 #    define jump_rates_one_simd jump_rates_one_avx2
 #    define unpack_one_simd unpack_one_avx2
-#    define bfly_simd bfly_avx2
-#    define ibfly_simd ibfly_avx2
-#elif INSTRSET >= 7 // AVX
+#elif TCM_HAS_AVX()
 // #    define zanella_jump_rates_simd zanella_jump_rates_avx
 #    define jump_rates_one_simd jump_rates_one_avx
 #    define unpack_one_simd unpack_one_avx
-#    define bfly_simd bfly_avx
-#    define ibfly_simd ibfly_avx
-#elif INSTRSET >= 2 // SSE2
-#    define INCLUDE_DISPATCH_CODE
+#else
+// #    define INCLUDE_DISPATCH_CODE
 // #    define zanella_jump_rates_simd zanella_jump_rates_sse2
 #    define jump_rates_one_simd jump_rates_one_sse2
 #    define unpack_one_simd unpack_one_sse2
-#    define bfly_simd bfly_sse2
-#    define ibfly_simd ibfly_sse2
-#else
-#    error Unsupported instruction set
 #endif
 
-#if defined(INCLUDE_DISPATCH_CODE)
+#if defined(TCM_ADD_DISPATCH_CODE)
 #    include <ATen/Config.h>
 #    include <caffe2/utils/cpuid.h>
 
 #    define MKL_INT int
-extern "C" void cblas_cdotu_sub(const MKL_INT n, const void* x,
-                                const MKL_INT incx, const void* y,
+extern "C" void cblas_cdotu_sub(const MKL_INT n, const void* x, const MKL_INT incx, const void* y,
                                 const MKL_INT incy, void* dotu);
 #endif
 
@@ -68,12 +59,10 @@ template <class T> using vector_t = typename vector_type<T>::type;
 namespace {
 /// Load a simd vector at index i
 template <class T>
-TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
-    -> vector_t<T>
+TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept -> vector_t<T>
 { // {{{
     using V = vector_t<T>;
-    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < src.size()),
-               "index out of bounds");
+    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < src.size()), "index out of bounds");
     auto const* p = src.data + i * src.stride();
 
     V a;
@@ -90,12 +79,10 @@ TCM_FORCEINLINE auto vload(TensorInfo<T const> src, int64_t const i) noexcept
 } // }}}
 
 template <class T>
-TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i,
-                            vector_t<T> a) noexcept -> void
+TCM_FORCEINLINE auto vstore(TensorInfo<T> dst, int64_t i, vector_t<T> a) noexcept -> void
 { // {{{
     using V = vector_t<T>;
-    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < dst.size()),
-               "index out of bounds");
+    TCM_ASSERT((0 <= i) && (i + V::size() - 1 < dst.size()), "index out of bounds");
     auto* p = dst.data + i * dst.stride();
 
     if (dst.stride() == 1) { a.store(p); }
@@ -249,8 +236,7 @@ tabu_jump_rates(gsl::span<double const> proposed_log_prob,
 #    if !AT_MKL_ENABLED()
 
 TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
-                         TensorInfo<std::complex<float> const> const& y)
-    -> std::complex<double>
+                         TensorInfo<std::complex<float> const> const& y) -> std::complex<double>
 {
     TCM_ERROR(std::runtime_error, "PyTorch is compiled without MKL support");
 }
@@ -258,8 +244,7 @@ TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
 #    else // AT_MKL_ENABLED
 
 TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
-                         TensorInfo<std::complex<float> const> const& y)
-    -> std::complex<double>
+                         TensorInfo<std::complex<float> const> const& y) -> std::complex<double>
 {
     std::complex<float> result;
     cblas_cdotu_sub(x.size(), x.data, x.stride(), y.data, y.stride(), &result);
@@ -310,18 +295,16 @@ TCM_EXPORT auto unpack_one_simd(uint64_t const x[], unsigned const number_spins,
     }
 }
 
-#if defined(INCLUDE_DISPATCH_CODE)
+#if defined(TCM_ADD_DISPATCH_CODE)
 TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
-                           TensorInfo<float, 2> const& dst_info) -> void
+                           TensorInfo<float, 2> const&          dst_info) -> void
 {
     if (src_info.size<0>() == 0) { return; }
-    TCM_CHECK(
-        dst_info.strides[0] == dst_info.size<1>(), std::invalid_argument,
-        fmt::format("unpack_cpu does not support strided output tensors"));
+    TCM_CHECK(dst_info.strides[0] == dst_info.size<1>(), std::invalid_argument,
+              fmt::format("unpack_cpu does not support strided output tensors"));
 
-    using unpack_one_fn_t =
-        auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
-    auto unpack_ptr = []() -> unpack_one_fn_t {
+    using unpack_one_fn_t = auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
+    auto unpack_ptr       = []() -> unpack_one_fn_t {
         if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
         if (__builtin_cpu_supports("avx")) { return &unpack_one_avx; }
         return &unpack_one_sse2;

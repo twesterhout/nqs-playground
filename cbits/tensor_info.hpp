@@ -52,47 +52,38 @@ using std::make_index_sequence;
 template <std::size_t...> struct index_sequence {};
 
 template <std::size_t N, std::size_t... Rest>
-struct make_index_sequence_impl
-    : public make_index_sequence_impl<N - 1, N - 1, Rest...> {};
+struct make_index_sequence_impl : public make_index_sequence_impl<N - 1, N - 1, Rest...> {};
 
-template <std::size_t... Indices>
-struct make_index_sequence_impl<0, Indices...> {
+template <std::size_t... Indices> struct make_index_sequence_impl<0, Indices...> {
     using type = index_sequence<Indices...>;
 };
 
-template <std::size_t N>
-using make_index_sequence = typename make_index_sequence_impl<N>::type;
+template <std::size_t N> using make_index_sequence = typename make_index_sequence_impl<N>::type;
 #endif
 } // namespace detail
 
-template <typename T, size_t Dims = 1, typename Index = int64_t>
-struct TensorInfo {
-    constexpr TensorInfo() noexcept
-        : TensorInfo{detail::make_index_sequence<Dims>{}}
+template <typename T, size_t Dims = 1, typename Index = int64_t> struct TensorInfo {
+    constexpr TensorInfo() noexcept : TensorInfo{detail::make_index_sequence<Dims>{}} {}
+
+    constexpr TensorInfo(T* _data, Index const _sizes[Dims], Index const _strides[Dims]) noexcept
+        : TensorInfo{_data, _sizes, _strides, detail::make_index_sequence<Dims>{}}
     {}
 
-    constexpr TensorInfo(T* _data, Index const _sizes[Dims],
-                         Index const _strides[Dims]) noexcept
-        : TensorInfo{_data, _sizes, _strides,
-                     detail::make_index_sequence<Dims>{}}
-    {}
-
-    template <class D = void, class = typename std::enable_if<
-                                  std::is_same<D, D>::value && Dims == 1>::type>
-    constexpr TensorInfo(T* _data, Index const _size,
-                         Index const _stride) noexcept
+    template <class D = void,
+              class   = typename std::enable_if<std::is_same<D, D>::value && Dims == 1>::type>
+    constexpr TensorInfo(T* _data, Index const _size, Index const _stride) noexcept
         : data{_data}, sizes{_size}, strides{_stride}
     {}
 
-    template <class D = void, class = typename std::enable_if<
-                                  std::is_same<D, D>::value && Dims == 1>::type>
+    template <class D = void,
+              class   = typename std::enable_if<std::is_same<D, D>::value && Dims == 1>::type>
     /*implicit*/ constexpr TensorInfo(gsl::span<T> other) noexcept
         : data{other.data()}, sizes{other.size()}, strides{1}
     {}
 
     constexpr TensorInfo(TensorInfo const&) noexcept = default;
     constexpr TensorInfo(TensorInfo&&) noexcept      = default;
-#if defined(                                                                   \
+#if defined(                                                                                       \
     TCM_NVCC) // For some reason constexpr and noexcept default assignments don't work with nvcc...
     TensorInfo& operator=(TensorInfo const&) = default;
     TensorInfo& operator=(TensorInfo&&) = default;
@@ -101,8 +92,7 @@ struct TensorInfo {
     constexpr TensorInfo& operator=(TensorInfo&&) noexcept = default;
 #endif
 
-    template <class D = T,
-              class   = typename std::enable_if<!std::is_const<D>::value>::type>
+    template <class D = T, class = typename std::enable_if<!std::is_const<D>::value>::type>
     operator TensorInfo<D const, Dims, Index>() const noexcept
     {
         return {data, sizes, strides};
@@ -111,23 +101,18 @@ struct TensorInfo {
     template <size_t D = Dims, class = typename std::enable_if<D == 1>::type>
     explicit operator gsl::span<T>() const
     {
-        TCM_CHECK(
-            stride() == 1, std::runtime_error,
-            fmt::format("cannot cast TensorInfo with stride {} to gsl::span",
-                        stride()));
+        TCM_CHECK(stride() == 1, std::runtime_error,
+                  fmt::format("cannot cast TensorInfo with stride {} to gsl::span", stride()));
         return gsl::span<T>{data, static_cast<uint64_t>(size())};
     }
 
     template <class D = void,
-              class   = typename std::enable_if<std::is_same<D, D>::value
-                                              && !std::is_const<T>::value
+              class = typename std::enable_if<std::is_same<D, D>::value && !std::is_const<T>::value
                                               && Dims == 1>::type>
     explicit operator gsl::span<T const>() const
     {
-        TCM_CHECK(
-            stride() == 1, std::runtime_error,
-            fmt::format("cannot cast TensorInfo with stride {} to gsl::span",
-                        stride()));
+        TCM_CHECK(stride() == 1, std::runtime_error,
+                  fmt::format("cannot cast TensorInfo with stride {} to gsl::span", stride()));
         return gsl::span<T const>{data, static_cast<uint64_t>(size())};
     }
 
@@ -138,16 +123,14 @@ struct TensorInfo {
     {}
 
     template <size_t... Is>
-    constexpr TensorInfo(T* _data, Index const _sizes[Dims],
-                         Index const _strides[Dims],
+    constexpr TensorInfo(T* _data, Index const _sizes[Dims], Index const _strides[Dims],
                          detail::index_sequence<Is...> /*unused*/) noexcept
         : data{_data}, sizes{_sizes[Is]...}, strides{_strides[Is]...}
     {}
 
   public:
-    template <int D = -1,
-              class = typename std::enable_if<(D == -1 && Dims == 1)
-                                              || (D >= 0 && Dims >= 1)>::type>
+    template <int D = -1, class = typename std::enable_if<(D == -1 && Dims == 1)
+                                                          || (D >= 0 && Dims >= 1)>::type>
     constexpr auto size() const noexcept -> Index
     {
         static_assert(D < static_cast<int>(Dims), "index out of bounds");
@@ -155,9 +138,8 @@ struct TensorInfo {
         return sizes[i];
     }
 
-    template <int D = -1,
-              class = typename std::enable_if<(D == -1 && Dims == 1)
-                                              || (D >= 0 && Dims >= 1)>::type>
+    template <int D = -1, class = typename std::enable_if<(D == -1 && Dims == 1)
+                                                          || (D >= 0 && Dims >= 1)>::type>
     constexpr auto stride() const noexcept -> Index
     {
         static_assert(D < static_cast<int>(Dims), "index out of bounds");
@@ -181,8 +163,8 @@ struct TensorInfo {
     }
 #endif
 
-    template <class D = void, class = typename std::enable_if<
-                                  std::is_same<D, D>::value && Dims == 1>::type>
+    template <class D = void,
+              class   = typename std::enable_if<std::is_same<D, D>::value && Dims == 1>::type>
     TCM_CXX14_CONSTEXPR auto operator[](Index i) const noexcept -> T&
     {
         TCM_ASSERT(0 <= i && i < sizes[0], "index out of bounds");
@@ -195,27 +177,22 @@ struct TensorInfo {
 };
 
 template <class T>
-TCM_FORCEINLINE auto row(TensorInfo<T, 2> const& x, int64_t const i)
-    -> TensorInfo<T, 1>
+TCM_FORCEINLINE auto row(TensorInfo<T, 2> const& x, int64_t const i) -> TensorInfo<T, 1>
 {
     TCM_ASSERT(0 <= i && i < x.sizes[0], "index out of bounds");
-    return TensorInfo<T, 1>{x.data + i * x.strides[0], x.sizes[1],
-                            x.strides[1]};
+    return TensorInfo<T, 1>{x.data + i * x.strides[0], x.sizes[1], x.strides[1]};
 }
 
 template <class T>
-TCM_FORCEINLINE auto column(TensorInfo<T, 2> const& x, int64_t const i)
-    -> TensorInfo<T, 1>
+TCM_FORCEINLINE auto column(TensorInfo<T, 2> const& x, int64_t const i) -> TensorInfo<T, 1>
 {
     TCM_ASSERT(0 <= i && i < x.sizes[1], "index out of bounds");
-    return TensorInfo<T, 1>{x.data + i * x.strides[1], x.sizes[0],
-                            x.strides[0]};
+    return TensorInfo<T, 1>{x.data + i * x.strides[1], x.sizes[0], x.strides[0]};
 }
 
 template <class T>
 TCM_FORCEINLINE auto slice(TensorInfo<T> const& x, int64_t const start,
-                           int64_t end = std::numeric_limits<int64_t>::max())
-    -> TensorInfo<T>
+                           int64_t end = std::numeric_limits<int64_t>::max()) -> TensorInfo<T>
 
 {
     if (end == std::numeric_limits<int64_t>::max()) { end = x.size(); }
@@ -226,55 +203,70 @@ TCM_FORCEINLINE auto slice(TensorInfo<T> const& x, int64_t const start,
 
 namespace detail {
 template <class T, size_t Dims, class = void> struct obtain_tensor_info_fn {
-    auto operator()(torch::Tensor x, char const* name) const
-        -> TensorInfo<T, Dims>
+    auto operator()(torch::Tensor x, char const* name) const -> TensorInfo<T, Dims>
     {
         auto const arg_name = name != nullptr ? name : "tensor";
         auto const sizes    = x.sizes();
-        TCM_CHECK(
-            sizes.size() == Dims, std::invalid_argument,
-            fmt::format(
-                "{} has wrong shape: [{}]; expected a {}-dimensional tensor",
-                arg_name, fmt::join(sizes, ","), Dims));
+        TCM_CHECK(sizes.size() == Dims, std::invalid_argument,
+                  fmt::format("{} has wrong shape: [{}]; expected a {}-dimensional tensor",
+                              arg_name, fmt::join(sizes, ","), Dims));
         auto* data = x.data_ptr<T>();
         return {data, sizes.data(), x.strides().data()};
     }
 };
 
 template <class T, size_t Dims>
-struct obtain_tensor_info_fn<T const, Dims>
-    : public obtain_tensor_info_fn<T, Dims> {
-    auto operator()(torch::Tensor const& x, char const* name) const
-        -> TensorInfo<T const, Dims>
+struct obtain_tensor_info_fn<T const, Dims> : public obtain_tensor_info_fn<T, Dims> {
+    auto operator()(torch::Tensor const& x, char const* name) const -> TensorInfo<T const, Dims>
     {
-        return static_cast<obtain_tensor_info_fn<T, Dims> const&>(*this)(x,
-                                                                         name);
+        return static_cast<obtain_tensor_info_fn<T, Dims> const&>(*this)(x, name);
     }
 };
 
 template <size_t Dims>
-struct obtain_tensor_info_fn<uint64_t, Dims>
-    : public obtain_tensor_info_fn<int64_t, Dims> {
-    auto operator()(torch::Tensor const& x, char const* name) const
-        -> TensorInfo<uint64_t, Dims>
+struct obtain_tensor_info_fn<uint64_t, Dims> : public obtain_tensor_info_fn<int64_t, Dims> {
+    auto operator()(torch::Tensor const& x, char const* name) const -> TensorInfo<uint64_t, Dims>
     {
-        auto const i = static_cast<obtain_tensor_info_fn<int64_t, Dims> const&>(
-            *this)(x, name);
+        auto const i = static_cast<obtain_tensor_info_fn<int64_t, Dims> const&>(*this)(x, name);
         return {reinterpret_cast<uint64_t*>(i.data), i.sizes, i.strides};
+    }
+};
+
+template <size_t Dims> struct obtain_tensor_info_fn<ls_bits512, Dims> {
+    auto operator()(torch::Tensor const& x, char const* name) const -> TensorInfo<ls_bits512, Dims>
+    {
+        auto const arg_name         = name != nullptr ? name : "tensor";
+        auto const sizes            = x.sizes();
+        auto const original_strides = x.strides();
+        TCM_CHECK(sizes.size() == Dims + 1, std::invalid_argument,
+                  fmt::format("{} has wrong shape: [{}]; expected a {}-dimensional tensor",
+                              arg_name, fmt::join(sizes, ","), Dims + 1));
+        TCM_CHECK(
+            original_strides.back() == 1, std::invalid_argument,
+            fmt::format("{} must be contiguous along the last dimension, but has strides: [{}]",
+                        arg_name, fmt::join(original_strides, ",")));
+        auto* data = reinterpret_cast<ls_bits512*>(x.data_ptr<int64_t>());
+
+        int64_t strides[Dims];
+        std::transform(original_strides.data(), original_strides.data() + Dims, strides,
+                       [](auto const k) {
+                           TCM_CHECK(k % 8 == 0, std::runtime_error,
+                                     "expected strides of 'x' to be multiples of 8");
+                           return k / 8;
+                       });
+        return {data, sizes.data(), strides};
     }
 };
 } // namespace detail
 
 template <class T, size_t Dims = 1>
-auto tensor_info(torch::Tensor x, char const* name = nullptr)
-    -> TensorInfo<T, Dims>
+auto tensor_info(torch::Tensor x, char const* name = nullptr) -> TensorInfo<T, Dims>
 {
     return detail::obtain_tensor_info_fn<T, Dims>{}(std::move(x), name);
 }
 
 template <class T>
-auto obtain_tensor_info(torch::Tensor x, char const* name = nullptr)
-    -> TensorInfo<T>;
+auto obtain_tensor_info(torch::Tensor x, char const* name = nullptr) -> TensorInfo<T>;
 
 // template <class T, bool Checks = true>
 // auto obtain_tensor_info(torch::Tensor x, char const* name = nullptr)

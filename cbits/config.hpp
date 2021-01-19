@@ -50,6 +50,19 @@
 #define TCM_IMPORT BOOST_SYMBOL_IMPORT
 #define TCM_RESTRICT __restrict__
 
+#if defined(__AVX2__)
+#    define TCM_HAS_AVX2() 1
+#    define TCM_HAS_AVX() 1
+#elif defined(__AVX__)
+#    define TCM_HAS_AVX2() 0
+#    define TCM_HAS_AVX() 1
+#elif defined(__SSE2__) || defined(__x86_64__)
+#    define TCM_HAS_AVX2() 0
+#    define TCM_HAS_AVX() 0
+#else
+#    error "unsupported architecture; nqs_playground currently only works on x86_64"
+#endif
+
 #if defined(BOOST_GCC)
 #    define TCM_GCC BOOST_GCC
 #endif
@@ -57,7 +70,7 @@
 #    define TCM_CLANG BOOST_CLANG
 #endif
 #if defined(__CUDACC__)
-#   define TCM_NVCC
+#    define TCM_NVCC
 #endif
 
 #if defined(TCM_GCC) || defined(TCM_CLANG)
@@ -69,18 +82,18 @@
 #define TCM_NAMESPACE tcm
 #define TCM_NAMESPACE_BEGIN namespace tcm {
 #define TCM_NAMESPACE_END } // namespace tcm
-#define TCM_BUG_MESSAGE                                                        \
-    "#####################################################################\n"  \
-    "##    Congratulations, you have found a bug in nqs-playground!     ##\n"  \
-    "##            Please, be so kind to submit it here                 ##\n"  \
-    "##     https://github.com/twesterhout/nqs-playground/issues        ##\n"  \
+#define TCM_BUG_MESSAGE                                                                            \
+    "#####################################################################\n"                      \
+    "##    Congratulations, you have found a bug in nqs-playground!     ##\n"                      \
+    "##            Please, be so kind to submit it here                 ##\n"                      \
+    "##     https://github.com/twesterhout/nqs-playground/issues        ##\n"                      \
     "#####################################################################"
 
 #if defined(TCM_CLANG)
 // Clang refuses to display newlines
-#    define TCM_STATIC_ASSERT_BUG_MESSAGE                                      \
-        "Congratulations, you have found a bug in nqs-playground! Please, be " \
-        "so kind to submit it to "                                             \
+#    define TCM_STATIC_ASSERT_BUG_MESSAGE                                                          \
+        "Congratulations, you have found a bug in nqs-playground! Please, be "                     \
+        "so kind to submit it to "                                                                 \
         "https://github.com/twesterhout/nqs-playground/issues."
 #else
 #    define TCM_STATIC_ASSERT_BUG_MESSAGE "\n" TCM_BUG_MESSAGE
@@ -90,23 +103,22 @@
 #define TCM_CONSTEXPR constexpr
 
 #if defined(TCM_DEBUG)
-#    define TCM_ASSERT(cond, msg)                                              \
-        (TCM_LIKELY(cond)                                                      \
-             ? static_cast<void>(0)                                            \
-             : ::TCM_NAMESPACE::detail::assert_fail(                           \
-                 #cond, __FILE__, __LINE__, TCM_CURRENT_FUNCTION, msg))
+#    define TCM_ASSERT(cond, msg)                                                                  \
+        (TCM_LIKELY(cond) ? static_cast<void>(0)                                                   \
+                          : ::TCM_NAMESPACE::detail::assert_fail(#cond, __FILE__, __LINE__,        \
+                                                                 TCM_CURRENT_FUNCTION, msg))
 #else
 #    define TCM_ASSERT(cond, msg) static_cast<void>(0)
 #endif
 
 #if defined(TCM_NVCC)
-#   define TCM_HOST __host__
-#   define TCM_DEVICE __device__
-#   define TCM_GLOBAL __global__
+#    define TCM_HOST __host__
+#    define TCM_DEVICE __device__
+#    define TCM_GLOBAL __global__
 #else
-#   define TCM_HOST
-#   define TCM_DEVICE
-#   define TCM_GLOBAL
+#    define TCM_HOST
+#    define TCM_DEVICE
+#    define TCM_GLOBAL
 #endif
 
 TCM_NAMESPACE_BEGIN
