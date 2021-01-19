@@ -29,9 +29,46 @@
 #pragma once
 
 #include "config.hpp"
+#include "errors.hpp"
 #include <fmt/format.h>
+#include <lattice_symmetries/lattice_symmetries.h>
+
+auto operator==(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
+auto operator!=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
+auto operator<(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
+auto operator>(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
+auto operator<=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
+auto operator>=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool;
 
 TCM_NAMESPACE_BEGIN
+
+constexpr auto toggle_bit(uint64_t& bits, unsigned const i) noexcept -> void
+{
+    TCM_ASSERT(i < 64U, "index out of bounds");
+    bits ^= uint64_t{1} << uint64_t{i};
+}
+constexpr auto toggle_bit(ls_bits512& bits, unsigned const i) noexcept -> void
+{
+    TCM_ASSERT(i < 512U, "index out of bounds");
+    return toggle_bit(bits.words[i / 64U], i % 64U);
+}
+constexpr auto test_bit(uint64_t const bits, unsigned const i) noexcept -> bool
+{
+    TCM_ASSERT(i < 64U, "index out of bounds");
+    return static_cast<bool>((bits >> i) & 1U);
+}
+constexpr auto test_bit(ls_bits512 const& bits, unsigned const i) noexcept -> bool
+{
+    TCM_ASSERT(i < 512U, "index out of bounds");
+    return test_bit(bits.words[i / 64U], i % 64U);
+}
+constexpr auto set_zero(uint64_t& bits) noexcept -> void { bits = 0UL; }
+constexpr auto set_zero(ls_bits512& bits) noexcept -> void
+{
+    for (auto& w : bits.words) {
+        set_zero(w);
+    }
+}
 
 struct bits512 {
     alignas(64) uint64_t words[8];
@@ -44,10 +81,7 @@ inline auto operator==(bits512 const& x, bits512 const& y) noexcept -> bool
     return std::equal(begin(x.words), end(x.words), begin(y.words));
 }
 
-inline auto operator!=(bits512 const& x, bits512 const& y) noexcept -> bool
-{
-    return !(x == y);
-}
+inline auto operator!=(bits512 const& x, bits512 const& y) noexcept -> bool { return !(x == y); }
 
 inline auto operator<(bits512 const& x, bits512 const& y) noexcept -> bool
 {
@@ -60,20 +94,11 @@ inline auto operator<(bits512 const& x, bits512 const& y) noexcept -> bool
     return false;
 }
 
-inline auto operator>(bits512 const& x, bits512 const& y) noexcept -> bool
-{
-    return y < x;
-}
+inline auto operator>(bits512 const& x, bits512 const& y) noexcept -> bool { return y < x; }
 
-inline auto operator<=(bits512 const& x, bits512 const& y) noexcept -> bool
-{
-    return !(x > y);
-}
+inline auto operator<=(bits512 const& x, bits512 const& y) noexcept -> bool { return !(x > y); }
 
-inline auto operator>=(bits512 const& x, bits512 const& y) noexcept -> bool
-{
-    return !(x < y);
-}
+inline auto operator>=(bits512 const& x, bits512 const& y) noexcept -> bool { return !(x < y); }
 
 TCM_NAMESPACE_END
 
@@ -82,13 +107,13 @@ TCM_NAMESPACE_END
 ///
 /// Used only for error reporting.
 namespace fmt {
-template <>
-struct formatter<::TCM_NAMESPACE::bits512> : formatter<string_view> {
+template <> struct formatter<::TCM_NAMESPACE::bits512> : formatter<string_view> {
     // parse is inherited from formatter<string_view>.
 
     template <typename FormatContext>
     auto format(::TCM_NAMESPACE::bits512 const& type, FormatContext& ctx)
-        -> decltype(formatter<string_view>::format(std::declval<std::string const&>(), std::declval<FormatContext&>()))
+        -> decltype(formatter<string_view>::format(std::declval<std::string const&>(),
+                                                   std::declval<FormatContext&>()))
     {
         // TODO(twesterhout): This is probably the stupidest possible way to
         // implement it... But since we only use it for debugging and error

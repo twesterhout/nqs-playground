@@ -1,5 +1,42 @@
 #include "bits512.hpp"
 
+TCM_EXPORT auto operator==(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    for (auto i = 0; i < static_cast<int>(std::size(x.words)); ++i) {
+        if (x.words[i] != y.words[i]) { return false; }
+    }
+    return true;
+}
+
+TCM_EXPORT auto operator!=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x == y);
+}
+
+TCM_EXPORT auto operator<(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    for (auto i = 0; i < static_cast<int>(std::size(x.words)); ++i) {
+        if (x.words[i] < y.words[i]) { return true; }
+        if (x.words[i] > y.words[i]) { return false; }
+    }
+    return false;
+}
+
+TCM_EXPORT auto operator>(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return y < x;
+}
+
+TCM_EXPORT auto operator<=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x > y);
+}
+
+TCM_EXPORT auto operator>=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x < y);
+}
+
 TCM_NAMESPACE_BEGIN
 
 namespace detail {
@@ -22,8 +59,7 @@ constexpr auto fmix64(uint64_t k) noexcept -> uint64_t
     return k;
 }
 
-constexpr auto murmurhash3_x64_128(uint64_t const (&words)[8],
-                                   uint64_t (&out)[2]) noexcept -> void
+constexpr auto murmurhash3_x64_128(uint64_t const (&words)[8], uint64_t (&out)[2]) noexcept -> void
 {
     constexpr uint64_t c1   = 0x87c37b91114253d5LLU;
     constexpr uint64_t c2   = 0x4cf5ad432745937fLLU;
@@ -78,7 +114,9 @@ TCM_NAMESPACE_END
 
 namespace std {
 
-TCM_EXPORT auto hash<::TCM_NAMESPACE::bits512>::operator()(::TCM_NAMESPACE::bits512 const& x) const noexcept -> size_t
+TCM_EXPORT auto
+hash<::TCM_NAMESPACE::bits512>::operator()(::TCM_NAMESPACE::bits512 const& x) const noexcept
+    -> size_t
 {
     uint64_t out[2];
     ::TCM_NAMESPACE::detail::murmurhash3_x64_128(x.words, out);
