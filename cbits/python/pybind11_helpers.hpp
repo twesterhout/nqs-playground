@@ -70,21 +70,19 @@ namespace detail {
             TCM_CHECK(shift.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
-            auto mask = reinterpret_steal<object>(
-                PyLong_FromUnsignedLongLong(0xFFFFFFFFFFFFFFFF));
+            auto mask = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(0xFFFFFFFFFFFFFFFF));
             TCM_CHECK(mask.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
             for (auto i = 0;; ++i) {
-                auto word = reinterpret_steal<object>(
-                    PyNumber_And(number.ptr(), mask.ptr()));
+                auto word = reinterpret_steal<object>(PyNumber_And(number.ptr(), mask.ptr()));
                 TCM_CHECK(word.ptr() != nullptr, std::runtime_error,
                           "Failed to perform a bitwise and Python integers. "
                           "This is probably a bug");
                 value.words[i] = PyLong_AsUnsignedLongLong(word.ptr());
                 if (i == 7) { break; }
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceRshift(number.ptr(), shift.ptr()));
+                number =
+                    reinterpret_steal<object>(PyNumber_InPlaceRshift(number.ptr(), shift.ptr()));
                 TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                           "Failed to perform an in-place right shift. This is "
                           "probably a bug");
@@ -96,35 +94,30 @@ namespace detail {
         // second and third arguments are used to indicate the return value policy and parent object
         // (for ``return_value_policy::reference_internal``) and are generally ignored by implicit
         // casters.
-        static auto cast(ls_bits512 const& src,
-                         return_value_policy /* policy */, handle /* parent */)
-            -> handle
+        static auto cast(ls_bits512 const& src, return_value_policy /* policy */,
+                         handle /* parent */) -> handle
         {
             auto shift = reinterpret_steal<object>(PyLong_FromLong(64L));
             TCM_CHECK(shift.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
-            auto number = reinterpret_steal<object>(
-                PyLong_FromUnsignedLongLong(src.words[7]));
+            auto number = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(src.words[7]));
             TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
             for (auto i = 7; i-- > 0;) { // Iterates from 6 to 0 (inclusive)
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceLshift(number.ptr(), shift.ptr()));
+                number =
+                    reinterpret_steal<object>(PyNumber_InPlaceLshift(number.ptr(), shift.ptr()));
                 TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                           "Failed to perform an in-place left shift. This is "
                           "probably a bug");
-                auto word = reinterpret_steal<object>(
-                    PyLong_FromUnsignedLongLong(src.words[i]));
+                auto word = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(src.words[i]));
                 TCM_CHECK(word.ptr() != nullptr, std::runtime_error,
                           "Failed to construct Python integer constant. This "
                           "is probably a bug");
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceOr(number.ptr(), word.ptr()));
-                TCM_CHECK(
-                    number.ptr() != nullptr, std::runtime_error,
-                    "Failed to perform an in-place or. This is probably a bug");
+                number = reinterpret_steal<object>(PyNumber_InPlaceOr(number.ptr(), word.ptr()));
+                TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
+                          "Failed to perform an in-place or. This is probably a bug");
             }
             return number.release();
         }
@@ -138,20 +131,40 @@ namespace detail {
         auto load(handle src, bool convert) -> bool
         {
             if (src.is_none()) { return false; }
-            auto operator_type =
-                module_::import("lattice_symmetries").attr("Operator");
+            auto operator_type = module_::import("lattice_symmetries").attr("Operator");
             if (!isinstance(src, operator_type)) { return false; }
-            payload = reinterpret_cast<ls_operator*>(
-                src.attr("_payload").attr("value").cast<intptr_t>());
+            payload =
+                reinterpret_cast<ls_operator*>(src.attr("_payload").attr("value").cast<intptr_t>());
             return true;
         }
 
         operator ls_operator*() { return payload; }
         operator ls_operator&() { return *payload; }
 
-        static constexpr auto name = _("lattice_symmetries.Operator");
-        template <class T>
-        using cast_op_type = pybind11::detail::cast_op_type<T>;
+        static constexpr auto name            = _("lattice_symmetries.Operator");
+        template <class T> using cast_op_type = pybind11::detail::cast_op_type<T>;
+    };
+
+    template <> struct type_caster<ls_spin_basis> {
+      private:
+        ls_spin_basis* payload;
+
+      public:
+        auto load(handle src, bool convert) -> bool
+        {
+            if (src.is_none()) { return false; }
+            auto basis_type = module_::import("lattice_symmetries").attr("SpinBasis");
+            if (!isinstance(src, basis_type)) { return false; }
+            payload = reinterpret_cast<ls_spin_basis*>(
+                src.attr("_payload").attr("value").cast<intptr_t>());
+            return true;
+        }
+
+        operator ls_spin_basis*() { return payload; }
+        operator ls_spin_basis&() { return *payload; }
+
+        static constexpr auto name            = _("lattice_symmetries.SpinBasis");
+        template <class T> using cast_op_type = pybind11::detail::cast_op_type<T>;
     };
 
     template <> struct type_caster<::TCM_NAMESPACE::bits512> {
@@ -182,21 +195,19 @@ namespace detail {
             TCM_CHECK(shift.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
-            auto mask = reinterpret_steal<object>(
-                PyLong_FromUnsignedLongLong(0xFFFFFFFFFFFFFFFF));
+            auto mask = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(0xFFFFFFFFFFFFFFFF));
             TCM_CHECK(mask.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
             for (auto i = 0;; ++i) {
-                auto word = reinterpret_steal<object>(
-                    PyNumber_And(number.ptr(), mask.ptr()));
+                auto word = reinterpret_steal<object>(PyNumber_And(number.ptr(), mask.ptr()));
                 TCM_CHECK(word.ptr() != nullptr, std::runtime_error,
                           "Failed to perform a bitwise and Python integers. "
                           "This is probably a bug");
                 value.words[i] = PyLong_AsUnsignedLongLong(word.ptr());
                 if (i == 7) { break; }
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceRshift(number.ptr(), shift.ptr()));
+                number =
+                    reinterpret_steal<object>(PyNumber_InPlaceRshift(number.ptr(), shift.ptr()));
                 TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                           "Failed to perform an in-place right shift. This is "
                           "probably a bug");
@@ -209,35 +220,30 @@ namespace detail {
         // indicate the return value policy and parent object (for
         // ``return_value_policy::reference_internal``) and are generally
         // ignored by implicit casters.
-        static auto cast(::TCM_NAMESPACE::bits512 const& src,
-                         return_value_policy /* policy */, handle /* parent */)
-            -> handle
+        static auto cast(::TCM_NAMESPACE::bits512 const& src, return_value_policy /* policy */,
+                         handle /* parent */) -> handle
         {
             auto shift = reinterpret_steal<object>(PyLong_FromLong(64L));
             TCM_CHECK(shift.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
-            auto number = reinterpret_steal<object>(
-                PyLong_FromUnsignedLongLong(src.words[7]));
+            auto number = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(src.words[7]));
             TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                       "Failed to construct Python integer constant. This is "
                       "probably a bug");
             for (auto i = 7; i-- > 0;) { // Iterates from 6 to 0 (inclusive)
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceLshift(number.ptr(), shift.ptr()));
+                number =
+                    reinterpret_steal<object>(PyNumber_InPlaceLshift(number.ptr(), shift.ptr()));
                 TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
                           "Failed to perform an in-place left shift. This is "
                           "probably a bug");
-                auto word = reinterpret_steal<object>(
-                    PyLong_FromUnsignedLongLong(src.words[i]));
+                auto word = reinterpret_steal<object>(PyLong_FromUnsignedLongLong(src.words[i]));
                 TCM_CHECK(word.ptr() != nullptr, std::runtime_error,
                           "Failed to construct Python integer constant. This "
                           "is probably a bug");
-                number = reinterpret_steal<object>(
-                    PyNumber_InPlaceOr(number.ptr(), word.ptr()));
-                TCM_CHECK(
-                    number.ptr() != nullptr, std::runtime_error,
-                    "Failed to perform an in-place or. This is probably a bug");
+                number = reinterpret_steal<object>(PyNumber_InPlaceOr(number.ptr(), word.ptr()));
+                TCM_CHECK(number.ptr() != nullptr, std::runtime_error,
+                          "Failed to perform an in-place or. This is probably a bug");
             }
             return number.release();
         }
@@ -256,23 +262,19 @@ namespace detail {
             // We are dealing with torch.jit.ScriptMethod
             if (type_caster<torch::jit::script::Method> method_caster;
                 method_caster.load(src, convert)) {
-                value = [f = cast_op<torch::jit::script::Method>(
-                             std::move(method_caster))](auto x) mutable {
-                    return f({std::move(x)}).toTensor();
-                };
+                value = [f = cast_op<torch::jit::script::Method>(std::move(method_caster))](
+                            auto x) mutable { return f({std::move(x)}).toTensor(); };
                 return true;
             }
 
             // We are dealing with torch.jit.ScriptModule
             if (type_caster<torch::jit::script::Module> module_caster;
                 module_caster.load(src, convert)) {
-                auto module = cast_op<torch::jit::script::Module>(
-                    std::move(module_caster));
+                auto module = cast_op<torch::jit::script::Module>(std::move(module_caster));
                 auto method = module.get_method("forward");
                 // This relies on the fact that Module and Method have reference
                 // semantics.
-                value = [parent = std::move(module),
-                         f      = std::move(method)](auto x) mutable {
+                value = [parent = std::move(module), f = std::move(method)](auto x) mutable {
                     return f({std::move(x)}).toTensor();
                 };
                 return true;
@@ -305,8 +307,7 @@ namespace detail {
             return true;
         }
 
-        PYBIND11_TYPE_CASTER(::TCM_NAMESPACE::v2::ForwardT,
-                             _("Callable[[Tensor], Tensor]"));
+        PYBIND11_TYPE_CASTER(::TCM_NAMESPACE::v2::ForwardT, _("Callable[[Tensor], Tensor]"));
     };
 } // namespace detail
 } // namespace pybind11

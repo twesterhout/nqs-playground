@@ -28,17 +28,14 @@
 
 #pragma once
 
-#include "../bits512.hpp"
 #include "../common.hpp"
-
-#include <gsl/gsl-lite.hpp>
 #include <torch/types.h>
 
 TCM_NAMESPACE_BEGIN
 namespace v2 {
 
-auto apply(torch::Tensor spins, OperatorT op, ForwardT psi,
-           uint64_t max_required_size, uint32_t batch_size) -> torch::Tensor;
+auto apply(torch::Tensor spins, OperatorT op, ForwardT psi, uint64_t max_required_size,
+           uint32_t batch_size) -> torch::Tensor;
 
 } // namespace v2
 TCM_NAMESPACE_END
