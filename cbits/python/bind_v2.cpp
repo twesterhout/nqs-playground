@@ -1,4 +1,5 @@
 #include "bind_v2.hpp"
+#include "../metropolis.hpp"
 #include "../trim.hpp"
 #include "../v2/accumulator.hpp"
 #include "../v2/zanella.hpp"
@@ -35,6 +36,16 @@ auto bind_v2(PyObject* _module) -> void
     m.def(
         "random_spin", [](ls_spin_basis const& basis) { return random_spin(basis); },
         py::arg{"basis"}.noconvert());
+
+    py::class_<MetropolisGenerator>(m, "MetropolisGenerator")
+        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), DOC(R"EOF(
+            :param basis: specifies the Hilbert space basis.)EOF"))
+        .def(
+            "__call__",
+            [](MetropolisGenerator const& self, torch::Tensor x, py::object dtype) {
+                return self(std::move(x), torch::python::detail::py_object_to_dtype(dtype));
+            },
+            py::arg{"x"}.noconvert(), py::arg{"dtype"}.noconvert());
 
     py::class_<ZanellaGenerator>(m, "ZanellaGenerator")
         .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), DOC(R"EOF(

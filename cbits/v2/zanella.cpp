@@ -132,7 +132,7 @@ TCM_EXPORT auto ZanellaGenerator::generate(ls_bits512 const&         spin,
 {
     auto const number_spins = ls_get_number_spins(_basis);
     ls_bits512 repr;
-    std::fill(std::begin(repr.words), std::end(repr.words), uint64_t{0});
+    set_zero(repr);
     double norm  = 0.0;
     auto   count = 0U;
     for (auto i = 0U; i < number_spins - 1; ++i) {
@@ -164,8 +164,9 @@ TCM_EXPORT auto zanella_choose_samples(torch::Tensor weights, int64_t const numb
               "weights must reside on the CPU");
 
     auto const pinned_memory = device != c10::DeviceType::CPU;
-    auto       indices       = torch::empty(
-        {number_samples}, torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pinned_memory));
+    auto       indices =
+        torch::empty(std::initializer_list<int64_t>{number_samples},
+                     torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pinned_memory));
     if (number_samples == 0) { return indices.to(device); }
 
     AT_DISPATCH_FLOATING_TYPES(weights.scalar_type(), "zanella_choose_samples", [&] {

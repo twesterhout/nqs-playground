@@ -322,7 +322,7 @@ target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
 add_library(nqs SHARED
     cbits/bits512.cpp
     cbits/errors.cpp
-    # cbits/metropolis.cpp
+    cbits/metropolis.cpp
     # cbits/tabu.cpp
     # cbits/jacobian.cpp
     # cbits/heisenberg.cpp

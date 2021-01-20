@@ -28,98 +28,37 @@
 
 #pragma once
 
+#include "bits512.hpp"
 #include "random.hpp"
-#include "symmetry.hpp"
 #include "tensor_info.hpp"
 #include <gsl/gsl-lite.hpp>
+#include <lattice_symmetries/lattice_symmetries.h>
 #include <torch/types.h>
-#include <memory>
 
 TCM_NAMESPACE_BEGIN
 
-class BasisBase;
-
-class TCM_IMPORT MetropolisKernel {
+class MetropolisGenerator {
   private:
-    std::shared_ptr<BasisBase const> _basis;
-    gsl::not_null<RandomGenerator*>  _generator;
+    gsl::not_null<ls_spin_basis const*> _basis;
+    gsl::not_null<RandomGenerator*>     _generator;
 
   public:
-    MetropolisKernel(std::shared_ptr<BasisBase const> basis,
-                     RandomGenerator& generator = global_random_generator());
+    MetropolisGenerator(ls_spin_basis const& basis,
+                        RandomGenerator&     generator = global_random_generator());
+    ~MetropolisGenerator();
 
-    MetropolisKernel(MetropolisKernel const&)     = default;
-    MetropolisKernel(MetropolisKernel&&) noexcept = default;
-    MetropolisKernel& operator=(MetropolisKernel const&) = default;
-    MetropolisKernel& operator=(MetropolisKernel&&) noexcept = default;
+    MetropolisGenerator(MetropolisGenerator const&)     = default;
+    MetropolisGenerator(MetropolisGenerator&&) noexcept = default;
+    MetropolisGenerator& operator=(MetropolisGenerator const&) = default;
+    MetropolisGenerator& operator=(MetropolisGenerator&&) noexcept = default;
 
-    auto operator()(torch::Tensor x) const
+    auto operator()(torch::Tensor x, c10::ScalarType dtype) const
         -> std::tuple<torch::Tensor, torch::Tensor>;
 
-    auto basis() const noexcept -> std::shared_ptr<BasisBase const>
-    {
-        return _basis;
-    }
-
   private:
-    inline auto kernel_cpu(TensorInfo<bits512 const> const& src_info,
-                           TensorInfo<bits512> const&       dst_info,
-                           TensorInfo<float> const& norm_info) const -> void;
+    template <class scalar_t>
+    auto generate(TensorInfo<ls_bits512 const> src, TensorInfo<ls_bits512> dst,
+                  TensorInfo<scalar_t> norm) const -> void;
 };
-
-class TCM_IMPORT ProposalGenerator {
-  private:
-    std::shared_ptr<BasisBase const> _basis;
-    gsl::not_null<RandomGenerator*>  _generator;
-
-  public:
-    ProposalGenerator(std::shared_ptr<BasisBase const> basis,
-                      RandomGenerator& generator = global_random_generator());
-
-    auto operator()(torch::Tensor x) const
-        -> std::tuple<torch::Tensor, std::vector<int64_t>>;
-
-    auto basis() const noexcept -> std::shared_ptr<BasisBase const>
-    {
-        return _basis;
-    }
-
-  private:
-    auto generate(bits512 const& src, std::vector<bits512>& dst) const -> void;
-    auto generate(bits512 const& spin, gsl::span<bits512> out) const
-        -> unsigned;
-};
-
-// auto _add_waiting_time_(torch::Tensor time, torch::Tensor rates) -> void;
-
-// auto _store_ready_samples_(torch::Tensor states, torch::Tensor log_probs,
-//                            torch::Tensor sizes, torch::Tensor current_state,
-//                            torch::Tensor current_log_prob, torch::Tensor times,
-//                            float thin_rate) -> bool;
-
-// auto zanella_next_state_index(torch::Tensor                jump_rates,
-//                               std::vector<int64_t> const&  counts,
-//                               c10::optional<torch::Tensor> out)
-//     -> torch::Tensor;
-
-auto zanella_next_state_index(torch::Tensor               jump_rates,
-                              torch::Tensor               jump_rates_sum,
-                              std::vector<int64_t> const& counts,
-                              c10::Device device) -> torch::Tensor;
-
-#if 0
-auto zanella_jump_rates(torch::Tensor               current_log_prob,
-                        torch::Tensor               proposed_log_prob,
-                        std::vector<int64_t> const& counts,
-                        torch::Device               target_device)
-    -> std::tuple<torch::Tensor, torch::Tensor>;
-#endif
-
-auto zanella_waiting_time(torch::Tensor rates, c10::optional<torch::Tensor> out)
-    -> torch::Tensor;
-
-auto zanella_choose_samples(torch::Tensor weights, int64_t number_samples,
-                            double time_step, c10::Device device)
-    -> torch::Tensor;
 
 TCM_NAMESPACE_END

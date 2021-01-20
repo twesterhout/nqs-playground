@@ -36,7 +36,7 @@
 
 TCM_NAMESPACE_BEGIN
 
-class TCM_IMPORT ZanellaGenerator {
+class ZanellaGenerator {
   private:
     gsl::not_null<ls_spin_basis const*> _basis;
 
