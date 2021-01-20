@@ -1,6 +1,7 @@
 # from itertools import islice
 from collections import namedtuple
 import math
+import time
 from random import randint
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -9,7 +10,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-# from ._C import (
+from ._C import ZanellaGenerator, zanella_choose_samples, random_spin
+
 #     MetropolisKernel,
 #     _ProposalGenerator,
 #     zanella_next_state_index,
@@ -26,13 +28,18 @@ __all__ = [
     "sample_exactly",
     "sample_autoregressive",
     "integrated_autocorr_time",
+    "zanella_process",
+    "sample_using_zanella",
     # "autocorr_function",
-    # "are_close_l1"
+    "are_close_l1",
 ]
 
 
-_SamplingOptionsBase = namedtuple("_SamplingOptions",
-    ["number_samples", "number_chains", "number_discarded", "sweep_size", "device"])
+_SamplingOptionsBase = namedtuple(
+    "_SamplingOptions",
+    ["number_samples", "number_chains", "number_discarded", "sweep_size", "device"],
+)
+
 
 class SamplingOptions(_SamplingOptionsBase):
     r"""Options for sampling spin configurations."""
@@ -80,9 +87,9 @@ class SamplingOptions(_SamplingOptionsBase):
 
         if number_discarded is not None:
             number_discarded = int(number_discarded)
-            if number_discarded <= 0:
+            if number_discarded < 0:
                 raise ValueError(
-                    "invalid number_discarded: {}; expected either a positive "
+                    "invalid number_discarded: {}; expected either a non-negative "
                     "integer or None".format(number_chains)
                 )
         else:
@@ -104,12 +111,7 @@ class SamplingOptions(_SamplingOptionsBase):
         if not isinstance(device, torch.device):
             device = torch.device(device)
         return super(SamplingOptions, cls).__new__(
-            cls,
-            number_samples,
-            number_chains,
-            number_discarded,
-            sweep_size,
-            device
+            cls, number_samples, number_chains, number_discarded, sweep_size, device
         )
 
 
@@ -240,7 +242,6 @@ def sample_autoregressive(
     shape = (options.number_samples, options.number_chains)
     return states.view(*shape, 8), None, {}
     # return r
-
 
 
 # class Sampler:
@@ -403,7 +404,7 @@ def metropolis_process(
 
 
 def sample_using_metropolis(log_prob_fn, basis, options):
-    initial_state = _prepare_initial_state(basis, options.number_chains)
+    initial_state = prepare_initial_state(basis, options.number_chains)
     initial_norm = basis.norm(initial_state).to(options.device)
     initial_state = initial_state.to(options.device)
     kernel_fn = MetropolisKernel(basis)
@@ -417,6 +418,80 @@ def sample_using_metropolis(log_prob_fn, basis, options):
     )
     info = {"acceptance_rate": torch.mean(acceptance).item()}
     return states, log_probs, info
+
+
+@torch.no_grad()
+def _zanella_jump_rates(current_log_prob: Tensor, possible_log_prob: Tensor) -> Tensor:
+    r"""Calculate jump rates (i.e. probabilities) for all possible states.
+
+    :param current_log_prob: a tensor of shape `(number_chains,)` with log probability of current
+        state for every Markov chain.
+    :param possible_log_prob: a tensor of shape `(number_chains, max_number_states)` with log
+        probability for every possible new state for every chain. Because of symmetries, the number
+        of possible new states may vary. We pad the tensor with a large negative value (whose
+        `exp` is 0) to ensure that the tensor is rectangular.
+    """
+    (number_chains,) = current_log_prob.size()
+    if possible_log_prob.size(0) != number_chains:
+        raise ValueError(
+            "'possible_log_prob' has wrong shape: {}; expected (number_chains={}, "
+            "max_number_states)".format(possible_log_prob.size(), number_chains)
+        )
+    return torch.exp_(possible_log_prob - current_log_prob.view(-1, 1))
+
+
+@torch.no_grad()
+def _sample_exponential(rates: Tensor, out: Tensor) -> Tensor:
+    r"""Sample from exponential distribution with given rates."""
+    if rates.size() != out.size():
+        raise ValueError("'out' has wrong shape: {}; expected {}".format(out.size(), rates.size()))
+    return out.copy_(torch.distributions.Exponential(rates).sample())
+    # out = torch.rand(*rates.size(), out=out)
+    # out *= -1
+    # out = torch.log1p_(out)
+    # out *= -1
+    # out /= rates
+    # return out
+
+
+@torch.no_grad()
+def _zanella_next_state_index(rates: Tensor) -> Tensor:
+    r"""Choose indices of states to which to move.
+
+    :param rates: a tensor of shape `(number_chains, max_number_states)` containing jump rates to
+        possible states for every Markov chain.
+    :return: a tensor of shape `(number_chains,)` with indices of states to which to jump.
+    """
+    return torch.multinomial(rates, num_samples=1).view(-1)
+
+
+@torch.no_grad()
+def _zanella_update_current(possible: Tensor, indices: Tensor, out: Tensor) -> Tensor:
+    r"""Pick the next state from `possible` based on `indices` and store it to `out`.
+
+    This is equivalent to indexing `possible` along the first dimension.
+
+    :param possible: a tensor of shape `(number_chains, max_number_states, K)`.
+    :param indices: a tensor of shape `(number_chains,)`.
+    :param out: a tensor of shape `(number_chains, K)`.
+    """
+    (number_chains, max_number_states, *extra) = possible.size()
+    offsets = torch.arange(
+        start=0,
+        end=number_chains * max_number_states,
+        step=max_number_states,
+        dtype=indices.dtype,
+        device=indices.device,
+    )
+    offsets += indices
+    torch.index_select(possible.view(-1, *extra), dim=0, index=offsets, out=out)
+    return out
+
+
+@torch.no_grad()
+def _pad_log_prob(log_probs: Tensor, counts: Tensor, value: float) -> Tensor:
+    indices = torch.arange(log_probs.size(1), device=log_probs.device).view(1, -1)
+    return log_probs.masked_fill_(indices >= counts.view(-1, 1), value)
 
 
 @torch.no_grad()
@@ -437,10 +512,17 @@ def zanella_process(
     :param generator_fn:
     :param number_samples:
     """
-    assert number_samples >= 1
-    cpu = torch.device("cpu")
+    if number_samples < 1:
+        raise ValueError(
+            "invalid 'number_samples': {}; expected a positive integer".format(number_samples)
+        )
+    if number_discarded < 0:
+        raise ValueError(
+            "invalid 'number_discarded': {}; expected a positive integer".format(number_discarded)
+        )
     # Device is determined by the location of initial state
     device = current_state.device
+    (number_chains, configuration_size) = current_state.size()
     current_log_prob = log_prob_fn(current_state)
     if current_log_prob.dim() > 1:
         current_log_prob.squeeze_(dim=1)
@@ -450,7 +532,7 @@ def zanella_process(
     states = current_state.new_empty((number_samples,) + current_state.size())
     log_prob = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
     # Weights stores weights of samples, i.e. time we spend sitting there
-    weights = torch.empty(number_samples, current_state.size(0))
+    weights = current_log_prob.new_empty(number_samples, current_state.size(0))
     # Store results of the first iteration. Note that current_weight is not yet
     # computed! It will be done inside the loop
     states[0].copy_(current_state)
@@ -458,6 +540,7 @@ def zanella_process(
     current_state = states[0]
     current_log_prob = log_prob[0]
     current_weight = weights[0]
+
     # Main loop. We keep track of the iteration manually since we want to stop
     # in the middle of the loop body rather than at the end. We also keep a
     # flag which indicated whether we are still in the thermalisation phase and
@@ -466,18 +549,18 @@ def zanella_process(
     discard = True
     while True:
         # Generates all states to which we could jump
-        possible_state, counts = generator_fn(current_state)
-        possible_log_prob = log_prob_fn(possible_state)
-        if possible_log_prob.dim() > 1:
-            possible_log_prob.squeeze_(dim=1)
-        jump_rates, jump_rates_sum = zanella_jump_rates(current_log_prob, possible_log_prob, counts)
+        possible_states, counts = generator_fn(current_state)
+        possible_log_probs = log_prob_fn(possible_states.view(-1, configuration_size))
+        possible_log_probs = possible_log_probs.view(number_chains, -1)
+        _pad_log_prob(possible_log_probs, counts, value=-1e7)
+        jump_rates = _zanella_jump_rates(current_log_prob, possible_log_probs)
         # Calculate for how long we have to sit in the current state
         # Note that only now have we computed all quantities for `iteration`.
-        zanella_waiting_time(jump_rates_sum, out=current_weight)
+        _sample_exponential(jump_rates.sum(dim=1), out=current_weight)
 
         iteration += 1
         if discard:
-            if iteration == number_discarded:
+            if iteration >= number_discarded:
                 iteration = 0
                 discard = False
         else:
@@ -488,37 +571,43 @@ def zanella_process(
             current_weight = weights[iteration]
 
         # Pick the next state
-        indices = zanella_next_state_index(jump_rates, jump_rates_sum, counts, device)
-        torch.index_select(possible_state, dim=0, index=indices, out=current_state)
-        torch.index_select(possible_log_prob, dim=0, index=indices, out=current_log_prob)
+        indices = _zanella_next_state_index(jump_rates)
+        assert torch.all(indices < counts)
+        _zanella_update_current(possible_states, indices, out=current_state)
+        _zanella_update_current(possible_log_probs, indices, out=current_log_prob)
 
     return states, log_prob, weights
 
 
 @torch.no_grad()
 def sample_using_zanella(log_prob_fn, basis, options):
-    current_state = _prepare_initial_state(basis, options.number_chains)
+    current_state = prepare_initial_state(basis, options.number_chains)
     current_state = current_state.to(options.device)
-    generator_fn = _ProposalGenerator(basis)
+    generator_fn = ZanellaGenerator(basis)
     sweep_size = options.sweep_size
-    states, log_prob, weights = zanella_process(
+    t1 = time.time()
+    states, log_probs, weights = zanella_process(
         current_state,
         log_prob_fn,
         generator_fn,
         options.number_samples * sweep_size,
         options.number_discarded * sweep_size,
     )
+    t2 = time.time()
+    # return states, log_probs, weights
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
-    final_log_prob = log_prob.new_empty((options.number_samples,) + log_prob.size()[1:])
+    final_log_probs = log_probs.new_empty((options.number_samples,) + log_probs.size()[1:])
     device = final_states.device
-    time_step = torch.sum(weights, dim=0)
-    time_step /= options.number_samples
+    time_steps = torch.sum(weights, dim=0)
+    time_steps /= options.number_samples
+    weights = weights.cpu()
     for chain in range(weights.size(1)):
-        Δt = time_step[chain].item()
+        Δt = time_steps[chain].item()
         indices = zanella_choose_samples(weights[:, chain], options.number_samples, Δt, device)
         torch.index_select(states[:, chain], dim=0, index=indices, out=final_states[:, chain])
-        torch.index_select(log_prob[:, chain], dim=0, index=indices, out=final_log_prob[:, chain])
-    return final_states, final_log_prob, None
+        torch.index_select(log_probs[:, chain], dim=0, index=indices, out=final_log_probs[:, chain])
+    t3 = time.time()
+    return final_states, final_log_probs, {"zanella_process": t2 - t1, "choose_samples": t3 - t2}
 
 
 @torch.no_grad()
@@ -554,32 +643,22 @@ def sample_some(
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
 
 
-def _random_spin_configuration(n: int, hamming_weight: Optional[int] = None) -> int:
-    if hamming_weight is not None:
-        assert 0 <= hamming_weight and hamming_weight <= n, "invalid hamming weight"
-        bits = ["1"] * hamming_weight + ["0"] * (n - hamming_weight)
-        np.random.shuffle(bits)
-        return int("".join(bits), base=2)
-    else:
-        return randint(0, 1 << n - 1)
+# def _random_spin_configuration(n: int, hamming_weight: Optional[int] = None) -> int:
+#     if hamming_weight is not None:
+#         assert 0 <= hamming_weight and hamming_weight <= n, "invalid hamming weight"
+#         bits = ["1"] * hamming_weight + ["0"] * (n - hamming_weight)
+#         np.random.shuffle(bits)
+#         return int("".join(bits), base=2)
+#     else:
+#         return randint(0, 1 << n - 1)
 
 
-def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
-    r"""Generates a batch of valid spin configurations (i.e. representatives)."""
-    if batch_size <= 0:
-        raise ValueError("invalid batch size: {}; expected a positive integer".format(batch_size))
+def prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
     # First, we generate a bunch of representatives, and then sample uniformly from them.
-    states = set()
+    states = dict()
     for _ in range(max(2 * batch_size, 10000)):
-        spin = _random_spin_configuration(basis.number_spins, basis.hamming_weight)
-        states.add(basis.full_info(spin)[0])
+        states[random_spin(basis)] = None
 
-    def to_array(x, out):
-        for i in range(8):
-            out[i] = x & 0xFFFFFFFFFFFFFFFF
-            x >>= 64
-
-    states = list(states)
     out = torch.empty((batch_size, 8), dtype=torch.int64)
     batch = out.numpy().view(np.uint64)
     if len(states) >= batch_size:
@@ -595,9 +674,52 @@ def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
                 torch.randint(len(states), size=(batch_size - len(states),)),
             ]
         )
+
+    def _int_to_ls_bits512(x: int, out: np.ndarray):
+        for i in range(8):
+            out[i] = x & 0xFFFFFFFFFFFFFFFF
+            x >>= 64
+
+    states = list(states.keys())
     for i, index in enumerate(indices):
-        to_array(states[index], out=batch[i])
+        _int_to_ls_bits512(states[index], out=batch[i])
     return out
+
+
+# def _prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
+#     r"""Generates a batch of valid spin configurations (i.e. representatives)."""
+#     if batch_size <= 0:
+#         raise ValueError("invalid batch size: {}; expected a positive integer".format(batch_size))
+#     # First, we generate a bunch of representatives, and then sample uniformly from them.
+#     states = set()
+#     for _ in range(max(2 * batch_size, 10000)):
+#         spin = _random_spin_configuration(basis.number_spins, basis.hamming_weight)
+#         states.add(basis.full_info(spin)[0])
+#
+#     def to_array(x, out):
+#         for i in range(8):
+#             out[i] = x & 0xFFFFFFFFFFFFFFFF
+#             x >>= 64
+#
+#     states = list(states)
+#     out = torch.empty((batch_size, 8), dtype=torch.int64)
+#     batch = out.numpy().view(np.uint64)
+#     if len(states) >= batch_size:
+#         indices = torch.randperm(len(states))[:batch_size]
+#     else:
+#         logger.warning(
+#             "Failed to generate enough different spin configurations: {} generated, "
+#             "but {} required".format(len(states), batch_size)
+#         )
+#         indices = torch.cat(
+#             [
+#                 torch.arange(len(states)),
+#                 torch.randint(len(states), size=(batch_size - len(states),)),
+#             ]
+#         )
+#     for i, index in enumerate(indices):
+#         to_array(states[index], out=batch[i])
+#     return out
 
 
 @torch.jit.script
@@ -647,8 +769,21 @@ def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
     return taus[window]
 
 
+# @torch.no_grad()
+# def _histogram(spins: Tensor, basis) -> Tensor:
+#     assert basis.number_spins <= 64
+#     if spins.dim() == 2:
+#         assert spins.size(1) == 8
+#         spins = spins[:, 0]
+#     device = spins.device
+#     r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
+#     spins, counts = torch.unique(spins, sorted=True, return_counts=True)
+#     r[basis.index(spins.cpu()).to(device)] += counts
+#     return r
 @torch.no_grad()
 def _histogram(spins: Tensor, basis) -> Tensor:
+    import lattice_symmetries as ls
+
     assert basis.number_spins <= 64
     if spins.dim() == 2:
         assert spins.size(1) == 8
@@ -656,7 +791,9 @@ def _histogram(spins: Tensor, basis) -> Tensor:
     device = spins.device
     r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
     spins, counts = torch.unique(spins, sorted=True, return_counts=True)
-    r[basis.index(spins.cpu()).to(device)] += counts
+    indices = ls.batched_index(basis, spins.cpu().numpy().view(np.uint64))
+    indices = torch.from_numpy(indices.view(np.int64)).to(device)
+    r[indices] += counts
     return r
 
 
@@ -671,7 +808,8 @@ def are_close_l1(n: int, basis, sample_fn, exact: Tensor, eps: float, options):
     ms = np.random.poisson(n, size=options.number_chains)
     logger.info("Sampling...")
     states, log_prob, info = sample_fn(options._replace(number_samples=max(ms)))
-    logger.info("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
+    if log_prob is not None:
+        logger.info("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
     if info is not None:
         logger.info("Additional info from the sampler: {}", info)
     logger.info("Computing histograms...")
