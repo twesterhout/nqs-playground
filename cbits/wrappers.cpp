@@ -81,7 +81,7 @@ TCM_EXPORT auto random_spin(ls_spin_basis const& basis, RandomGenerator& generat
 {
     auto const number_spins = ls_get_number_spins(&basis);
     ls_bits512 spin;
-    std::fill(spin.words, spin.words + std::size(spin.words), uint64_t{0});
+    set_zero(spin);
     if (ls_get_hamming_weight(&basis) == -1) {
         auto i = 0U;
         for (; i < number_spins / 64U; ++i) {
@@ -102,7 +102,7 @@ TCM_EXPORT auto random_spin(ls_spin_basis const& basis, RandomGenerator& generat
         auto word = 0U;
         auto i    = 0U;
         for (auto const b : buffer) {
-            spin.words[word] |= static_cast<uint64_t>(b) << i;
+            if (b) { spin.words[word] |= static_cast<uint64_t>(b) << i; }
             ++i;
             if (i == 64) {
                 i = 0U;
@@ -110,7 +110,8 @@ TCM_EXPORT auto random_spin(ls_spin_basis const& basis, RandomGenerator& generat
             }
         }
     }
-    ls_bits512           repr;
+    ls_bits512 repr;
+    set_zero(repr);
     std::complex<double> character;
     double               norm;
     ls_get_state_info(&basis, &spin, &repr, &character, &norm);
