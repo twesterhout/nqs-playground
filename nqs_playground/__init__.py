@@ -28,7 +28,7 @@ from .hamiltonian import *
 from .sampling import *
 # from .monte_carlo import *
 from ._jacobian import *
-# from ._C import manual_seed
+from ._C import manual_seed, random_spin
 
 # This operator becomes available only after loading _C
 unpack = __torch.ops.tcm.unpack

@@ -34,6 +34,7 @@ __all__ = [
     "Unpack",
     "pack",
     "forward_with_batches",
+    "as_spins_tensor",
     # "SpinDataset",
     # "combine_amplitude_and_sign",
     # "combine_amplitude_and_sign_classifier",

@@ -44,7 +44,7 @@ if torch.has_cuda:
     from torch.cuda._utils import _get_device_index
     from torch._utils import ExceptionWrapper
 
-from ._C import _jacobian
+# from ._C import _jacobian
 
 
 def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
