@@ -124,6 +124,9 @@ TCM_EXPORT auto ZanellaGenerator::operator()(torch::Tensor x) const
         y      = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
         counts = counts.to(counts.options().device(device), /*non_blocking=*/pin_memory);
     }
+    else {
+        y = y.contiguous();
+    }
     return {std::move(y), std::move(counts)};
 }
 
