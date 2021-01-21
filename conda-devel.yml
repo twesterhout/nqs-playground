@@ -1,0 +1,30 @@
+name: nqs_playground_devel
+channels:
+  - defaults
+  - pytorch
+  - twesterhout
+dependencies:
+  - python=3.8
+  - pip
+  - black # For formatting code
+  # Dependencies for Python code
+  - lattice-symmetries
+  - numba
+  - numpy
+  - scipy
+  - pip:
+    - pynvim # Python support for Neovim
+    - loguru
+    - py-spy # For performance analysis
+  - pytorch=1.7
+  - cudatoolkit
+  - tensorboard
+  # Tools for generating Conda packages
+  - anaconda-client
+  - conda-build
+  - conda-verify
+  # Stuff to compile the package locally
+  - gcc_linux-64
+  - gxx_linux-64
+  - cmake
+  - ninja
