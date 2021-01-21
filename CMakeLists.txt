@@ -128,7 +128,6 @@ print(1000 * (1000 * a + b) + c)" _TEMP)
     message(STATUS "libc10: ${libc10}")
 
     target_link_libraries(Torch INTERFACE ${libtorch_python} ${libtorch} ${libc10})
-
 else()
     # This doesn't work properly, because PyTorch is hardcoding some paths in
     # Caffe2Config.cmake
@@ -139,7 +138,6 @@ if(TRUE)
     find_package(PkgConfig REQUIRED) 
     pkg_check_modules(lattice_symmetries REQUIRED IMPORTED_TARGET lattice_symmetries)
 endif()
-
 
 
 function(nqs_cbits_add_low_level_flags MY_TARGET)
@@ -155,11 +153,6 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
     set_property(TARGET ${MY_TARGET}
         PROPERTY POSITION_INDEPENDENT_CODE ON)
 endfunction()
-
-add_library(nqs_cbits_Common INTERFACE)
-if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-    target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
-endif()
 
 # {fmt} library
 if(NOT TARGET fmt::fmt)
@@ -219,30 +212,6 @@ if(NOT TARGET SG14)
         SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/SG14)
 endif()
 
-# Boost libraries (some header-only parts)
-# if(NOT TARGET Boost::boost)
-#     execute_process(COMMAND git submodule update --init -- external/boost
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-#     execute_process(COMMAND git submodule update --init -- libs/align
-#                                                            libs/assert
-#                                                            libs/config
-#                                                            libs/core
-#                                                            libs/detail
-#                                                            libs/static_assert
-#                                                            libs/utility 
-#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
-#     add_library(Boost INTERFACE)
-#     target_include_directories(Boost SYSTEM INTERFACE
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
-#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
-#     add_library(Boost::boost ALIAS Boost)
-# endif()
-
 # Pybind11
 if(TRUE)
     execute_process(COMMAND git submodule update --init -- external/pybind11
@@ -255,7 +224,10 @@ endif()
 # OpenMP
 find_package(OpenMP REQUIRED)
 
-
+add_library(nqs_cbits_Common INTERFACE)
+if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+    target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
+endif()
 target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE Torch
               fmt::fmt-header-only
@@ -284,24 +256,6 @@ endif()
 ###############################################################################
 # Library of CPU specific kernels
 ###############################################################################
-# add_library(nqs_cpu OBJECT
-#     cbits/cpu/unpack.hpp
-#     cbits/cpu/unpack.cpp)
-# nqs_cbits_add_low_level_flags(nqs_cpu)
-# target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
-# target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt)
-
-# Efficient AVX implementation
-# add_library(nqs_cpu_avx OBJECT
-#     cbits/cpu/unpack.hpp
-#     cbits/cpu/unpack_avx.cpp)
-# nqs_cbits_add_low_level_flags(nqs_cpu_avx)
-# target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
-# target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt)
-# target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
-# target_compile_options(nqs_cpu_avx PRIVATE
-#     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)
-
 foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
     add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
     nqs_cbits_add_low_level_flags(${my_target})
@@ -359,48 +313,23 @@ if(CMAKE_CUDA_COMPILER)
 endif()
 
 
+###############################################################################
+# Python bindings
+###############################################################################
 pybind11_add_module(_C MODULE NO_EXTRAS
     cbits/python/init.cpp
-    # cbits/python/bind_jacobian.cpp
-    # cbits/python/bind_heisenberg.cpp
-    # cbits/python/bind_metropolis.cpp
-    # cbits/python/bind_operator.cpp
-    # cbits/python/bind_polynomial.cpp
-    # cbits/python/bind_polynomial_state.cpp
-    # cbits/python/bind_spin_basis.cpp
-    # cbits/python/bind_symmetry.cpp
     cbits/python/bind_v2.cpp
 )
-# pybind11_add_module(_C_nqs MODULE SYSTEM NO_EXTRAS
-#     cbits/nqs.cpp
-#     # cbits/data.cpp
-#     cbits/errors.cpp
-#     cbits/metropolis.cpp
-#     cbits/heisenberg.cpp
-#     # cbits/monte_carlo_v2.cpp
-#     # cbits/nn.cpp
-#     # cbits/polynomial.cpp
-#     # cbits/polynomial_state.cpp
-#     cbits/random.cpp
-#     cbits/operators.cpp
-#     cbits/symmetry.cpp
-#     cbits/spin_basis.cpp
-#     cbits/pool.cpp
-#     cbits/python/bind_symmetry.cpp
-#     cbits/trim.cpp
-# )
 nqs_cbits_add_low_level_flags(_C)
 target_compile_definitions(_C PUBLIC
     TORCH_API_INCLUDE_EXTENSION_H=1
     TORCH_EXTENSION_NAME="_C")
-# We need to link against libtorch_python.so as well since _C is a Python
-# extension
-# find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
-# target_link_libraries(_C PUBLIC nqs nqs_cbits_Common ${TORCH_PYTHON_LIBRARY})
 target_link_libraries(_C PUBLIC nqs)
 
-# add_subdirectory(cbits/test/headers)
 
+###############################################################################
+# Installing
+###############################################################################
 set_property(TARGET _C
     PROPERTY INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/nqs_playground")
 set_property(TARGET _C PROPERTY INSTALL_RPATH_USE_LINK_PATH TRUE)
