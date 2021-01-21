@@ -220,28 +220,28 @@ if(NOT TARGET SG14)
 endif()
 
 # Boost libraries (some header-only parts)
-if(NOT TARGET Boost::boost)
-    execute_process(COMMAND git submodule update --init -- external/boost
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    execute_process(COMMAND git submodule update --init -- libs/align
-                                                           libs/assert
-                                                           libs/config
-                                                           libs/core
-                                                           libs/detail
-                                                           libs/static_assert
-                                                           libs/utility 
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
-    add_library(Boost INTERFACE)
-    target_include_directories(Boost SYSTEM INTERFACE
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
-    add_library(Boost::boost ALIAS Boost)
-endif()
+# if(NOT TARGET Boost::boost)
+#     execute_process(COMMAND git submodule update --init -- external/boost
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+#     execute_process(COMMAND git submodule update --init -- libs/align
+#                                                            libs/assert
+#                                                            libs/config
+#                                                            libs/core
+#                                                            libs/detail
+#                                                            libs/static_assert
+#                                                            libs/utility 
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/external/boost)
+#     add_library(Boost INTERFACE)
+#     target_include_directories(Boost SYSTEM INTERFACE
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/align/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/assert/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/config/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/core/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/detail/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/static_assert/include
+#         ${CMAKE_CURRENT_SOURCE_DIR}/external/boost/libs/utility/include)
+#     add_library(Boost::boost ALIAS Boost)
+# endif()
 
 # Pybind11
 if(TRUE)
@@ -260,7 +260,6 @@ target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE Torch
               fmt::fmt-header-only
               gsl::gsl-lite
-              Boost::boost
               SG14
               OpenMP::OpenMP_CXX
               PkgConfig::lattice_symmetries
@@ -278,7 +277,7 @@ if(CMAKE_CUDA_COMPILER)
         cbits/gpu/dotu.cu)
     nqs_cbits_add_low_level_flags(nqs_gpu)
     target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
-    target_link_libraries(nqs_gpu PUBLIC Boost::boost gsl::gsl-lite fmt::fmt-header-only Torch)
+    target_link_libraries(nqs_gpu PUBLIC gsl::gsl-lite fmt::fmt-header-only Torch)
 endif()
 
 
@@ -290,7 +289,7 @@ endif()
 #     cbits/cpu/unpack.cpp)
 # nqs_cbits_add_low_level_flags(nqs_cpu)
 # target_compile_options(nqs_cpu PRIVATE ${TCM_WARNING_FLAGS})
-# target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt Boost::boost)
+# target_link_libraries(nqs_cpu PUBLIC torch fmt::fmt)
 
 # Efficient AVX implementation
 # add_library(nqs_cpu_avx OBJECT
@@ -298,7 +297,7 @@ endif()
 #     cbits/cpu/unpack_avx.cpp)
 # nqs_cbits_add_low_level_flags(nqs_cpu_avx)
 # target_compile_options(nqs_cpu_avx PRIVATE ${TCM_WARNING_FLAGS})
-# target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt Boost::boost)
+# target_link_libraries(nqs_cpu_avx PUBLIC torch fmt::fmt)
 # target_link_libraries(nqs_cpu_avx PRIVATE vectorclass)
 # target_compile_options(nqs_cpu_avx PRIVATE
 #     -mmmx -msse -msse2 -msse3 -msse4.1 -msse4.2 -mavx -mtune=haswell)

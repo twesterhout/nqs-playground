@@ -197,7 +197,7 @@ class xoshiro256starstar {
 
 using RandomGenerator = xoshiro256starstar;
 
-TCM_IMPORT auto global_random_generator() -> RandomGenerator&;
+auto global_random_generator() -> RandomGenerator&;
 
 constexpr auto random_bounded(uint32_t const range, RandomGenerator& g) noexcept -> uint32_t
 {

@@ -30,7 +30,7 @@
 
 #include "bits512.hpp"
 // #include "errors.hpp"
-#include <boost/align/aligned_allocator.hpp>
+// #include <boost/align/aligned_allocator.hpp>
 // #include <boost/align/is_aligned.hpp>
 #include <gsl/gsl-lite.hpp>
 #include <SG14/inplace_function.h>
@@ -146,21 +146,18 @@ auto compress(ForwardIterator first, ForwardIterator last, EqualFn equal,
 //------------------------------- [compress] ------------------------------- }}}
 #endif
 
-template <class T>
-using aligned_vector =
-    std::vector<T, boost::alignment::aligned_allocator<T, std::max<size_t>(
-                                                              64, alignof(T))>>;
+// template <class T>
+// using aligned_vector =
+//     std::vector<T, boost::alignment::aligned_allocator<T, std::max<size_t>(64, alignof(T))>>;
 
 // using RawForwardT =
 //     stdext::inplace_function<auto(torch::Tensor const&)->torch::Tensor,
 //                              /*capacity=*/32, /*alignment=*/8>;
 // static_assert(sizeof(RawForwardT) == 40, TCM_STATIC_ASSERT_BUG_MESSAGE);
 
-using OperatorT =
-    stdext::inplace_function<auto(bits512 const&, complex_type coeff,
-                                  gsl::span<bits512>, gsl::span<complex_type>)
-                                 ->uint64_t,
-                             /*capacity=*/32, /*alignment=*/8>;
+using OperatorT = stdext::inplace_function<
+    auto(bits512 const&, complex_type coeff, gsl::span<bits512>, gsl::span<complex_type>)->uint64_t,
+    /*capacity=*/32, /*alignment=*/8>;
 
 namespace v2 {
 using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,
@@ -169,8 +166,7 @@ using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,
 
 template <class T, class = void> struct is_complex : std::false_type {};
 template <class T>
-struct is_complex<std::complex<T>,
-                  std::enable_if_t<std::is_floating_point<T>::value>>
+struct is_complex<std::complex<T>, std::enable_if_t<std::is_floating_point<T>::value>>
     : std::true_type {};
 
 template <class T> inline constexpr bool is_complex_v = is_complex<T>::value;

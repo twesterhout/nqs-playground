@@ -48,18 +48,15 @@ class ThreadPool {
   public:
     ThreadPool();
 
-    template <class F>
-    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
+    template <class F> auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
     {
         using return_type = typename std::result_of<F()>::type;
-        auto task         = std::make_shared<std::packaged_task<return_type()>>(
-            std::forward<F>(f));
+        auto task         = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
         std::future<return_type> res = task->get_future();
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
             // don't allow enqueueing after stopping the pool
-            TCM_CHECK(!stop, std::runtime_error,
-                      "enqueue on stopped ThreadPool");
+            TCM_CHECK(!stop, std::runtime_error, "enqueue on stopped ThreadPool");
             tasks.emplace([p = std::move(task)]() { (*p)(); });
         }
         condition.notify_one();
@@ -84,18 +81,15 @@ class _ThreadPoolBase {
   public:
     _ThreadPoolBase();
 
-    template <class F>
-    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
+    template <class F> auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>
     {
         using return_type = typename std::result_of<F()>::type;
-        auto task         = std::make_shared<std::packaged_task<return_type()>>(
-            std::forward<F>(f));
+        auto task         = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
         std::future<return_type> res = task->get_future();
         {
             std::unique_lock<std::mutex> lock(_queue_mutex);
             // don't allow enqueueing after stopping the pool
-            TCM_CHECK(!_stop, std::runtime_error,
-                      "enqueue on stopped ThreadPool");
+            TCM_CHECK(!_stop, std::runtime_error, "enqueue on stopped ThreadPool");
             _tasks.emplace([p = std::move(task)]() { (*p)(); });
         }
         _condition.notify_one();
@@ -113,17 +107,15 @@ class _ThreadPoolBase {
 };
 } // namespace detail
 
-template <class Function>
-auto run_with_control_inversion(Function function) -> void
+template <class Function> auto run_with_control_inversion(Function function) -> void
 {
     detail::_ThreadPoolBase pool;
     std::exception_ptr      e_ptr = nullptr;
 
     auto body = [&pool, &e_ptr, function = std::move(function)]() {
         try {
-            function([&pool](auto&& task) {
-                return pool.enqueue(std::forward<decltype(task)>(task));
-            });
+            function(
+                [&pool](auto&& task) { return pool.enqueue(std::forward<decltype(task)>(task)); });
         }
         catch (...) {
             e_ptr = std::current_exception();
@@ -139,7 +131,7 @@ auto run_with_control_inversion(Function function) -> void
 }
 
 namespace detail {
-TCM_IMPORT auto global_thread_pool() noexcept -> ThreadPool&;
+auto global_thread_pool() noexcept -> ThreadPool&;
 } // namespace detail
 #endif
 
@@ -164,18 +156,14 @@ struct omp_task_handler {
   public:
     template <class F> auto submit(F f) -> void
     {
-        static_assert(std::is_nothrow_copy_constructible<F>::value,
-                      TCM_STATIC_ASSERT_BUG_MESSAGE);
-#pragma omp task default(none) firstprivate(f)                                 \
-    shared(_error_flag, _exception_ptr)
+        static_assert(std::is_nothrow_copy_constructible<F>::value, TCM_STATIC_ASSERT_BUG_MESSAGE);
+#pragma omp task default(none) firstprivate(f) shared(_error_flag, _exception_ptr)
         {
             try {
                 f();
             }
             catch (...) {
-                if (!_error_flag.test_and_set()) {
-                    _exception_ptr = std::current_exception();
-                }
+                if (!_error_flag.test_and_set()) { _exception_ptr = std::current_exception(); }
             }
         }
     }
@@ -187,23 +175,19 @@ struct omp_task_handler {
 };
 
 template <class Function, class Int>
-auto omp_parallel_for(Function func, Int first, Int last, Int chunk_size)
-    -> void
+auto omp_parallel_for(Function func, Int first, Int last, Int chunk_size) -> void
 {
     std::atomic_flag   error_flag    = ATOMIC_FLAG_INIT;
     std::exception_ptr exception_ptr = nullptr;
 
-#pragma omp parallel for schedule(dynamic, chunk_size) default(none)           \
-    firstprivate(first, last, chunk_size)                                      \
-        shared(func, error_flag, exception_ptr)
+#pragma omp parallel for schedule(dynamic, chunk_size) default(none)                               \
+    firstprivate(first, last, chunk_size) shared(func, error_flag, exception_ptr)
     for (auto i = first; i < last; ++i) {
         try {
             func(i);
         }
         catch (...) {
-            if (!error_flag.test_and_set()) {
-                exception_ptr = std::current_exception();
-            }
+            if (!error_flag.test_and_set()) { exception_ptr = std::current_exception(); }
         }
     }
 

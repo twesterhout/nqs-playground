@@ -28,8 +28,8 @@
 
 #pragma once
 
-#include <boost/config.hpp>
-#include <boost/current_function.hpp>
+// #include <boost/config.hpp>
+// #include <boost/current_function.hpp>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -38,17 +38,54 @@
 #    define TCM_DEBUG 1
 #endif
 
-#define TCM_FORCEINLINE BOOST_FORCEINLINE
-#define TCM_NOINLINE BOOST_NOINLINE
-#define TCM_LIKELY(x) BOOST_LIKELY(x)
-#define TCM_UNLIKELY(x) BOOST_UNLIKELY(x)
-#define TCM_NORETURN BOOST_NORETURN
-#define TCM_UNUSED BOOST_ATTRIBUTE_UNUSED
-#define TCM_FALLTHROUGH BOOST_FALLTHROUGH
-#define TCM_CURRENT_FUNCTION BOOST_CURRENT_FUNCTION
-#define TCM_EXPORT BOOST_SYMBOL_EXPORT
-#define TCM_IMPORT BOOST_SYMBOL_IMPORT
+#if !defined(TCM_FORCEINLINE)
+#    if defined(_MSC_VER)
+#        define TCM_FORCEINLINE __forceinline
+#    elif defined(__GNUC__) && __GNUC__ > 3 // Clang also defines __GNUC__ (as 4)
+#        define TCM_FORCEINLINE inline __attribute__((__always_inline__))
+#    else
+#        define TCM_FORCEINLINE inline
+#    endif
+#endif
+
+#if !defined(TCM_NOINLINE)
+#    if defined(_MSC_VER)
+#        define TCM_NOINLINE __declspec(noinline)
+#    elif defined(__GNUC__) && __GNUC__ > 3 // Clang also defines __GNUC__ (as 4)
+#        if defined(__CUDACC__)             // nvcc doesn't always parse __noinline__,
+#            define TCM_NOINLINE __attribute__((noinline))
+#        else
+#            define TCM_NOINLINE __attribute__((__noinline__))
+#        endif
+#    else
+#        define TCM_NOINLINE
+#    endif
+#endif
+
+#if !defined(TCM_NORETURN)
+#    if defined(_MSC_VER)
+#        define TCM_NORETURN __declspec(noreturn)
+#    elif defined(__GNUC__)
+#        define TCM_NORETURN __attribute__((__noreturn__))
+#    elif defined(__has_cpp_attribute)
+#        if __has_cpp_attribute(noreturn)
+#            define TCM_NORETURN [[noreturn]]
+#        endif
+#    else
+#        define TCM_NORETURN
+#    endif
+#endif
+
+#define TCM_UNREACHABLE __builtin_unreachable()
+#define TCM_LIKELY(x) __builtin_expect(x, 1)
+#define TCM_UNLIKELY(x) __builtin_expect(x, 0)
+#define TCM_EXPORT __attribute__((visibility("default")))
+#define TCM_FALLTHROUGH __attribute__((fallthrough))
 #define TCM_RESTRICT __restrict__
+#define TCM_CURRENT_FUNCTION __PRETTY_FUNCTION__
+
+// #define TCM_NORETURN BOOST_NORETURN
+// #define TCM_UNUSED BOOST_ATTRIBUTE_UNUSED
 
 #if defined(__AVX2__)
 #    define TCM_HAS_AVX2() 1
@@ -63,21 +100,21 @@
 #    error "unsupported architecture; nqs_playground currently only works on x86_64"
 #endif
 
-#if defined(BOOST_GCC)
-#    define TCM_GCC BOOST_GCC
-#endif
-#if defined(BOOST_CLANG)
-#    define TCM_CLANG BOOST_CLANG
-#endif
-#if defined(__CUDACC__)
-#    define TCM_NVCC
-#endif
+// #if defined(BOOST_GCC)
+// #    define TCM_GCC BOOST_GCC
+// #endif
+// #if defined(BOOST_CLANG)
+// #    define TCM_CLANG BOOST_CLANG
+// #endif
+// #if defined(__CUDACC__)
+// #    define TCM_NVCC
+// #endif
 
-#if defined(TCM_GCC) || defined(TCM_CLANG)
-#    define TCM_HOT __attribute__((hot))
-#else
-#    define TCM_HOT
-#endif
+// #if defined(TCM_GCC) || defined(TCM_CLANG)
+// #    define TCM_HOT __attribute__((hot))
+// #else
+// #    define TCM_HOT
+// #endif
 
 #define TCM_NAMESPACE tcm
 #define TCM_NAMESPACE_BEGIN namespace tcm {
@@ -88,19 +125,9 @@
     "##            Please, be so kind to submit it here                 ##\n"                      \
     "##     https://github.com/twesterhout/nqs-playground/issues        ##\n"                      \
     "#####################################################################"
-
-#if defined(TCM_CLANG)
-// Clang refuses to display newlines
-#    define TCM_STATIC_ASSERT_BUG_MESSAGE                                                          \
-        "Congratulations, you have found a bug in nqs-playground! Please, be "                     \
-        "so kind to submit it to "                                                                 \
-        "https://github.com/twesterhout/nqs-playground/issues."
-#else
-#    define TCM_STATIC_ASSERT_BUG_MESSAGE "\n" TCM_BUG_MESSAGE
-#endif
-
-#define TCM_NOEXCEPT noexcept
-#define TCM_CONSTEXPR constexpr
+#define TCM_STATIC_ASSERT_BUG_MESSAGE                                                              \
+    "Congratulations, you have found a bug in nqs-playground! Please, be "                         \
+    "so kind to submit it to https://github.com/twesterhout/nqs-playground/issues."
 
 #if defined(TCM_DEBUG)
 #    define TCM_ASSERT(cond, msg)                                                                  \
@@ -129,17 +156,5 @@ using std::uint16_t;
 using std::uint64_t;
 using real_type    = double;
 using complex_type = std::complex<real_type>;
-
-#if 0
-struct SplitTag {};
-struct SerialTag {};
-struct ParallelTag {};
-struct UnsafeTag {};
-
-constexpr UnsafeTag split_tag;
-constexpr UnsafeTag serial_tag;
-constexpr UnsafeTag parallel_tag;
-constexpr UnsafeTag unsafe_tag;
-#endif
 
 TCM_NAMESPACE_END
