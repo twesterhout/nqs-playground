@@ -597,7 +597,9 @@ def _auto_window(taus, c):
     return len(taus) - 1
 
 
-def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
+def integrated_autocorr_time(
+    x: np.ndarray, c: float = 5.0, with_autocorr_fn: bool = False
+) -> np.ndarray:
     if isinstance(x, torch.Tensor):
         # NOTE: We do the computation on the CPU because it's not performance
         # critical and x might be complex which PyTorch doesn't support yet
@@ -608,6 +610,8 @@ def integrated_autocorr_time(x: np.ndarray, c: float = 5.0) -> np.ndarray:
     f /= x.shape[1]
     taus = 2.0 * np.cumsum(f) - 1.0
     window = _auto_window(taus, c)
+    if with_autocorr_fn:
+        return taus[window], f
     return taus[window]
 
 
