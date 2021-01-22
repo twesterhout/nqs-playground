@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2020-2021, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -26,19 +26,41 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include "bits512.hpp"
 
-#include "../common/tensor_info.hpp"
-#include <lattice_symmetries/lattice_symmetries.h>
-#include <torch/types.h>
+TCM_EXPORT auto operator==(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    for (auto i = 0; i < static_cast<int>(std::size(x.words)); ++i) {
+        if (x.words[i] != y.words[i]) { return false; }
+    }
+    return true;
+}
 
-TCM_NAMESPACE_BEGIN
+TCM_EXPORT auto operator!=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x == y);
+}
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
+TCM_EXPORT auto operator<(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    for (auto i = 0; i < static_cast<int>(std::size(x.words)); ++i) {
+        if (x.words[i] < y.words[i]) { return true; }
+        if (x.words[i] > y.words[i]) { return false; }
+    }
+    return false;
+}
 
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+TCM_EXPORT auto operator>(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return y < x;
+}
 
-TCM_NAMESPACE_END
+TCM_EXPORT auto operator<=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x > y);
+}
+
+TCM_EXPORT auto operator>=(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
+{
+    return !(x < y);
+}

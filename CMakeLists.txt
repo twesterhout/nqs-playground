@@ -19,19 +19,19 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 # Determine if we have nvcc
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-    if(NOT DEFINED CMAKE_CUDA_STANDARD)
-        set(CMAKE_CUDA_STANDARD 11)
-        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    endif()
-else()
-    message(WARNING "[nqs_cbits] Compiling without CUDA support")
-endif()
+# include(CheckLanguage)
+# check_language(CUDA)
+# if(CMAKE_CUDA_COMPILER)
+#     enable_language(CUDA)
+#     if(NOT DEFINED CMAKE_CUDA_STANDARD)
+#         set(CMAKE_CUDA_STANDARD 11)
+#         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+#     endif()
+# else()
+#     message(WARNING "[nqs_cbits] Compiling without CUDA support")
+# endif()
 
-include(CTest)
+# include(CTest)
 include(CheckCXXCompilerFlag)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
@@ -48,6 +48,10 @@ elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
         -Wsign-conversion -Wsign-promo -Wstrict-null-sentinel
         -Wstrict-overflow=5 -Wswitch-default -Wundef -Wno-unused)
 endif()
+
+###############################################################################
+# Dependencies
+###############################################################################
 
 # Torch
 if(TRUE)
@@ -224,6 +228,7 @@ endif()
 # OpenMP
 find_package(OpenMP REQUIRED)
 
+
 add_library(nqs_cbits_Common INTERFACE)
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
@@ -233,98 +238,33 @@ target_link_libraries(nqs_cbits_Common INTERFACE
               fmt::fmt-header-only
               gsl::gsl-lite
               SG14
-              OpenMP::OpenMP_CXX
               PkgConfig::lattice_symmetries
+              OpenMP::OpenMP_CXX
 )
 
 
 ###############################################################################
 # Library of CUDA specific kernels
 ###############################################################################
-if(CMAKE_CUDA_COMPILER)
-    add_library(nqs_gpu OBJECT
-        cbits/gpu/unpack.hpp
-        cbits/gpu/unpack.cu
-        cbits/gpu/dotu.hpp
-        cbits/gpu/dotu.cu)
-    nqs_cbits_add_low_level_flags(nqs_gpu)
-    target_compile_options(nqs_gpu PRIVATE --compiler-options "-W -Wall -Wextra")
-    target_link_libraries(nqs_gpu PUBLIC gsl::gsl-lite fmt::fmt-header-only Torch)
-endif()
+add_subdirectory(cbits/gpu)
 
 
 ###############################################################################
 # Library of CPU specific kernels
 ###############################################################################
-foreach(my_target nqs_cpu_kernels_sse2 nqs_cpu_kernels_avx nqs_cpu_kernels_avx2)
-    add_library(${my_target} OBJECT cbits/cpu/kernels.hpp cbits/cpu/kernels.cpp)
-    nqs_cbits_add_low_level_flags(${my_target})
-    target_compile_options(${my_target} PRIVATE ${TCM_WARNING_FLAGS})
-    target_link_libraries(${my_target} PUBLIC nqs_cbits_Common)
-    target_link_libraries(${my_target} PRIVATE vectorclass)
-endforeach()
-target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
-target_compile_definitions(nqs_cpu_kernels_sse2 PRIVATE TCM_ADD_DISPATCH_CODE)
-target_compile_options(nqs_cpu_kernels_avx PRIVATE -m64 -mavx)
-target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
+add_subdirectory(cbits/cpu)
 
 
 ###############################################################################
-# General Python independent code
+# General Python-independent code
 ###############################################################################
-add_library(nqs SHARED
-    cbits/bits512.cpp
-    cbits/errors.cpp
-    cbits/metropolis.cpp
-    # cbits/tabu.cpp
-    # cbits/jacobian.cpp
-    # cbits/heisenberg.cpp
-    # cbits/forward_propagator.cpp
-    # cbits/simple_polynomial.cpp
-    # cbits/polynomial.cpp
-    # cbits/polynomial_state.cpp
-    # cbits/simple_accumulator.cpp
-    cbits/wrappers.cpp
-    cbits/v2/accumulator.cpp
-    cbits/v2/zanella.cpp
-    cbits/random.cpp
-    cbits/unpack.cpp
-    # cbits/dotu.cpp
-    # cbits/operator.cpp
-    # cbits/symmetry.cpp
-    # cbits/spin_basis.cpp
-    cbits/parallel.cpp
-    # cbits/pool.cpp
-    cbits/tensor_info.cpp
-    cbits/trim.cpp
-)
-nqs_cbits_add_low_level_flags(nqs)
-target_compile_definitions(nqs PUBLIC
-    TORCH_API_INCLUDE_EXTENSION_H=1
-    TORCH_EXTENSION_NAME="_C")
-target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
-target_link_libraries(nqs PUBLIC nqs_cbits_Common
-                                 nqs_cpu_kernels_avx2
-                                 nqs_cpu_kernels_avx
-                                 nqs_cpu_kernels_sse2)
-if(CMAKE_CUDA_COMPILER)
-    target_compile_definitions(nqs PUBLIC TCM_USE_CUDA)
-    target_link_libraries(nqs PUBLIC nqs_gpu)
-endif()
+add_subdirectory(cbits/common)
 
 
 ###############################################################################
 # Python bindings
 ###############################################################################
-pybind11_add_module(_C MODULE NO_EXTRAS
-    cbits/python/init.cpp
-    cbits/python/bind_v2.cpp
-)
-nqs_cbits_add_low_level_flags(_C)
-target_compile_definitions(_C PUBLIC
-    TORCH_API_INCLUDE_EXTENSION_H=1
-    TORCH_EXTENSION_NAME="_C")
-target_link_libraries(_C PUBLIC nqs)
+add_subdirectory(cbits/python)
 
 
 ###############################################################################

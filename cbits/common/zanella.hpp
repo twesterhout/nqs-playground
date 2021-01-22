@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2020-2021, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,40 @@
 
 #pragma once
 
-#include "../common/tensor_info.hpp"
+#include "tensor_info.hpp"
+#include <gsl/gsl-lite.hpp>
 #include <lattice_symmetries/lattice_symmetries.h>
 #include <torch/types.h>
 
 TCM_NAMESPACE_BEGIN
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
+class ZanellaGenerator {
+  private:
+    gsl::not_null<ls_spin_basis const*> _basis;
 
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+  public:
+    ZanellaGenerator(ls_spin_basis const& basis);
+    ~ZanellaGenerator();
+
+    auto operator()(torch::Tensor x) const -> std::tuple<torch::Tensor, torch::Tensor>;
+
+    auto max_states() const noexcept -> uint64_t
+    {
+        auto const number_spins   = ls_get_number_spins(_basis);
+        auto const hamming_weight = ls_get_hamming_weight(_basis);
+        if (hamming_weight != -1) {
+            auto const m = static_cast<unsigned>(hamming_weight);
+            return m * (number_spins - m);
+        }
+        // By construction, number_spins > 1
+        return number_spins * (number_spins - 1);
+    }
+
+  private:
+    auto generate(ls_bits512 const& spin, TensorInfo<ls_bits512, 1> out) const -> unsigned;
+};
+
+auto zanella_choose_samples(torch::Tensor weights, int64_t number_samples, double time_step,
+                            c10::Device device) -> torch::Tensor;
 
 TCM_NAMESPACE_END

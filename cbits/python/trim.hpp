@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2019, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,18 @@
 
 #pragma once
 
-#include "../common/tensor_info.hpp"
-#include <lattice_symmetries/lattice_symmetries.h>
-#include <torch/types.h>
+#include "../common/config.hpp"
+#include <string>
+#include <string_view>
+#include <vector>
 
 TCM_NAMESPACE_BEGIN
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
-
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+/// Removes excessive indents from the doc string \p raw.
+///
+/// pybind11 needs `char const*` for doc strings, so we keep a vector of strings
+/// which need to remain alive before pybind11 converts them to Python strings
+/// (copying the data).
+auto trim(std::vector<std::string>& keep_alive, std::string_view raw) -> char const*;
 
 TCM_NAMESPACE_END

@@ -1,0 +1,7 @@
+# Python bindings
+pybind11_add_module(_C MODULE NO_EXTRAS init.cpp)
+nqs_cbits_add_low_level_flags(_C)
+target_compile_definitions(_C PUBLIC
+    TORCH_API_INCLUDE_EXTENSION_H=1
+    TORCH_EXTENSION_NAME="_C")
+target_link_libraries(_C PUBLIC nqs)

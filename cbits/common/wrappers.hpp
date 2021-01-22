@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2020-2021, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,16 @@
 
 #pragma once
 
-#include "../common/tensor_info.hpp"
+#include "accumulator.hpp"
+#include "random.hpp"
 #include <lattice_symmetries/lattice_symmetries.h>
-#include <torch/types.h>
 
 TCM_NAMESPACE_BEGIN
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
+auto check_status_code(ls_error_code code) -> void;
+auto view_as_operator(ls_operator const& op) -> std::tuple<OperatorT, uint64_t>;
 
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+auto random_spin(ls_spin_basis const& basis, RandomGenerator& generator = global_random_generator())
+    -> ls_bits512;
 
 TCM_NAMESPACE_END

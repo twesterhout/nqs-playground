@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2019-2020, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,36 @@
 
 #pragma once
 
-#include "../common/tensor_info.hpp"
-#include <lattice_symmetries/lattice_symmetries.h>
-#include <torch/types.h>
+#include "accumulator.hpp"
+#include <gsl/gsl-lite.hpp>
+#include <cmath>
+#include <vector>
 
 TCM_NAMESPACE_BEGIN
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
+class Polynomial {
+  private:
+    QuantumOperator                   _op;
+    std::vector<std::complex<double>> _roots;
+    uint64_t                          _max_states;
+    bool                              _normalising;
 
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+  public:
+    Polynomial(QuantumOperator op, std::vector<complex_type> roots, bool normalising);
+    Polynomial(Polynomial const&)           = delete;
+    Polynomial(Polynomial&& other) noexcept = default;
+    Polynomial& operator=(Polynomial const&) = delete;
+    Polynomial& operator=(Polynomial&&) = delete;
+
+    auto degree() const noexcept -> uint64_t;
+    auto roots() const noexcept -> gsl::span<std::complex<double> const>;
+
+    auto operator()(ls_bits512 const& spin, complex_type coeff, gsl::span<ls_bits512> out_spins,
+                    gsl::span<complex_type> out_coeffs) const -> uint64_t;
+
+  private:
+    struct Buffer;
+    auto iteration(complex_type root, Buffer& buffer) const -> void;
+};
 
 TCM_NAMESPACE_END

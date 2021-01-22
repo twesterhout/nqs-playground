@@ -1,6 +1,6 @@
 #include "kernels.hpp"
-#include "../config.hpp"
-#include "../errors.hpp"
+#include "../common/config.hpp"
+#include "../common/errors.hpp"
 
 #include <torch/types.h>
 #include <vectorclass/version2/vectorclass.h>
@@ -19,15 +19,6 @@
 // #    define zanella_jump_rates_simd zanella_jump_rates_sse2
 #    define jump_rates_one_simd jump_rates_one_sse2
 #    define unpack_one_simd unpack_one_sse2
-#endif
-
-#if defined(TCM_ADD_DISPATCH_CODE)
-#    include <ATen/Config.h>
-#    include <caffe2/utils/cpuid.h>
-
-#    define MKL_INT int
-extern "C" void cblas_cdotu_sub(const MKL_INT n, const void* x, const MKL_INT incx, const void* y,
-                                const MKL_INT incy, void* dotu);
 #endif
 
 TCM_NAMESPACE_BEGIN
@@ -232,28 +223,6 @@ tabu_jump_rates(gsl::span<double const> proposed_log_prob,
 #    endif
 #endif
 
-#if defined(INCLUDE_DISPATCH_CODE)
-#    if !AT_MKL_ENABLED()
-
-TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
-                         TensorInfo<std::complex<float> const> const& y) -> std::complex<double>
-{
-    TCM_ERROR(std::runtime_error, "PyTorch is compiled without MKL support");
-}
-
-#    else // AT_MKL_ENABLED
-
-TCM_EXPORT auto dotu_cpu(TensorInfo<std::complex<float> const> const& x,
-                         TensorInfo<std::complex<float> const> const& y) -> std::complex<double>
-{
-    std::complex<float> result;
-    cblas_cdotu_sub(x.size(), x.data, x.stride(), y.data, y.stride(), &result);
-    return static_cast<std::complex<double>>(result);
-}
-
-#    endif // AT_MKL_ENABLED
-#endif     // INCLUDE_DISPATCH_CODE
-
 namespace {
 auto unpack_byte(uint8_t const bits) noexcept -> vcl::Vec8f
 {
@@ -316,144 +285,6 @@ TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
                       dst_info.data + i * dst_info.stride<0>());
     }
 }
-#endif
-
-#if 0
-namespace {
-/// Performs one step of the Butterfly network. It exchanges bits with distance
-/// \p d between them if the corresponding bits in the mask \p m are set.
-TCM_FORCEINLINE auto bit_permute_step(__m128i& x0, __m128i& x1, __m128i& x2,
-                                      __m128i& x3, __m128i m0, __m128i m1,
-                                      __m128i m2, __m128i m3,
-                                      __m128i d) noexcept -> void
-{
-    __m128i y0, y1, y2, y3;
-    y0 = _mm_srl_epi64(x0, d);
-    y1 = _mm_srl_epi64(x1, d);
-    y2 = _mm_srl_epi64(x2, d);
-    y3 = _mm_srl_epi64(x3, d);
-    y0 = _mm_xor_si128(x0, y0);
-    y1 = _mm_xor_si128(x1, y1);
-    y2 = _mm_xor_si128(x2, y2);
-    y3 = _mm_xor_si128(x3, y3);
-    y0 = _mm_and_si128(y0, m0);
-    y1 = _mm_and_si128(y1, m1);
-    y2 = _mm_and_si128(y2, m2);
-    y3 = _mm_and_si128(y3, m3);
-    x0 = _mm_xor_si128(x0, y0);
-    x1 = _mm_xor_si128(x1, y1);
-    x2 = _mm_xor_si128(x2, y2);
-    x3 = _mm_xor_si128(x3, y3);
-    y0 = _mm_sll_epi64(y0, d);
-    y1 = _mm_sll_epi64(y1, d);
-    y2 = _mm_sll_epi64(y2, d);
-    y3 = _mm_sll_epi64(y3, d);
-    x0 = _mm_xor_si128(x0, y0);
-    x1 = _mm_xor_si128(x1, y1);
-    x2 = _mm_xor_si128(x2, y2);
-    x3 = _mm_xor_si128(x3, y3);
-}
-} // namespace
-
-TCM_EXPORT auto bfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
-    -> void
-{
-    __m128i x0, x1, x2, x3;
-    __m128i m0, m1, m2, m3;
-    x0 = _mm_load_si128(reinterpret_cast<__m128i const*>(x));
-    x1 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 1);
-    x2 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 2);
-    x3 = _mm_load_si128(reinterpret_cast<__m128i const*>(x) + 3);
-    for (auto i = 0; i < 6; ++i) {
-        m0 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]));
-        m1 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
-        m2 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
-        m3 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
-        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
-                         _mm_cvtsi32_si128(1 << i));
-    }
-    _mm_store_si128(reinterpret_cast<__m128i*>(x), x0);
-    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
-    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
-    _mm_store_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
-}
-
-TCM_EXPORT auto bfly_simd(uint64_t const x, uint64_t out[8],
-                          uint64_t const (*masks)[8]) noexcept -> void
-{
-    __m128i x0, x1, x2, x3;
-    __m128i m0, m1, m2, m3;
-    x0 = _mm_set1_epi64x(static_cast<int64_t>(x));
-    x1 = x0;
-    x2 = x0;
-    x3 = x0;
-    for (auto i = 0; i < 6; ++i) {
-        m0 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]));
-        m1 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
-        m2 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
-        m3 = _mm_load_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
-        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
-                         _mm_cvtsi32_si128(1 << i));
-    }
-    _mm_store_si128(reinterpret_cast<__m128i*>(out), x0);
-    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 1, x1);
-    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 2, x2);
-    _mm_store_si128(reinterpret_cast<__m128i*>(out) + 3, x3);
-}
-
-TCM_EXPORT auto ibfly_simd(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
-    -> void
-{
-    __m128i x0, x1, x2, x3;
-    __m128i m0, m1, m2, m3;
-    x0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x));
-    x1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 1);
-    x2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 2);
-    x3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(x) + 3);
-    for (auto i = 6; i-- > 0;) {
-        m0 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]));
-        m1 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 1);
-        m2 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 2);
-        m3 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(masks[i]) + 3);
-        bit_permute_step(x0, x1, x2, x3, m0, m1, m2, m3,
-                         _mm_cvtsi32_si128(1 << i));
-    }
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x), x0);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 1, x1);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 2, x2);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(x) + 3, x3);
-}
-
-#    if defined(INCLUDE_DISPATCH_CODE)
-TCM_EXPORT auto bfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept -> void
-{
-    auto& cpuid = caffe2::GetCpuId();
-    if (cpuid.avx()) { bfly_avx(x, masks); }
-    else {
-        bfly_sse2(x, masks);
-    }
-}
-
-TCM_EXPORT auto bfly(uint64_t const x, uint64_t out[8],
-                     uint64_t const (*masks)[8]) noexcept -> void
-{
-    auto& cpuid = caffe2::GetCpuId();
-    if (cpuid.avx()) { bfly_avx(x, out, masks); }
-    else {
-        bfly_sse2(x, out, masks);
-    }
-}
-
-TCM_EXPORT auto ibfly(uint64_t x[8], uint64_t const (*masks)[8]) noexcept
-    -> void
-{
-    auto& cpuid = caffe2::GetCpuId();
-    if (cpuid.avx()) { ibfly_avx(x, masks); }
-    else {
-        ibfly_sse2(x, masks);
-    }
-}
-#    endif
 #endif
 
 TCM_NAMESPACE_END

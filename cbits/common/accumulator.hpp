@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, Tom Westerhout
+// Copyright (c) 2020, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,29 @@
 
 #pragma once
 
-#include "../common/tensor_info.hpp"
+#include "config.hpp"
+#include <gsl/gsl-lite.hpp>
+#include <SG14/inplace_function.h>
 #include <lattice_symmetries/lattice_symmetries.h>
 #include <torch/types.h>
 
 TCM_NAMESPACE_BEGIN
 
-auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
-    -> void;
+using OperatorT =
+    stdext::inplace_function<auto(ls_bits512 const&, std::complex<double> coeff,
+                                  gsl::span<ls_bits512>, gsl::span<std::complex<double>>)
+                                 ->uint64_t,
+                             /*capacity=*/32, /*alignment=*/8>;
 
-auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+using ForwardT = stdext::inplace_function<auto(torch::Tensor)->torch::Tensor,
+                                          /*capacity=*/32, /*alignment=*/8>;
+
+struct QuantumOperator {
+    OperatorT function;
+    uint64_t  max_states;
+};
+
+auto apply(torch::Tensor spins, OperatorT op, ForwardT psi, uint64_t max_required_size,
+           uint32_t batch_size) -> torch::Tensor;
 
 TCM_NAMESPACE_END
