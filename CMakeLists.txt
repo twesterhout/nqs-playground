@@ -7,6 +7,7 @@ endif()
 string(TOUPPER "${CMAKE_BUILD_TYPE}" TCM_BUILD_TYPE)
 
 cmake_policy(SET CMP0048 NEW)
+cmake_policy(SET CMP0104 NEW)
 project(nqs_cbits
     DESCRIPTION "_C Python extension for nqs_playground"
     LANGUAGES C CXX)

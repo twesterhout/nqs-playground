@@ -22,7 +22,7 @@ auto unpack_impl(TensorInfo<uint64_t const, 2> const& spins, int64_t const numbe
     switch (device.type()) {
     case c10::DeviceType::CPU: unpack_cpu(spins, out_info); break;
 #if defined(TCM_USE_CUDA)
-    case c10::DeviceType::CUDA: gpu::unpack_cuda(spins, out_info, device); break;
+    case c10::DeviceType::CUDA: unpack_cuda(spins, out_info, device); break;
 #endif
     default: {
 #if defined(TCM_USE_CUDA)

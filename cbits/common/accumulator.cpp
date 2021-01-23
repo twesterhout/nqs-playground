@@ -36,7 +36,6 @@
 #include <queue>
 
 TCM_NAMESPACE_BEGIN
-namespace v2 {
 
 struct Task {
     ForwardT              forward;
@@ -50,17 +49,17 @@ struct Task {
 };
 
 namespace {
-    auto extract_scalar(char const* name, torch::Tensor const& x) -> double
-    {
-        switch (x.scalar_type()) {
-        case torch::kFloat32: return static_cast<double>(x.item<float>());
-        case torch::kFloat64: return x.item<double>();
-        default:
-            TCM_ERROR(std::runtime_error,
-                      fmt::format("{} has wrong type: {}; expected either Float or Double", name,
-                                  x.scalar_type()));
-        }
+auto extract_scalar(char const* name, torch::Tensor const& x) -> double
+{
+    switch (x.scalar_type()) {
+    case torch::kFloat32: return static_cast<double>(x.item<float>());
+    case torch::kFloat64: return x.item<double>();
+    default:
+        TCM_ERROR(std::runtime_error,
+                  fmt::format("{} has wrong type: {}; expected either Float or Double", name,
+                              x.scalar_type()));
     }
+}
 } // namespace
 
 TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
@@ -154,36 +153,36 @@ auto Buffer::make_coeffs() const -> torch::Tensor
 }
 
 namespace {
-    auto split_counts(std::vector<uint64_t> counts, uint64_t const batch_size)
-        -> std::tuple<std::vector<std::pair<std::vector<uint64_t>, bool>>,
-                      std::optional<std::pair<std::vector<uint64_t>, bool>>>
-    {
-        std::vector<std::pair<std::vector<uint64_t>, bool>> chunks;
-        std::pair<std::vector<uint64_t>, bool>              chunk       = {{}, {}};
-        auto                                                chunk_count = uint64_t{0};
+auto split_counts(std::vector<uint64_t> counts, uint64_t const batch_size)
+    -> std::tuple<std::vector<std::pair<std::vector<uint64_t>, bool>>,
+                  std::optional<std::pair<std::vector<uint64_t>, bool>>>
+{
+    std::vector<std::pair<std::vector<uint64_t>, bool>> chunks;
+    std::pair<std::vector<uint64_t>, bool>              chunk       = {{}, {}};
+    auto                                                chunk_count = uint64_t{0};
 
-        for (auto i = uint64_t{0}; i < counts.size(); ++i) {
-            auto current_count = counts[i];
+    for (auto i = uint64_t{0}; i < counts.size(); ++i) {
+        auto current_count = counts[i];
 
-            while (chunk_count + current_count >= batch_size) {
-                chunk.first.push_back(batch_size - chunk_count);
-                current_count -= batch_size - chunk_count;
-                chunk.second = current_count == 0;
-                chunks.push_back(std::move(chunk));
-                // Reset chunk
-                chunk       = {{}, {}};
-                chunk_count = 0;
-            }
-            if (current_count != 0) {
-                chunk.first.push_back(current_count);
-                chunk.second = true;
-                chunk_count += current_count;
-            }
+        while (chunk_count + current_count >= batch_size) {
+            chunk.first.push_back(batch_size - chunk_count);
+            current_count -= batch_size - chunk_count;
+            chunk.second = current_count == 0;
+            chunks.push_back(std::move(chunk));
+            // Reset chunk
+            chunk       = {{}, {}};
+            chunk_count = 0;
         }
-        std::optional<std::pair<std::vector<uint64_t>, bool>> rest{std::nullopt};
-        if (!chunk.first.empty()) { rest = std::move(chunk); }
-        return {std::move(chunks), std::move(rest)};
+        if (current_count != 0) {
+            chunk.first.push_back(current_count);
+            chunk.second = true;
+            chunk_count += current_count;
+        }
     }
+    std::optional<std::pair<std::vector<uint64_t>, bool>> rest{std::nullopt};
+    if (!chunk.first.empty()) { rest = std::move(chunk); }
+    return {std::move(chunks), std::move(rest)};
+}
 } // namespace
 
 auto Buffer::submit(ls_bits512 const& x, OperatorT const& op)
@@ -261,12 +260,12 @@ auto Buffer::submit_final() -> std::optional<std::future<std::invoke_result_t<Ta
 }
 
 namespace {
-    auto log_plus_log(std::complex<double> const& log_acc,
-                      std::complex<double> const& log_term) noexcept -> std::complex<double>
-    {
-        auto scale = std::max(log_acc.real(), log_term.real());
-        return scale + std::log(std::exp(log_acc - scale) + std::exp(log_term - scale));
-    }
+auto log_plus_log(std::complex<double> const& log_acc,
+                  std::complex<double> const& log_term) noexcept -> std::complex<double>
+{
+    auto scale = std::max(log_acc.real(), log_term.real());
+    return scale + std::log(std::exp(log_acc - scale) + std::exp(log_term - scale));
+}
 } // namespace
 
 class Accumulator {
@@ -389,24 +388,24 @@ auto Accumulator::process_result(std::invoke_result_t<Task> result) -> void
 }
 
 namespace {
-    template <class Allocator>
-    auto vector_to_tensor(std::vector<std::complex<double>, Allocator> vector) -> torch::Tensor
-    {
-        using VectorT = std::vector<std::complex<double>, Allocator>;
-        auto data     = vector.data();
-        auto size     = static_cast<int64_t>(vector.size());
-        auto deleter =
-            [original = std::make_unique<VectorT>(std::move(vector)).release()](void* p) mutable {
-                if (p != original->data()) {
-                    detail::assert_fail("false", __FILE__, __LINE__, TCM_CURRENT_FUNCTION,
-                                        fmt::format("Trying to delete wrong pointer: {} != {}", p,
-                                                    static_cast<void*>(original->data())));
-                }
-                std::default_delete<std::vector<std::complex<double>, Allocator>>{}(original);
-            };
-        return torch::from_blob(data, {size}, std::move(deleter),
-                                torch::TensorOptions{}.dtype(torch::ScalarType::ComplexDouble));
-    }
+template <class Allocator>
+auto vector_to_tensor(std::vector<std::complex<double>, Allocator> vector) -> torch::Tensor
+{
+    using VectorT = std::vector<std::complex<double>, Allocator>;
+    auto data     = vector.data();
+    auto size     = static_cast<int64_t>(vector.size());
+    auto deleter  = [original =
+                        std::make_unique<VectorT>(std::move(vector)).release()](void* p) mutable {
+        if (p != original->data()) {
+            detail::assert_fail("false", __FILE__, __LINE__, TCM_CURRENT_FUNCTION,
+                                fmt::format("Trying to delete wrong pointer: {} != {}", p,
+                                            static_cast<void*>(original->data())));
+        }
+        std::default_delete<std::vector<std::complex<double>, Allocator>>{}(original);
+    };
+    return torch::from_blob(data, {size}, std::move(deleter),
+                            torch::TensorOptions{}.dtype(torch::ScalarType::ComplexDouble));
+}
 } // namespace
 
 auto Accumulator::operator()(torch::Tensor spins) -> torch::Tensor
@@ -441,5 +440,4 @@ TCM_EXPORT auto apply(torch::Tensor spins, OperatorT op, ForwardT psi, uint64_t 
     return acc(std::move(spins));
 }
 
-} // namespace v2
 TCM_NAMESPACE_END
