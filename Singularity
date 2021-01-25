@@ -6,6 +6,7 @@ From: nvidia/cuda:11.0-devel-ubuntu20.04
     export LC_ALL=C
     export PYTHON_VERSION=3.8
     export PYTORCH_VERSION=1.7
+    export LATTICE_SYMMETRIES_VERSION=0.4.0
 
     apt-get update
     apt-get install -y --no-install-recommends \
@@ -30,16 +31,14 @@ From: nvidia/cuda:11.0-devel-ubuntu20.04
         anaconda-client conda-build conda-verify \
         gcc_linux-64 gxx_linux-64 cmake ninja
     conda install -y -c pytorch pytorch=$PYTORCH_VERSION
-    conda install -y -c twesterhout lattice-symmetries
+    conda install -y -c twesterhout lattice-symmetries=$LATTICE_SYMMETRIES_VERSION
     conda clean -ya
 
 
 %environment
     export LC_ALL=C
+    export TERM=xterm-256color
 
 
 %runscript
-    cd /workdir
-    . /opt/conda/etc/profile.d/conda.sh
-    conda activate base
-    exec bash
+    exec /bin/bash
