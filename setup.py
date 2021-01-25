@@ -31,6 +31,6 @@ setup(
     packages=["nqs_playground"],
     # This will break on OSX and Windows...
     package_data={"nqs_playground": ["_C.*.so", "libnqs.so"]},
-    install_requires=["torch", "numpy", "scipy", "loguru"],
+    install_requires=[], # "torch", "numpy", "scipy", "loguru"],
     zip_safe=False,
 )

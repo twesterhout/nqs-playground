@@ -2,8 +2,11 @@
 
 set -ex
 
-export CMAKE_LIBRARY_PATH=$PREFIX/lib:$PREFIX/include:$CMAKE_LIBRARY_PATH
+export CMAKE_LIBRARY_PATH=$PREFIX/lib:$CMAKE_LIBRARY_PATH
 export CMAKE_PREFIX_PATH=$PREFIX:$SP_DIR/torch:$CMAKE_PREFIX_PATH
+
+which cmake
+cmake --version
 
 mkdir -p build
 pushd build
