@@ -83,7 +83,9 @@ class Runner:
                 "torch.nn.Modules or a pair of filenames".format(type(model))
             )
         amplitude, phase = model
-        load = lambda m: load_model(m, number_spins=self.basis.number_spins, jit=False).to(self.device)
+        load = lambda m: load_model(m, number_spins=self.basis.number_spins, jit=False).to(
+            self.device
+        )
         amplitude, phase = load(amplitude), load(phase)
         return amplitude, phase
 
@@ -102,7 +104,9 @@ class Runner:
     @property
     def combined_state(self):
         if not hasattr(self, "__combined_state"):
-            self.__combined_state = combine_amplitude_and_phase(self.amplitude, self.phase, use_jit=False)
+            self.__combined_state = combine_amplitude_and_phase(
+                self.amplitude, self.phase, use_jit=False
+            )
         return self.__combined_state
 
     @torch.no_grad()
@@ -133,7 +137,9 @@ class Runner:
             tau = integrated_autocorr_time(log_probs)
             logger.info("Autocorrelation time of log(|ψ(σ)|²: {}", tau)
 
-        if "weights" not in info:
+        if info is not None and len(info) > 0:
+            logger.info("Additional info from the sampler: {}", info)
+        if info is None or "weights" not in info:
             logger.debug(
                 "Sampler did not return 'weights'. We assume that no importance sampling "
                 "is used and initialize all weights with 1..."
@@ -155,13 +161,24 @@ class Runner:
         grad = (local_loss - mean_loss) * weights
         grad = grad.view(-1, 1)
 
+        def hamming_weight_loss(xs, ys):
+            loss = hamming_weight(xs, self.basis.number_spins)
+            loss = torch.abs(loss - (self.basis.number_spins // 2))
+            logger.info("Hamming weight loss: {}", loss.sum().item())
+            loss = loss.view(ys.size())
+            r = torch.logsumexp(torch.log(loss) + 2 * ys, dim=0)
+            return 10 * r
+
         self.optimiser.zero_grad()
         if any(map(lambda p: p.requires_grad, self.amplitude.parameters())):
             if hasattr(self.amplitude, "log_prob"):
                 output = 0.5 * self.amplitude.log_prob(spins).view(-1, 1)
             else:
                 output = self.amplitude(spins)
-            output.backward(grad)
+            output.backward(grad, retain_graph=True)
+            loss = hamming_weight_loss(spins, output)
+            # if self._iteration < 100:
+            #     loss.backward()
         if any(map(lambda p: p.requires_grad, self.phase.parameters())):
             output = self.phase(spins)
             output.backward(grad)
@@ -190,7 +207,7 @@ class Runner:
 
         energy = torch.dot(local_energies, weights.to(local_energies.dtype))
         logger.info("Energy: {}", energy)
-        variance = torch.dot(torch.abs(local_energies - energy)**2, weights)
+        variance = torch.dot(torch.abs(local_energies - energy) ** 2, weights)
         logger.info("Energy variance: {}", variance)
         self.calculate_gradient(spins, local_energies, weights)
         self.optimiser.step()

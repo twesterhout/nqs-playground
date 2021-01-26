@@ -308,16 +308,21 @@ def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Modu
     """
 
     class CombiningState(torch.nn.Module):
+        amplitude: torch.nn.Module
+        phase: torch.nn.Module
+        use_log_prob: bool
+
         def __init__(self, amplitude: torch.nn.Module, phase: torch.nn.Module):
             super().__init__()
-            if hasattr(amplitude, "log_prob"):
-                self.amplitude = lambda x: 0.5 * amplitude.log_prob(x).view(-1, 1)
-            else:
-                self.amplitude = amplitude
+            self.amplitude = amplitude
             self.phase = phase
+            self.use_log_prob = hasattr(self.amplitude, "log_prob")
 
         def forward(self, x: Tensor) -> Tensor:
-            a = self.amplitude(x)
+            if self.use_log_prob:
+                a = 0.5 * self.amplitude.log_prob(x).view(-1, 1)
+            else:
+                a = self.amplitude(x)
             b = self.phase(x)
             return torch.complex(a, b)
 

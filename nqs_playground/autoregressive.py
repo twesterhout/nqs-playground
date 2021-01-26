@@ -20,14 +20,14 @@ __all__ = [
 
 class MaskedLinear(torch.nn.Linear):
     """A Linear layer with masks that turn off some of the layer's weights."""
-    
+
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
-        super().__init__(in_features, out_features, bias)        
-        self.register_buffer('mask', torch.ones(out_features, in_features))
-        
+        super().__init__(in_features, out_features, bias)
+        self.register_buffer("mask", torch.ones(out_features, in_features))
+
     def set_mask(self, mask):
         self.mask.data.copy_(mask)
-        
+
     def forward(self, x):
         return torch.nn.functional.linear(x, self.mask * self.weight, self.bias)
 
@@ -83,6 +83,10 @@ class MADE(torch.nn.Module):
 
         return [torch.from_numpy(mask.astype(np.uint8)) for mask in masks], conn[-1]
 
+    def _sample_masks(self):
+        self._mask_seed += 1
+        return self._create_masks(seed=self._mask_seed % self._n_masks)
+
     def _forward(self, x, masks):
         # If the input is an image, flatten it during the forward pass.
         original_shape = x.shape
@@ -99,13 +103,17 @@ class MADE(torch.nn.Module):
         return self._forward(x, masks)
 
     def _log_prob(self, sample, x_hat):
-        mask = sample # (sample + 1) / 2
-        log_prob = (torch.log(x_hat + self._epsilon) * mask +
-                    torch.log(1 - x_hat + self._epsilon) * (1 - mask))
+        mask = sample  # (sample + 1) / 2
+        log_prob = torch.log(x_hat + self._epsilon) * mask + torch.log(
+            1 - x_hat + self._epsilon
+        ) * (1 - mask)
         log_prob = log_prob.view(log_prob.shape[0], -1).sum(dim=1)
         return log_prob
 
     def log_prob(self, sample):
+        if sample.dtype == torch.int64:
+            sample = unpack(sample, self._input_dim)
+            sample = (sample + 1) / 2
         x_hat = self.forward(sample)
         return self._log_prob(sample, x_hat)
 
@@ -200,9 +208,10 @@ class NADE(torch.nn.Module):
         return self._forward(x)[0]
 
     def _log_prob(self, sample, x_hat):
-        mask = sample # (sample + 1) / 2
-        log_prob = (torch.log(x_hat + self._epsilon) * mask +
-                    torch.log(1 - x_hat + self._epsilon) * (1 - mask))
+        mask = sample  # (sample + 1) / 2
+        log_prob = torch.log(x_hat + self._epsilon) * mask + torch.log(
+            1 - x_hat + self._epsilon
+        ) * (1 - mask)
         log_prob = log_prob.view(log_prob.shape[0], -1).sum(dim=1)
         return log_prob
 
@@ -224,15 +233,13 @@ class NADE(torch.nn.Module):
         return self._sample(n_samples)
 
 
-
-
-
 def overlap_fn(a, b):
     a -= torch.max(a)
     b -= torch.max(b)
     a = torch.exp(0.5 * a)
     b = torch.exp(0.5 * b)
     return torch.dot(a, b) / torch.linalg.norm(a) / torch.linalg.norm(b)
+
 
 def overlap_loss_fn(a, b):
     a = a.squeeze()
@@ -242,10 +249,16 @@ def overlap_loss_fn(a, b):
     a = torch.exp(0.5 * a)
     b = torch.exp(0.5 * b)
     a_over_b = a / b
-    return torch.sum(a_over_b) / torch.linalg.norm(a_over_b) / torch.sqrt(torch.scalar_tensor(b.size(0)))
+    return (
+        torch.sum(a_over_b)
+        / torch.linalg.norm(a_over_b)
+        / torch.sqrt(torch.scalar_tensor(b.size(0)))
+    )
+
 
 def fancy_loss_fn(a, b):
-    return torch.sum(torch.nn.functional.softplus(b) * torch.exp((a - b)**2))
+    return torch.sum(torch.nn.functional.softplus(b) * torch.exp((a - b) ** 2))
+
 
 def _negative_log_overlap(log_pred_prob, log_target_prob):
     log_pred_prob = log_pred_prob.squeeze()
@@ -258,8 +271,10 @@ def _negative_log_overlap(log_pred_prob, log_target_prob):
     # print(torch.exp(pred_times_target - 0.5 * norm_pred - 0.5 * norm_target))
     return -(pred_times_target - norm_pred - norm_target)
 
+
 def negative_log_overlap(a, b):
     return _negative_log_overlap(b, a)
+
 
 def negative_log_overlap_uniform(log_pred_prob, log_target_prob):
     log_pred_prob = log_pred_prob.squeeze()
@@ -277,12 +292,13 @@ def pretrain_network(network, basis, ground_state):
     states = nqs.unpack(states, basis.number_spins)
     states = (states + 1) / 2
 
-    target = np.abs(ground_state.squeeze())**2
+    target = np.abs(ground_state.squeeze()) ** 2
     target = torch.from_numpy(target)
     target = torch.log(torch.clamp(target, min=1e-10)).float()
 
     def log_prob_fn(x):
         return network.forward(x).squeeze(dim=1)
+
     loss_fn = negative_log_overlap_uniform
 
     logger.info("Overlap: {}", overlap_fn(log_prob_fn(states), target))
@@ -317,7 +333,6 @@ def pretrain_network(network, basis, ground_state):
         logger.info("Overlap: {}", overlap_fn(log_prob_fn(states), target))
 
     return network
-
 
 
 if __name__ == "__main__":
@@ -359,12 +374,11 @@ if __name__ == "__main__":
     states = nqs.unpack(states, basis.number_spins)
     states = (states + 1) / 2
 
-    target = np.abs(ground_state.squeeze())**2
+    target = np.abs(ground_state.squeeze()) ** 2
     target = torch.from_numpy(target)
-    target_prob = target # torch.ones(target.size(0)) / target.size(0) # target
+    target_prob = target  # torch.ones(target.size(0)) / target.size(0) # target
     target = torch.log(torch.clamp(target, min=1e-7)).float()
     target -= torch.logsumexp(target, dim=0)
-
 
     def target_log_prob_fn(xs):
         if xs.dtype == torch.float32:
@@ -378,7 +392,6 @@ if __name__ == "__main__":
 
     # logger.info("P(x) = {}", target)
 
-    
     n_masks = 1
     # net = MADE(10, [100], n_masks=n_masks)
     net = NADE(10, 100)
@@ -390,8 +403,7 @@ if __name__ == "__main__":
     # )
     # def log_prob_fn(x):
     #     return net.forward(x).squeeze(dim=1)
-    loss_fn = negative_log_overlap # torch.nn.MSELoss()
-
+    loss_fn = negative_log_overlap  # torch.nn.MSELoss()
 
     predicted = torch.zeros(states.size(0))
     for i in range(n_masks):
@@ -400,7 +412,11 @@ if __name__ == "__main__":
     loss = loss_fn(predicted, target)
     logger.info("Initial loss: {}", loss)
     logger.info("Overlap: {}", overlap_fn(predicted, target))
-    logger.info("negative_log_overlap: {} ?= {}", -torch.log(overlap_fn(predicted, target)), negative_log_overlap_uniform(predicted, target))
+    logger.info(
+        "negative_log_overlap: {} ?= {}",
+        -torch.log(overlap_fn(predicted, target)),
+        negative_log_overlap_uniform(predicted, target),
+    )
 
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
     sampling_options = nqs.SamplingOptions(number_samples=1000)
@@ -414,7 +430,7 @@ if __name__ == "__main__":
         #     replacement=True,
         # )
         # x_batch = states[indices]
-        y_batch = target_log_prob_fn(x_batch) # target[indices]
+        y_batch = target_log_prob_fn(x_batch)  # target[indices]
         assert torch.all(y_batch == target_log_prob_fn(x_batch))
         predicted = log_prob_fn(x_batch)
         loss = loss_fn(predicted, y_batch)
