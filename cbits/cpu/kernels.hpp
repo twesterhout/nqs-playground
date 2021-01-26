@@ -37,8 +37,12 @@ TCM_NAMESPACE_BEGIN
 auto unpack_cpu(TensorInfo<uint64_t const, 2> const& spins, TensorInfo<float, 2> const& out)
     -> void;
 
+template <class scalar_t>
+auto hamming_weight_cpu(TensorInfo<uint64_t const, 2> const& spins,
+                        TensorInfo<scalar_t> const&          out) noexcept -> void;
+
 auto unpack_one_avx2(uint64_t const[], unsigned, float*) noexcept -> void;
 auto unpack_one_avx(uint64_t const[], unsigned, float*) noexcept -> void;
-auto unpack_one_sse2(uint64_t const[], unsigned, float*) noexcept -> void;
+auto unpack_one_sse4(uint64_t const[], unsigned, float*) noexcept -> void;
 
 TCM_NAMESPACE_END

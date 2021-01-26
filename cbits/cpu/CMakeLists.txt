@@ -1,6 +1,6 @@
 # Library of CPU specific kernels
 
-foreach(my_arch sse2 avx avx2)
+foreach(my_arch sse4 avx avx2)
     set(my_target "nqs_cpu_kernels_${my_arch}")
     add_library(${my_target} OBJECT
         kernels.hpp
@@ -12,7 +12,7 @@ foreach(my_arch sse2 avx avx2)
     target_link_libraries(${my_target} PUBLIC nqs_cbits_Common)
     target_link_libraries(${my_target} PRIVATE vectorclass)
 endforeach()
-target_compile_options(nqs_cpu_kernels_sse2 PRIVATE -m64 -msse2)
-target_compile_definitions(nqs_cpu_kernels_sse2 PRIVATE TCM_ADD_DISPATCH_CODE)
-target_compile_options(nqs_cpu_kernels_avx PRIVATE -m64 -mavx)
-target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -m64 -mavx2 -mfma)
+target_compile_options(nqs_cpu_kernels_sse4 PRIVATE -msse4 -msse4.1 -msse4.2 -mpopcnt)
+target_compile_definitions(nqs_cpu_kernels_sse4 PRIVATE TCM_ADD_DISPATCH_CODE)
+target_compile_options(nqs_cpu_kernels_avx PRIVATE -mavx)
+target_compile_options(nqs_cpu_kernels_avx2 PRIVATE -mavx2 -mbmi2 -mfma)

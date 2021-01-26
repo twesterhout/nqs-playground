@@ -93,11 +93,11 @@
 #elif defined(__AVX__)
 #    define TCM_HAS_AVX2() 0
 #    define TCM_HAS_AVX() 1
-#elif defined(__SSE2__) || defined(__x86_64__)
+#elif defined(__SSE4_2__) && defined(__SSE4_1__)
 #    define TCM_HAS_AVX2() 0
 #    define TCM_HAS_AVX() 0
 #else
-#    error "unsupported architecture; nqs_playground currently only works on x86_64"
+#    error "unsupported architecture; nqs-playground requires SSE4.1 & SSE4.2"
 #endif
 
 // #if defined(BOOST_GCC)

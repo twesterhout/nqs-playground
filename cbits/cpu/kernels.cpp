@@ -9,10 +9,10 @@
 #    define unpack_one_simd unpack_one_avx2
 #elif defined(TCM_COMPILE_avx)
 #    define unpack_one_simd unpack_one_avx
-#elif defined(TCM_COMPILE_sse2)
-#    define unpack_one_simd unpack_one_sse2
+#elif defined(TCM_COMPILE_sse4)
+#    define unpack_one_simd unpack_one_sse4
 #else
-#    error "One of TCM_COMPILE_avx2, TCM_COMPILE_avx, or TCM_COMPILE_sse2 must be defined"
+#    error "One of TCM_COMPILE_avx2, TCM_COMPILE_avx, or TCM_COMPILE_sse4 must be defined"
 #endif
 
 TCM_NAMESPACE_BEGIN
@@ -58,7 +58,32 @@ TCM_EXPORT auto unpack_one_simd(uint64_t const x[], unsigned const number_spins,
     }
 }
 
+namespace {
+auto popcount(unsigned x) noexcept { return __builtin_popcount(x); }
+auto popcount(unsigned long x) noexcept { return __builtin_popcountl(x); }
+auto popcount(unsigned long long x) noexcept { return __builtin_popcountll(x); }
+} // namespace
+
 #if defined(TCM_ADD_DISPATCH_CODE)
+template <class scalar_t>
+auto hamming_weight_cpu(TensorInfo<uint64_t const, 2> const& spins,
+                        TensorInfo<scalar_t> const&          out) noexcept -> void
+{
+    constexpr auto block = 64;
+    auto const     words = (spins.size<1>() + block - 1) / block;
+    for (auto i = int64_t{0}; i < spins.size<0>(); ++i) {
+        auto       acc     = 0;
+        auto const current = row(spins, i);
+        for (auto j = int64_t{0}; j < words; ++j) {
+            acc += popcount(current[j]);
+        }
+        out[i] = static_cast<scalar_t>(acc);
+    }
+}
+
+template TCM_EXPORT auto hamming_weight_cpu(TensorInfo<uint64_t const, 2> const&,
+                                            TensorInfo<float> const&) noexcept -> void;
+
 TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
                            TensorInfo<float, 2> const&          dst_info) -> void
 {
@@ -68,16 +93,16 @@ TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
 
     using unpack_one_fn_t = auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
     auto unpack_ptr       = []() -> unpack_one_fn_t {
-#if TCM_HAS_AVX2()
+#    if TCM_HAS_AVX2()
         return &unpack_one_avx2;
-#elif TCM_HAS_AVX()
+#    elif TCM_HAS_AVX()
         if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
         return &unpack_one_avx;
-#else
+#    else
         if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
         if (__builtin_cpu_supports("avx")) { return &unpack_one_avx; }
-        return &unpack_one_sse2;
-#endif
+        return &unpack_one_sse4;
+#    endif
     }();
 
     auto const number_spins = static_cast<unsigned>(dst_info.sizes[1]);
