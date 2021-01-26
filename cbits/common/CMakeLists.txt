@@ -21,9 +21,9 @@ add_library(nqs SHARED
     wrappers.cpp
 )
 nqs_cbits_add_low_level_flags(nqs)
-target_compile_definitions(nqs PUBLIC
-    TORCH_API_INCLUDE_EXTENSION_H=1
-    TORCH_EXTENSION_NAME="_C")
+# target_compile_definitions(nqs PUBLIC
+#     TORCH_API_INCLUDE_EXTENSION_H=1
+#     TORCH_EXTENSION_NAME="_C")
 target_compile_options(nqs PRIVATE ${TCM_WARNING_FLAGS})
 target_link_libraries(nqs PUBLIC nqs_cbits_Common
                                  nqs_gpu

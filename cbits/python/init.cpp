@@ -75,8 +75,8 @@ PYBIND11_MODULE(_C, m)
             :param basis: specifies the Hilbert space basis.)EOF"))
         .def(
             "__call__",
-            [](MetropolisGenerator const& self, torch::Tensor x, py::object dtype) {
-                return self(std::move(x), torch::python::detail::py_object_to_dtype(dtype));
+            [](MetropolisGenerator const& self, torch::Tensor x, c10::ScalarType dtype) {
+                return self(std::move(x), dtype);
             },
             py::arg{"x"}.noconvert(), py::arg{"dtype"}.noconvert());
 
@@ -91,9 +91,8 @@ PYBIND11_MODULE(_C, m)
     m.def(
         "zanella_choose_samples",
         [](torch::Tensor weights, int64_t const number_samples, double const time_step,
-           py::object device) {
-            return zanella_choose_samples(std::move(weights), number_samples, time_step,
-                                          torch::python::detail::py_object_to_device(device));
+           c10::Device device) {
+            return zanella_choose_samples(std::move(weights), number_samples, time_step, device);
         },
         DOC(R"EOF(
         )EOF"),

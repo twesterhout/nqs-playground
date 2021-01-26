@@ -15,6 +15,9 @@ project(nqs_cbits
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
@@ -122,6 +125,11 @@ else()
     # This doesn't work properly, because PyTorch is hardcoding some paths in
     # Caffe2Config.cmake
     find_package(Torch REQUIRED)
+    message(STATUS "TORCH_LIBRARY: ${TORCH_LIBRARY}")
+    message(STATUS "TORCH_LIBRARIES: ${TORCH_LIBRARIES}")
+    message(STATUS "TORCH_INCLUDE_DIRS: ${TORCH_INCLUDE_DIRS}")
+    message(STATUS "TORCH_CXX_FLAGS: ${TORCH_CXX_FLAGS}")
+    message(STATUS "TORCH_INSTALL_PREFIX: ${TORCH_INSTALL_PREFIX}")
 endif()
 
 if(TRUE)
@@ -138,8 +146,6 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
     if (TORCH_CXX_FLAGS)
         target_compile_options(${MY_TARGET} PUBLIC ${TORCH_CXX_FLAGS})
     endif()
-    # set_property(TARGET ${MY_TARGET}
-    #     PROPERTY CXX_VISIBILITY_PRESET hidden)
     set_property(TARGET ${MY_TARGET}
         PROPERTY POSITION_INDEPENDENT_CODE ON)
 endfunction()

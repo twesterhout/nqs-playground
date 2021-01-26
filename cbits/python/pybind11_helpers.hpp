@@ -42,6 +42,87 @@
 
 namespace pybind11 {
 namespace detail {
+    template <> struct type_caster<c10::Device> {
+      private:
+        c10::Device payload = c10::Device{c10::DeviceType::CPU};
+
+      public:
+        auto load(handle src, bool convert) -> bool
+        {
+            if (src.is_none()) {
+                // Defer accepting None to other overloads (if we aren't in convert mode):
+                if (!convert) return false;
+                return true;
+            }
+
+            if (isinstance<str>(src)) {
+                payload = c10::Device{src.cast<std::string>()};
+                return true;
+            }
+
+            auto torch_device = py::module_::import("torch").attr("device");
+            if (!isinstance(src, torch_device)) return false;
+
+            payload = c10::Device{src.attr("__str__")().cast<std::string>()};
+            return true;
+        }
+
+        operator c10::Device() const { return payload; }
+
+        static constexpr auto name            = _("torch.device");
+        template <class T> using cast_op_type = std::remove_reference_t<T>;
+    };
+
+    template <> struct type_caster<c10::ScalarType> {
+      private:
+        c10::ScalarType payload = torch::kFloat32;
+
+        static auto string_to_dtype(std::string const& name) -> std::optional<c10::ScalarType>
+        {
+            using P = std::pair<std::string, c10::ScalarType>;
+            // clang-format off
+            static const std::array<P, 8> map =
+                { P{"float", torch::kFloat32},
+                  P{"float32", torch::kFloat32},
+                  P{"double", torch::kFloat64},
+                  P{"float64", torch::kFloat64},
+                  P{"int", torch::kInt32},
+                  P{"int8", torch::kInt8},
+                  P{"int32", torch::kInt32},
+                  P{"int64", torch::kInt64}
+                };
+            // clang-format on
+            auto i = std::find_if(std::begin(map), std::end(map),
+                                  [&name](auto const& p) { return p.first == name; });
+            if (i == std::end(map)) { return std::nullopt; }
+            return i->second;
+        }
+
+      public:
+        auto load(handle src, bool convert) -> bool
+        {
+            if (src.is_none()) {
+                // Defer accepting None to other overloads (if we aren't in convert mode):
+                if (!convert) return false;
+                return true;
+            }
+
+            auto torch_dtype = py::module_::import("torch").attr("dtype");
+            if (!isinstance(src, torch_dtype)) return false;
+
+            auto name  = src.attr("__repr__")().cast<std::string>().substr(/*pos=*/6);
+            auto dtype = string_to_dtype(name);
+            if (!dtype.has_value()) { return false; }
+            payload = *dtype;
+            return true;
+        }
+
+        operator c10::ScalarType() const { return payload; }
+
+        static constexpr auto name            = _("torch.dtype");
+        template <class T> using cast_op_type = std::remove_reference_t<T>;
+    };
+
     template <> struct type_caster<ls_bits512> {
       public:
         // This macro establishes the name 'bits512' in function signatures and declares a local
