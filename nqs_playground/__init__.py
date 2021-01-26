@@ -5,33 +5,12 @@ __version__ = '1.0.0'
 # against it in C++ code.
 import torch as __torch
 
-# from . import _C
 from .core import *
-# from .symmetry import *
-
-
-# def SpinBasis(symmetries, number_spins, hamming_weight=None):
-#     small = lambda: _C.SmallSpinBasis(symmetries, number_spins, hamming_weight)
-#     big = lambda: _C.BigSpinBasis(symmetries, number_spins, hamming_weight)
-#     if len(symmetries) == 0:
-#         return small() if number_spins <= 64 else big()
-#     else:
-#         t = next(iter(symmetries))
-#         if isinstance(t, _C.Symmetry64):
-#             return small()
-#         if isinstance(t, _C.Symmetry512):
-#             return big()
-#         raise TypeError(
-#             "symmetries has wrong type: List[{}]; expected either "
-#             "List[_C.Symmetry64]or List[_C.Symmetry512]".format(type(t))
-#         )
-
-
 from .hamiltonian import *
 from .sampling import *
-# from .monte_carlo import *
 from ._jacobian import *
 from ._C import manual_seed, random_spin
 
 # This operator becomes available only after loading _C
 unpack = __torch.ops.tcm.unpack
+hamming_weight = __torch.ops.tcm.hamming_weight

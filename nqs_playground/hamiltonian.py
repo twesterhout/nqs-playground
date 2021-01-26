@@ -60,6 +60,7 @@ def heisenberg_interaction(edges: List[Tuple[int, int]], coupling: complex) -> I
     # fmt: on
     return Interaction(matrix, coupling)
 
+
 def _array_to_int(xs) -> int:
     r"""Convert an array of 8 int64 values (i.e. something like bits512) to a
     Python integer.
@@ -96,8 +97,10 @@ def reference_log_apply(spins, operator, log_psi, batch_size=None):
         result[i] = _reference_log_apply_one(_array_to_int(spin), operator, log_psi, device)
     return result
 
+
 def _isclose(a, b):
     return torch.isclose(a, b, rtol=5e-5, atol=5e-7)
+
 
 @torch.no_grad()
 def local_values(
@@ -106,7 +109,7 @@ def local_values(
     state: torch.jit.ScriptModule,
     log_psi: Optional[Tensor] = None,
     batch_size: int = 2048,
-    debug: bool = False
+    debug: bool = False,
 ) -> Tensor:
     r"""Compute local values ``⟨s|H|ψ⟩/⟨s|ψ⟩`` for all ``s ∈ spins``.
 
