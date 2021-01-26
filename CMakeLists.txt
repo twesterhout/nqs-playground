@@ -41,7 +41,7 @@ endif()
 ###############################################################################
 
 # Torch
-if(TRUE)
+if(FALSE)
     # This requires at least CMake 3.12
     find_package(Python3 COMPONENTS Development REQUIRED)
     if (NOT DEFINED Python3_EXECUTABLE)
@@ -220,7 +220,7 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     target_compile_options(nqs_cbits_Common INTERFACE -fsized-deallocation)
 endif()
 target_link_libraries(nqs_cbits_Common INTERFACE
-    INTERFACE Torch
+    INTERFACE torch
               fmt::fmt-header-only
               gsl::gsl-lite
               SG14
