@@ -19,20 +19,6 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 
-# Determine if we have nvcc
-# include(CheckLanguage)
-# check_language(CUDA)
-# if(CMAKE_CUDA_COMPILER)
-#     enable_language(CUDA)
-#     if(NOT DEFINED CMAKE_CUDA_STANDARD)
-#         set(CMAKE_CUDA_STANDARD 11)
-#         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-#     endif()
-# else()
-#     message(WARNING "[nqs_cbits] Compiling without CUDA support")
-# endif()
-
-# include(CTest)
 include(CheckCXXCompilerFlag)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
@@ -84,10 +70,9 @@ if(TRUE)
         set(${_RESULT} "${_VALUE}" PARENT_SCOPE)
     endfunction()
 
-    # We don't use CUDA in our C++ code, so everything's simple
     add_library(Torch INTERFACE)
     run_python_command("from torch.utils.cpp_extension import include_paths; \
-print(';'.join(include_paths(cuda=False)))" _TEMP)
+print(';'.join(include_paths(cuda=True)))" _TEMP)
     # We need get_last_line here, because PyTorch prints warnings when CUDA_HOME
     # is set, but it can't find CUDA runtime. This happens when we compile code
     # on Cartesius on nodes which don't have GPUs but still load CUDA module.
@@ -99,9 +84,9 @@ print(int(torch._C._GLIBCXX_USE_CXX11_ABI))" _TEMP)
     # Same here
     get_last_line("${_TEMP}" TCM_USE_CXX11_ABI)
 
-    run_python_command("import torch; \
-a, b, c, = map(int, torch.__version__.split('.')); \
-print(1000 * (1000 * a + b) + c)" _TEMP)
+    run_python_command("import torch; import re; \
+a, b = map(int, torch.__version__.split('.')[:-1]); \
+print(1000 * (1000 * a + b))" _TEMP)
     get_last_line("${_TEMP}" _TORCH_VERSION)
 
 
