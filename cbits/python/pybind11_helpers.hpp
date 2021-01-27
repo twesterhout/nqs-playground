@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "../common/errors.hpp"
 #include "../common/wrappers.hpp"
 #include "trim.hpp"
 
@@ -42,30 +43,13 @@
 
 namespace pybind11 {
 namespace detail {
+#if 0
     template <> struct type_caster<c10::Device> {
       private:
         c10::Device payload = c10::Device{c10::DeviceType::CPU};
 
       public:
-        auto load(handle src, bool convert) -> bool
-        {
-            if (src.is_none()) {
-                // Defer accepting None to other overloads (if we aren't in convert mode):
-                if (!convert) return false;
-                return true;
-            }
-
-            if (isinstance<str>(src)) {
-                payload = c10::Device{src.cast<std::string>()};
-                return true;
-            }
-
-            auto torch_device = py::module_::import("torch").attr("device");
-            if (!isinstance(src, torch_device)) return false;
-
-            payload = c10::Device{src.attr("__str__")().cast<std::string>()};
-            return true;
-        }
+        auto load(handle src, bool convert) -> bool;
 
         operator c10::Device() const { return payload; }
 
@@ -77,51 +61,17 @@ namespace detail {
       private:
         c10::ScalarType payload = torch::kFloat32;
 
-        static auto string_to_dtype(std::string const& name) -> std::optional<c10::ScalarType>
-        {
-            using P = std::pair<std::string, c10::ScalarType>;
-            // clang-format off
-            static const std::array<P, 8> map =
-                { P{"float", torch::kFloat32},
-                  P{"float32", torch::kFloat32},
-                  P{"double", torch::kFloat64},
-                  P{"float64", torch::kFloat64},
-                  P{"int", torch::kInt32},
-                  P{"int8", torch::kInt8},
-                  P{"int32", torch::kInt32},
-                  P{"int64", torch::kInt64}
-                };
-            // clang-format on
-            auto i = std::find_if(std::begin(map), std::end(map),
-                                  [&name](auto const& p) { return p.first == name; });
-            if (i == std::end(map)) { return std::nullopt; }
-            return i->second;
-        }
+        static auto string_to_dtype(std::string const& name) -> std::optional<c10::ScalarType>;
 
       public:
-        auto load(handle src, bool convert) -> bool
-        {
-            if (src.is_none()) {
-                // Defer accepting None to other overloads (if we aren't in convert mode):
-                if (!convert) return false;
-                return true;
-            }
-
-            auto torch_dtype = py::module_::import("torch").attr("dtype");
-            if (!isinstance(src, torch_dtype)) return false;
-
-            auto name  = src.attr("__repr__")().cast<std::string>().substr(/*pos=*/6);
-            auto dtype = string_to_dtype(name);
-            if (!dtype.has_value()) { return false; }
-            payload = *dtype;
-            return true;
-        }
+        auto load(handle src, bool convert) -> bool;
 
         operator c10::ScalarType() const { return payload; }
 
         static constexpr auto name            = _("torch.dtype");
         template <class T> using cast_op_type = std::remove_reference_t<T>;
     };
+#endif
 
     template <> struct type_caster<ls_bits512> {
       public:
@@ -215,11 +165,16 @@ namespace detail {
             if (!isinstance(src, operator_type)) { return false; }
             payload =
                 reinterpret_cast<ls_operator*>(src.attr("_payload").attr("value").cast<intptr_t>());
+            TCM_ASSERT(payload != nullptr, "");
             return true;
         }
 
         operator ls_operator*() { return payload; }
-        operator ls_operator&() { return *payload; }
+        operator ls_operator&()
+        {
+            TCM_ASSERT(payload != nullptr, "");
+            return *payload;
+        }
 
         static constexpr auto name            = _("lattice_symmetries.Operator");
         template <class T> using cast_op_type = pybind11::detail::cast_op_type<T>;
@@ -286,21 +241,26 @@ namespace detail {
             // ensures that GIL is held during functor destruction
             struct func_handle {
                 function f;
-                func_handle(function&& f_) : f(std::move(f_)) {}
+                func_handle(function&& f_) : f{std::move(f_)} {}
+                func_handle(func_handle&&) noexcept = default;
+                func_handle(func_handle const& f_)
+                {
+                    gil_scoped_acquire acq;
+                    f = f_.f;
+                }
+                auto operator=(func_handle&&) noexcept -> func_handle& = default;
+                auto operator=(func_handle const&) -> func_handle& = delete;
                 ~func_handle()
                 {
-                    // fmt::print("~func_handle(): Waiting for GIL...\n");
                     gil_scoped_acquire acq;
-                    // fmt::print("~func_handle(): Acquired GIL...\n");
-                    function kill_f(std::move(f));
+                    function           kill_f(std::move(f));
                 }
             };
 
             value = [handle = func_handle{std::move(func)}](auto x) {
-                // fmt::print("__call__: Waiting for GIL...\n");
                 gil_scoped_acquire acq;
-                // fmt::print("__call__: Acquired GIL...\n");
-                return handle.f(std::move(x)).template cast<torch::Tensor>();
+                auto               r = handle.f(std::move(x));
+                return r.template cast<torch::Tensor>();
             };
             return true;
         }
