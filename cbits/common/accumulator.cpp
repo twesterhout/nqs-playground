@@ -429,6 +429,7 @@ auto Accumulator::operator()(torch::Tensor spins) -> torch::Tensor
     }
     process_future(_buffer.submit_final());
     drain(_queue.size());
+    TCM_ASSERT(_queue.empty(), "");
     auto r = vector_to_tensor(std::move(_output));
     return r.to(r.options().device(device));
 }

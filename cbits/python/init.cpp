@@ -47,42 +47,43 @@ PYBIND11_MODULE(_C, m)
 
     m.doc() = R"EOF()EOF";
 
-    std::vector<std::string> keep_alive;
-#define DOC(str) trim(keep_alive, str)
-
     m.def("is_operator_real", [](ls_operator const& op) { return ls_operator_is_real(&op); });
 
-    m.def(
-        "log_apply",
-        [](torch::Tensor spins, ls_operator const& _op, ForwardT psi, uint64_t batch_size) {
-            auto [op, max_required_size] = view_as_operator(_op);
-            return apply(std::move(spins), std::move(op), std::move(psi), max_required_size,
-                         batch_size);
-        },
-        py::call_guard<py::gil_scoped_release>());
+    m.def("log_apply", [](torch::Tensor spins, py::object py_op, ForwardT psi,
+                          uint64_t batch_size) {
+        auto operator_type = py::module_::import("lattice_symmetries").attr("Operator");
+        TCM_CHECK(isinstance(py_op, operator_type), std::invalid_argument, "");
+        auto const* _op =
+            reinterpret_cast<ls_operator*>(py_op.attr("_payload").attr("value").cast<intptr_t>());
+        TCM_ASSERT(_op != nullptr, "");
+        auto [op, max_required_size] = view_as_operator(*_op);
+        py::gil_scoped_release release;
+        return apply(std::move(spins), std::move(op), std::move(psi), max_required_size,
+                     batch_size);
+    });
 
     // Currently, we only access the generator from one thread
     m.def(
         "manual_seed", [](uint64_t const seed) { global_random_generator().seed(seed); },
-        DOC(R"EOF(Seed the random number generator used by nqs_playground.)EOF"), py::arg{"seed"});
+        R"EOF(Seed the random number generator used by nqs_playground.)EOF", py::arg{"seed"});
 
     m.def(
         "random_spin", [](ls_spin_basis const& basis) { return random_spin(basis); },
         py::arg{"basis"}.noconvert());
 
     py::class_<MetropolisGenerator>(m, "MetropolisGenerator")
-        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), DOC(R"EOF(
-            :param basis: specifies the Hilbert space basis.)EOF"))
+        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), R"EOF(
+            :param basis: specifies the Hilbert space basis.)EOF")
         .def(
             "__call__",
-            [](MetropolisGenerator const& self, torch::Tensor x, c10::ScalarType dtype) {
-                return self(std::move(x), dtype);
+            [](MetropolisGenerator const& self, torch::Tensor x, py::object dtype) {
+                return self(std::move(x), torch::python::detail::py_object_to_dtype(dtype));
             },
             py::arg{"x"}.noconvert(), py::arg{"dtype"}.noconvert());
 
     py::class_<ZanellaGenerator>(m, "ZanellaGenerator")
-        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), DOC(R"EOF(
-            :param basis: specifies the Hilbert space basis.)EOF"))
+        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), R"EOF(
+            :param basis: specifies the Hilbert space basis.)EOF")
         .def(
             "__call__",
             [](ZanellaGenerator const& self, torch::Tensor x) { return self(std::move(x)); },
@@ -91,13 +92,12 @@ PYBIND11_MODULE(_C, m)
     m.def(
         "zanella_choose_samples",
         [](torch::Tensor weights, int64_t const number_samples, double const time_step,
-           c10::Device device) {
-            return zanella_choose_samples(std::move(weights), number_samples, time_step, device);
+           py::object device) {
+            return zanella_choose_samples(std::move(weights), number_samples, time_step,
+                                          torch::python::detail::py_object_to_device(device));
         },
-        DOC(R"EOF(
-        )EOF"),
+        R"EOF(
+        )EOF",
         py::arg{"weights"}.noconvert(), py::arg{"number_samples"}, py::arg{"time_step"}.noconvert(),
         py::arg{"device"}.noconvert());
-
-#undef DOC
 }
