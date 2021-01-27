@@ -77,7 +77,7 @@ class Runner(RunnerBase):
         loss = torch.abs(loss - target)
         loss = loss.view(output.size())
         r = torch.logsumexp(torch.log(loss) + 2 * output, dim=0)
-        r -= np.log(states.size(0))
+        r = r - np.log(states.size(0))
         return r, loss.sum().item()
 
     def step(self):
@@ -108,11 +108,12 @@ class Runner(RunnerBase):
             hamming_weight_loss = 0.0
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)
-                output.backward(grad_chunk)
+                output.backward(grad_chunk, retain_graph=True)
                 loss, count = self.hamming_weight_loss(states_chunk, output)
                 hamming_weight_loss += count
-                if "hamming_weight" in self.config.constraints:
-                    loss.backward(self.config.constraints["hamming_weight"](self._epoch))
+                if "hamming_weight" in self.config.constraints and count > 0:
+                    loss = self.config.constraints["hamming_weight"](self._epoch) * loss
+                    loss.backward()
             hamming_weight_loss /= states.size(0)
             logger.info("Hamming weight loss: {}".format(hamming_weight_loss))
             self._tb_writer.add_scalar("loss/hamming_weight", hamming_weight_loss, self._epoch)
