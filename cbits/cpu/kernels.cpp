@@ -70,7 +70,7 @@ auto hamming_weight_cpu(TensorInfo<uint64_t const, 2> const& spins,
                         TensorInfo<scalar_t> const&          out) noexcept -> void
 {
     constexpr auto block = 64;
-    auto const     words = (spins.size<1>() + block - 1) / block;
+    auto const     words = (block * spins.size<1>() + block - 1) / block;
     for (auto i = int64_t{0}; i < spins.size<0>(); ++i) {
         auto       acc     = 0;
         auto const current = row(spins, i);
@@ -90,19 +90,14 @@ TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
     if (src_info.size<0>() == 0) { return; }
     TCM_CHECK(dst_info.strides[0] == dst_info.size<1>(), std::invalid_argument,
               fmt::format("unpack_cpu does not support strided output tensors"));
+    TCM_CHECK(dst_info.size<1>() <= 64 * src_info.size<1>(), std::invalid_argument,
+              fmt::format("dst_info is too wide"));
 
     using unpack_one_fn_t = auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
     auto unpack_ptr       = []() -> unpack_one_fn_t {
-#    if TCM_HAS_AVX2()
-        return &unpack_one_avx2;
-#    elif TCM_HAS_AVX()
-        if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
-        return &unpack_one_avx;
-#    else
         if (__builtin_cpu_supports("avx2")) { return &unpack_one_avx2; }
         if (__builtin_cpu_supports("avx")) { return &unpack_one_avx; }
         return &unpack_one_sse4;
-#    endif
     }();
 
     auto const number_spins = static_cast<unsigned>(dst_info.sizes[1]);
