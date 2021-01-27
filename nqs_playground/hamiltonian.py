@@ -42,6 +42,7 @@ from .core import as_spins_tensor, forward_with_batches
 __all__ = [
     "heisenberg_interaction",
     "local_values",
+    "reference_log_apply",
 ]
 
 

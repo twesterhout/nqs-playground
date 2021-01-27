@@ -180,7 +180,7 @@ def sample_exactly(
 
     number_samples = options.number_chains * options.number_samples
     if len(prob) < (1 << 24):
-        logger.info("Using torch.multinomial to sample indices...")
+        logger.debug("Using torch.multinomial to sample indices...")
         # PyTorch only supports discrete probability distributions
         # shorter than 2²⁴.
         # NOTE: replacement=True is IMPORTANT because it more closely
@@ -191,7 +191,7 @@ def sample_exactly(
             replacement=True,
         )
     else:
-        logger.info("Using numpy.random.choice to sample indices...")
+        logger.debug("Using numpy.random.choice to sample indices...")
         # If we have more than 2²⁴ different probabilities chances are,
         # NumPy will complain about probabilities not being normalised
         # since float32 precision is not enough. The simplest
