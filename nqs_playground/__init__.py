@@ -11,6 +11,8 @@ from .sampling import *
 from ._jacobian import *
 from ._C import manual_seed, random_spin
 
+from .runner import *
+
 # This operator becomes available only after loading _C
 unpack = __torch.ops.tcm.unpack
 hamming_weight = __torch.ops.tcm.hamming_weight

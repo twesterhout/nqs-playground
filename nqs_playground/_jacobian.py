@@ -45,14 +45,14 @@ if torch.has_cuda:
     from torch._utils import ExceptionWrapper
 
 
-def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
+def jacobian(module: torch.nn.Module, parameters: List[Tensor], inputs: Tensor) -> Tensor:
     r"""Given a ``torch.nn.Module`` and a ``torch.Tensor`` of inputs, computes
     the Jacobian ∂module(inputs)/∂W where W are module's parameters.
 
     It is assumed that if ``inputs`` has shape ``(batch_size, in_features)``,
     then ``module(inputs)`` has shape ``(batch_size, 1)``.
     """
-    return jacobian_simple(module, inputs)
+    return jacobian_simple(module, parameters, inputs)
     # if inputs.device.type == "cuda":
     #     return jacobian_cuda(module, inputs)
     # elif inputs.device.type == "cpu":
@@ -64,11 +64,10 @@ def jacobian(module: torch.jit.ScriptModule, inputs: Tensor) -> Tensor:
     #     )
 
 
-def jacobian_simple(module: torch.nn.Module, inputs: Tensor) -> Tensor:
+def jacobian_simple(module: torch.nn.Module, parameters: List[Tensor], inputs: Tensor) -> Tensor:
     r"""Trivial implementation of ``jacobian``. It is used to assess
     correctness of fancier techniques.
     """
-    parameters = list(module.parameters())
     out = inputs.new_empty(
         [inputs.size(0), sum(map(torch.numel, parameters))], dtype=parameters[0].dtype
     )

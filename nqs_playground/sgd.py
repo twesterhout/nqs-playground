@@ -1,4 +1,4 @@
-# Copyright Tom Westerhout (c) 2020
+# Copyright Tom Westerhout (c) 2020-2021
 #
 # All rights reserved.
 #
@@ -30,6 +30,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from collections import namedtuple
+import time
 from loguru import logger
 import numpy as np
 import torch
@@ -41,174 +42,88 @@ from . import *
 Config = namedtuple(
     "Config",
     [
-        #
-        "model",
-        "output",
+        "amplitude",
+        "phase",
         "hamiltonian",
+        "output",
         "epochs",
         "sampling_options",
-        "optimiser",
-        ## OPTIONAL
-        "device",
-        "exact",
         "sampling_mode",
+        "optimizer",
+        "exact",
+        "constraints",
         "inference_batch_size",
     ],
-    defaults=["cpu", None, "exact", 8192],
+    defaults=[],
 )
 
 
-class Runner:
+def _should_optimize(module):
+    return any(map(lambda p: p.requires_grad, module.parameters()))
+
+
+class Runner(RunnerBase):
     def __init__(self, config):
-        # "const" stuff
-        self.config = config
-        self.device = load_device(self.config)
-        self.hamiltonian = self.config.hamiltonian
-        self.basis = self.hamiltonian.basis
-        self.amplitude, self.phase = self._load_models()
-        self.optimiser = self._load_optimiser()
-        self.tb_writer = self._load_loggers()
-        self.sampling_options = self.config.sampling_options
-        self.ground_state = load_exact(self.config.exact)
-        self.inference_batch_size = self.config.inference_batch_size
-        # Mutable attributes
-        self._iteration = 0
-
-    def _load_models(self):
-        r"""Constructs amplitude and phase networks."""
-        model = self.config.model
-        if not isinstance(self.config.model, (tuple, list)):
-            raise TypeError(
-                "config.model has wrong type: {}; expected either a pair of "
-                "torch.nn.Modules or a pair of filenames".format(type(model))
-            )
-        amplitude, phase = model
-        load = lambda m: load_model(m, number_spins=self.basis.number_spins, jit=False).to(
-            self.device
-        )
-        amplitude, phase = load(amplitude), load(phase)
-        return amplitude, phase
-
-    def _load_optimiser(self):
-        return load_optimiser(
-            self.config.optimiser,
-            list(self.amplitude.parameters()) + list(self.phase.parameters()),
+        super().__init__(config)
+        self.combined_state = combine_amplitude_and_phase(
+            self.config.amplitude, self.config.phase, use_jit=False
         )
 
-    def _load_loggers(self):
-        return SummaryWriter(log_dir=self.config.output)
-
-    def _using_full_sum(self):
-        return self.config.sampling_mode == "full"
-
-    @property
-    def combined_state(self):
-        if not hasattr(self, "__combined_state"):
-            self.__combined_state = combine_amplitude_and_phase(
-                self.amplitude, self.phase, use_jit=False
-            )
-        return self.__combined_state
-
-    @torch.no_grad()
-    def compute_overlap(self):
-        if self.ground_state is None:
-            return None
-        spins = torch.from_numpy(self.basis.states.view(np.int64)).to(self.device)
-        state = forward_with_batches(self.combined_state, spins, self.inference_batch_size)
-        if state.dim() > 1:
-            state.squeeze_(dim=1)
-        state.real -= torch.max(state.real)
-        state.exp_()
-        state = state.cpu().numpy()
-        overlap = abs(np.dot(state, self.ground_state)) / np.linalg.norm(state)
-        return overlap
-
-    @torch.no_grad()
-    def sample(self):
-        logger.info("Sampling from |ψ(σ)|² with sampling_mode={}...", self.config.sampling_mode)
-        spins, log_probs, info = sample_some(
-            self.amplitude,
-            self.basis,
-            self.sampling_options,
-            mode=self.config.sampling_mode,
-        )
-        if log_probs is not None:
-            # Compute autocorrelation time based on log(|ψ(s)|²)
-            tau = integrated_autocorr_time(log_probs)
-            logger.info("Autocorrelation time of log(|ψ(σ)|²: {}", tau)
-
-        if info is not None and len(info) > 0:
-            logger.info("Additional info from the sampler: {}", info)
-        if info is None or "weights" not in info:
-            logger.debug(
-                "Sampler did not return 'weights'. We assume that no importance sampling "
-                "is used and initialize all weights with 1..."
-            )
-            if log_probs is not None:
-                weights = torch.ones_like(log_probs)
-            else:
-                weights = torch.ones(spins.size()[:-1], device=self.device)
-            weights /= torch.sum(weights)
-        else:
-            weights = info["weights"]
-        return spins, weights
-
-    def calculate_gradient(self, spins, local_loss, weights):
-        logger.info("Calculating gradients...")
-        if local_loss.dtype == torch.complex64 or local_loss.dtype == torch.complex128:
-            local_loss = local_loss.real
-        mean_loss = torch.dot(local_loss, weights)
-        grad = (local_loss - mean_loss) * weights
-        grad = grad.view(-1, 1)
-
-        def hamming_weight_loss(xs, ys):
-            loss = hamming_weight(xs, self.basis.number_spins)
-            loss = torch.abs(loss - (self.basis.number_spins // 2))
-            logger.info("Hamming weight loss: {}", loss.sum().item())
-            loss = loss.view(ys.size())
-            r = torch.logsumexp(torch.log(loss) + 2 * ys, dim=0)
-            return 10 * r
-
-        self.optimiser.zero_grad()
-        if any(map(lambda p: p.requires_grad, self.amplitude.parameters())):
-            if hasattr(self.amplitude, "log_prob"):
-                output = 0.5 * self.amplitude.log_prob(spins).view(-1, 1)
-            else:
-                output = self.amplitude(spins)
-            output.backward(grad, retain_graph=True)
-            loss = hamming_weight_loss(spins, output)
-            # if self._iteration < 100:
-            #     loss.backward()
-        if any(map(lambda p: p.requires_grad, self.phase.parameters())):
-            output = self.phase(spins)
-            output.backward(grad)
+    def hamming_weight_loss(self, states, output, target=None):
+        number_spins = self.basis.number_spins
+        if target is None:
+            target = number_spins // 2
+        loss = hamming_weight(states, number_spins)
+        loss = torch.abs(loss - target)
+        loss = loss.view(output.size())
+        r = torch.logsumexp(torch.log(loss) + 2 * output, dim=0)
+        r -= np.log(states.size(0))
+        return r, loss.sum().item()
 
     def step(self):
-        logger.info("Iteration {}...", self._iteration)
-        overlap = self.compute_overlap()
-        if overlap is not None:
-            logger.info("Overlap with ground state: {}", overlap)
-        spins, weights = self.sample()
-        local_energies = local_values(
-            spins,
-            self.hamiltonian,
-            self.combined_state,
-            batch_size=self.inference_batch_size,
-            debug=False,
-        )
-        # Compute autocorrelation time based on E_loc(σ)
-        if self.config.sampling_mode != "full":
-            tau = integrated_autocorr_time(local_energies)
-            logger.info("Autocorrelation time of local energies: {}", tau)
-        # Reshape spins to flatten dimensions representing Markov chains
-        spins = spins.view(-1, spins.size(-1))
-        local_energies = local_energies.view(-1)
+        self._epoch += 1
+        logger.info("Starting epoch {}...", self._epoch)
+        tick = time.time()
+        states, _, weights = self.do_sampling()
+        E = self.compute_local_loss(states, weights)
+        states = states.view(-1, states.size(-1))
         weights = weights.view(-1)
 
-        energy = torch.dot(local_energies, weights.to(local_energies.dtype))
-        logger.info("Energy: {}", energy)
-        variance = torch.dot(torch.abs(local_energies - energy) ** 2, weights)
-        logger.info("Energy variance: {}", variance)
-        self.calculate_gradient(spins, local_energies, weights)
-        self.optimiser.step()
-        self._iteration += 1
+        # Compute output gradient
+        with torch.no_grad():
+            grad = E.real - torch.dot(E.real, weights)
+            grad *= 2 * weights
+            grad = grad.view(-1, 1)
+
+        self.config.optimizer.zero_grad()
+        batch_size = self.config.inference_batch_size
+        # Computing gradients for the amplitude network
+        logger.info("Computing gradients...")
+        if _should_optimize(self.config.amplitude):
+            if hasattr(self.config.amplitude, "log_prob"):
+                forward_fn = lambda x: 0.5 * self.config.amplitude.log_prob(x).view(-1, 1)
+            else:
+                forward_fn = self.config.amplitude
+
+            hamming_weight_loss = 0.0
+            for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
+                output = forward_fn(states_chunk)
+                output.backward(grad_chunk)
+                loss, count = self.hamming_weight_loss(states_chunk, output)
+                hamming_weight_loss += count
+                if "hamming_weight" in self.config.constraints:
+                    loss.backward(self.config.constraints["hamming_weight"](self._epoch))
+            hamming_weight_loss /= states.size(0)
+            logger.info("Hamming weight loss: {}".format(hamming_weight_loss))
+            self._tb_writer.add_scalar("loss/hamming_weight", hamming_weight_loss, self._epoch)
+        # Computing gradients for the phase network
+        if _should_optimize(self.config.phase):
+            forward_fn = self.config.phase
+            for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
+                output = forward_fn(states_chunk)
+                output.backward(grad_chunk)
+
+        self.config.optimizer.step()
+        self.checkpoint()
+        tock = time.time()
+        logger.info("Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick)
