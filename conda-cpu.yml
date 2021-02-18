@@ -1,0 +1,26 @@
+name: nqs_devel_cpu
+channels:
+  - twesterhout
+  - pytorch-nightly
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - black # For formatting code
+  # Dependencies for Python code
+  - lattice-symmetries
+  - cpuonly
+  - pytorch
+  - numpy
+  - scipy
+  - tensorboard
+  - pip:
+    - loguru
+    - pynvim # Python support for Neovim
+    - py-spy # For performance analysis
+  # Stuff to compile the package locally
+  - gcc_linux-64
+  - gxx_linux-64
+  - cmake
+  - ninja
