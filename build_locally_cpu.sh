@@ -1,6 +1,6 @@
-#!/usr/bin/env -c bash
+#!/usr/bin/env bash
 
-set -eu
+set -e
 set -o pipefail
 
 get_repo_root() {
@@ -13,6 +13,7 @@ activate_environment() {
     conda env create --file conda-cpu.yml
   fi
   echo "Activating nqs_devel_cpu environment..."
+  . $(dirname "$CONDA_EXE")/../etc/profile.d/conda.sh
   conda activate nqs_devel_cpu
 }
 
@@ -23,7 +24,7 @@ build_cxx_code() {
   declare -r site_packages_dir=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
   cmake -GNinja \
     -DCMAKE_CXX_FLAGS="$CXXFLAGS -march=nehalem" \
-    -DCMAKE_C_FLAGS="$CFLAGS -match=nehalem" \
+    -DCMAKE_C_FLAGS="$CFLAGS -march=nehalem" \
     -DCMAKE_PREFIX_PATH="$site_packages_dir/torch/share/cmake" \
     -DCMAKE_BUILD_TYPE=Release \
     ..
@@ -43,3 +44,5 @@ main() {
   build_cxx_code
   install_python_package
 }
+
+main "$@"
