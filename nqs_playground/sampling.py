@@ -26,6 +26,7 @@ __all__ = [
     "sample_using_zanella",
     # "autocorr_function",
     "integrated_autocorr_time",
+    "sampled_histogram",
     "are_close_l1",
 ]
 
@@ -240,17 +241,22 @@ def sample_autoregressive(
 
 def metropolis_process(
     initial_state: Tensor,
-    log_prob_fn: Callable[[Tensor], Tensor],
+    _log_prob_fn: Callable[[Tensor], Tensor],
     kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
     number_samples: int,
     number_discarded: int,
     sweep_size: int,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     assert number_samples >= 1
+
+    def log_prob_fn(x):
+        y = _log_prob_fn(x)
+        if y.dim() > 1:
+            y.squeeze_(dim=1)
+        return y
+
     current_state, current_norm = initial_state
     current_log_prob = log_prob_fn(current_state)
-    if current_log_prob.dim() > 1:
-        current_log_prob.squeeze_(dim=1)
     dtype = current_log_prob.dtype
     device = current_log_prob.device
     current_norm = current_norm.to(dtype)
@@ -267,14 +273,14 @@ def metropolis_process(
         nonlocal accepted
         for i in range(sweep_size):
             proposed_state, proposed_norm = kernel_fn(current_state, dtype)
-            assert torch.all(proposed_norm > 0)
-            proposed_log_prob = log_prob_fn(proposed_state)
-            if proposed_log_prob.dim() > 1:
-                proposed_log_prob.squeeze_(dim=1)
+            state_is_valid = proposed_norm > 0
+            proposed_log_prob = current_log_prob.new_zeros((proposed_state.size(0),))
+            proposed_log_prob[state_is_valid] = log_prob_fn(proposed_state[state_is_valid])
             r = torch.rand(current_state.size(0), device=device, dtype=dtype)
-            r *= proposed_norm
-            r /= current_norm
+            r *= current_norm
+            r /= proposed_norm
             t = r <= torch.exp_(proposed_log_prob - current_log_prob)
+            t &= state_is_valid
             current_state[t] = proposed_state[t]
             current_log_prob[t] = proposed_log_prob[t]
             current_norm[t] = proposed_norm[t]
@@ -301,6 +307,7 @@ def metropolis_process(
 def sample_using_metropolis(log_prob_fn, basis, options):
     initial_state = prepare_initial_state(basis, options.number_chains)
     initial_norm = ls.batched_state_info(basis, initial_state.numpy().view(np.uint64))[2]
+    initial_norm *= initial_norm  # We need 1/N rather than 1/√N
     initial_state = initial_state.to(options.device)
     initial_norm = torch.from_numpy(initial_norm).to(options.device)
     kernel_fn = MetropolisGenerator(basis)
@@ -616,16 +623,16 @@ def integrated_autocorr_time(
 
 
 @torch.no_grad()
-def _histogram(spins: Tensor, basis) -> Tensor:
+def sampled_histogram(spins: Tensor, basis) -> Tensor:
     assert basis.number_spins <= 64
     if spins.dim() == 2:
         assert spins.size(1) == 8
         spins = spins[:, 0]
     device = spins.device
-    r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
     spins, counts = torch.unique(spins, sorted=True, return_counts=True)
     indices = ls.batched_index(basis, spins.cpu().numpy().view(np.uint64))
     indices = torch.from_numpy(indices.view(np.int64)).to(device)
+    r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
     r[indices] += counts
     return r
 
@@ -646,7 +653,7 @@ def are_close_l1(n: int, basis, sample_fn, exact: Tensor, eps: float, options):
     if info is not None:
         logger.info("Additional info from the sampler: {}", info)
     logger.info("Computing histograms...")
-    states = [_histogram(states[:m, i], basis)[order] for i, m in enumerate(ms)]
+    states = [sampled_histogram(states[:m, i], basis)[order] for i, m in enumerate(ms)]
 
     def analyze(x, k):
         v = ((x - k * exact) ** 2 - x) * exact ** (-2 / 3)

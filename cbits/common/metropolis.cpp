@@ -109,7 +109,7 @@ auto find_nth_zero(ls_bits512 const& x, unsigned const n) noexcept -> unsigned
 auto check_basis(ls_spin_basis const& basis) -> ls_spin_basis const&
 {
     TCM_CHECK(ls_get_number_spins(&basis) > 1, std::invalid_argument,
-              "'ZanellaGenerator' uses binary flips, system size must thus be at least 2");
+              "'MetropolisGenerator' uses binary flips, system size must thus be at least 2");
     return basis;
 }
 } // namespace
@@ -162,37 +162,33 @@ auto MetropolisGenerator::generate(TensorInfo<ls_bits512 const> src, TensorInfo<
     if (hamming_weight != -1) {
         loop([this, number_spins,
               hamming_weight](ls_bits512 const& x) -> std::tuple<ls_bits512, scalar_t> {
-            for (;;) {
-                auto const i = find_nth_one(
-                    x, random_bounded(static_cast<unsigned>(hamming_weight), *_generator));
-                auto const j = find_nth_zero(
-                    x, random_bounded(number_spins - static_cast<unsigned>(hamming_weight),
-                                      *_generator));
-                ls_bits512 y = x;
-                toggle_bit(y, i);
-                toggle_bit(y, j);
-                ls_bits512 repr;
-                set_zero(repr);
-                std::complex<double> character;
-                double               _norm;
-                ls_get_state_info(_basis, &y, &repr, &character, &_norm);
-                if (_norm > 0.0 && repr != x) { return {repr, static_cast<scalar_t>(_norm)}; }
-            }
+            auto const i =
+                find_nth_one(x, random_bounded(static_cast<unsigned>(hamming_weight), *_generator));
+            auto const j = find_nth_zero(
+                x,
+                random_bounded(number_spins - static_cast<unsigned>(hamming_weight), *_generator));
+            ls_bits512 y = x;
+            toggle_bit(y, i);
+            toggle_bit(y, j);
+            ls_bits512 repr;
+            set_zero(repr);
+            std::complex<double> character;
+            double               _norm;
+            ls_get_state_info(_basis, &y, &repr, &character, &_norm);
+            return {repr, static_cast<scalar_t>(_norm * _norm)};
         });
     }
     else {
         loop([this, number_spins](ls_bits512 const& x) -> std::tuple<ls_bits512, scalar_t> {
-            for (;;) {
-                auto const i = random_bounded(number_spins, *_generator);
-                ls_bits512 y = x;
-                toggle_bit(y, i);
-                ls_bits512 repr;
-                set_zero(repr);
-                std::complex<double> character;
-                double               _norm;
-                ls_get_state_info(_basis, &y, &repr, &character, &_norm);
-                if (_norm > 0.0) { return {repr, static_cast<scalar_t>(_norm)}; }
-            }
+            auto const i = random_bounded(number_spins, *_generator);
+            ls_bits512 y = x;
+            toggle_bit(y, i);
+            ls_bits512 repr;
+            set_zero(repr);
+            std::complex<double> character;
+            double               _norm;
+            ls_get_state_info(_basis, &y, &repr, &character, &_norm);
+            return {repr, static_cast<scalar_t>(_norm * _norm)};
         });
     }
 }
