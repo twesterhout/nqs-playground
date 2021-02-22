@@ -31,6 +31,7 @@
 
 __all__ = [
     # "with_file_like",
+    "setup_random_generators",
     "Unpack",
     "pack",
     "split_into_batches",
@@ -81,6 +82,33 @@ from . import _C
 #         if new_fd:
 #             f.close()
 
+def setup_random_generators(*args):
+    """Set seeds for NumPy, Torch, and nqs_playground based on args.
+
+    We convert `args` to strings, compute SHA1 of them, and use it as seed.
+    """
+    import hashlib
+
+    def get_bytes(x):
+        if isinstance(x, bytes):
+            return x
+        if isinstance(x, str):
+            return x.encode()
+        return get_bytes(str(x))
+
+    # NOTE(twesterhout): A cool hack. We hash together input files and use it as seed. That way
+    # using the same input files will produce the same seeds, but we still get different seeds for
+    # different systems.
+    sha1 = hashlib.sha1()
+    for x in args:
+        sha1.update(get_bytes(x))
+    sha1 = sha1.hexdigest()
+    seeds = int(sha1[:8], base=16), int(sha1[8:16], base=16), int(sha1[16:24], base=16)
+    logger.info("Seeding NumPy with {}, Torch with {}, nqs_playground with {}...", *seeds)
+    np.random.seed(seeds[0])
+    torch.manual_seed(seeds[1])
+    _C.manual_seed(seeds[2])
+
 
 class Unpack(torch.nn.Module):
     n: int
@@ -94,14 +122,13 @@ class Unpack(torch.nn.Module):
 
 
 def pack(xs: torch.Tensor) -> torch.Tensor:
-    import nqs_playground as nqs
-
     assert xs.dim() == 2
     assert xs.size(1) < 64
     r = torch.zeros(xs.size(0), dtype=torch.int64, device=xs.device)
     for i in range(xs.size(1)):
         r |= (xs[:, i] == 1).long() << i
-    assert torch.all((nqs.unpack(r, xs.size(1)) + 1) / 2 == xs)
+    # print(xs, torch.ops.tcm.unpack(r, xs.size(1)))
+    assert torch.all(torch.ops.tcm.unpack(r, xs.size(1)) == xs)
     return r
 
 
