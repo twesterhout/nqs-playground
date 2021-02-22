@@ -46,7 +46,9 @@ __all__ = [
 ]
 
 
-def heisenberg_interaction(edges: List[Tuple[int, int]], coupling: complex) -> Interaction:
+def heisenberg_interaction(
+    edges: List[Tuple[int, int]], coupling: complex = 1.0, sign_rule: bool = False
+) -> Interaction:
     coupling = complex(coupling)
     if coupling.imag != 0.0:
         logger.warn(
@@ -54,12 +56,19 @@ def heisenberg_interaction(edges: List[Tuple[int, int]], coupling: complex) -> I
             "Please, be careful as it might lead to your Hamiltonian being non-Hermitian!"
         )
     # fmt: off
-    matrix = np.array([[1,  0,  0, 0],
-                       [0, -1,  2, 0],
-                       [0,  2, -1, 0],
-                       [0,  0,  0, 1]])
+    if sign_rule:
+        matrix = np.array([[1,  0,  0, 0],
+                           [0, -1, -2, 0],
+                           [0, -2, -1, 0],
+                           [0,  0,  0, 1]], dtype=np.complex128)
+    else:
+        matrix = np.array([[1,  0,  0, 0],
+                           [0, -1,  2, 0],
+                           [0,  2, -1, 0],
+                           [0,  0,  0, 1]], dtype=np.complex128)
     # fmt: on
-    return Interaction(matrix, coupling)
+    matrix *= coupling
+    return Interaction(matrix, edges)
 
 
 def _array_to_int(xs) -> int:
