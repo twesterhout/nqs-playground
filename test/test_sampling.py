@@ -99,9 +99,9 @@ def notest_via_l1_closeness():
 
 def test_via_chisquare():
     ε = 1e-4
-    for n in [4, 6, 8]:
+    for n in [6, 4]:
         info = prepare_even_chain(n)
-        options = nqs.SamplingOptions(number_samples=10000, number_chains=32, sweep_size=n)
+        options = nqs.SamplingOptions(number_samples=100000, number_chains=32, sweep_size=n)
         for mode in ["metropolis", "zanella"]:
             for variant in ["full", "symm"]:
                 data = info[variant]
