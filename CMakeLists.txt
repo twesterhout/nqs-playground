@@ -12,6 +12,8 @@ project(nqs_cbits
     DESCRIPTION "_C Python extension for nqs_playground"
     LANGUAGES C CXX)
 
+option(NQS_PLAYGROUND_USE_CUDA "Try to compile with GPU support" ON)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -36,7 +38,7 @@ elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
         -Wlogical-op -Wmissing-declarations -Wmissing-include-dirs -Wnoexcept
         -Wold-style-cast -Woverloaded-virtual -Wredundant-decls -Wshadow
         -Wsign-conversion -Wsign-promo -Wstrict-null-sentinel
-        -Wstrict-overflow=5 -Wswitch-default -Wundef -Wno-unused)
+        -Wstrict-overflow=2 -Wswitch-default -Wundef -Wno-unused)
 endif()
 
 ###############################################################################
@@ -151,7 +153,7 @@ function(nqs_cbits_add_low_level_flags MY_TARGET)
 endfunction()
 
 # {fmt} library
-if(NOT TARGET fmt::fmt)
+# if(NOT TARGET fmt::fmt)
     execute_process(COMMAND git submodule update --init -- external/fmt
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     option(FMT_PEDANTIC ON)
@@ -161,11 +163,11 @@ if(NOT TARGET fmt::fmt)
     # of warnings...
     get_property(v TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
     set_property(TARGET fmt PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
-    target_include_directories(fmt SYSTEM BEFORE INTERFACE ${v})
+    target_include_directories(fmt SYSTEM INTERFACE ${v})
     get_property(v TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
     set_property(TARGET fmt-header-only PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
     target_include_directories(fmt-header-only SYSTEM BEFORE INTERFACE ${v})
-endif()
+# endif()
 
 # gsl-lite library
 if(NOT TARGET gsl::gsl-lite)
@@ -227,7 +229,7 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
 endif()
 target_link_libraries(nqs_cbits_Common INTERFACE
     INTERFACE torch
-              fmt::fmt-header-only
+              fmt
               gsl::gsl-lite
               SG14
               PkgConfig::lattice_symmetries

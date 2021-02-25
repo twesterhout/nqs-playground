@@ -89,9 +89,9 @@ TCM_EXPORT auto unpack_cpu(TensorInfo<uint64_t const, 2> const& src_info,
 {
     if (src_info.size<0>() == 0) { return; }
     TCM_CHECK(dst_info.strides[0] == dst_info.size<1>(), std::invalid_argument,
-              fmt::format("unpack_cpu does not support strided output tensors"));
+              "unpack_cpu does not support strided output tensors");
     TCM_CHECK(dst_info.size<1>() <= 64 * src_info.size<1>(), std::invalid_argument,
-              fmt::format("dst_info is too wide"));
+              "dst_info is too wide");
 
     using unpack_one_fn_t = auto (*)(uint64_t const[], unsigned, float*) noexcept->void;
     auto unpack_ptr       = []() -> unpack_one_fn_t {

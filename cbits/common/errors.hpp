@@ -29,18 +29,7 @@
 #pragma once
 
 #include "config.hpp"
-
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wmissing-noreturn"
-#    pragma clang diagnostic ignored "-Wsign-conversion"
-#    pragma clang diagnostic ignored "-Wswitch-enum"
-#    pragma clang diagnostic ignored "-Wundefined-func-template"
-#endif
 #include <fmt/format.h>
-#if defined(TCM_CLANG)
-#    pragma clang diagnostic pop
-#endif
 
 #include <torch/types.h> // torch::ScalarType
 #include <string>

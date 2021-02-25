@@ -1,6 +1,9 @@
 # Determine if we have nvcc
-include(CheckLanguage)
-check_language(CUDA)
+
+if(NQS_PLAYGROUND_USE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+endif()
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     if(NOT DEFINED CMAKE_CUDA_STANDARD)
