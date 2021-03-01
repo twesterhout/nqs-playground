@@ -1,0 +1,8 @@
+name: nqs_conda_build
+channels:
+  - defaults
+dependencies:
+  - python=3.8 # Anaconda client fails with Python 3.9, see https://github.com/Anaconda-Platform/anaconda-client/issues/555
+  - anaconda-client
+  - conda-build
+  - conda-verify
