@@ -1,0 +1,36 @@
+{% set data = load_setup_py_data() %}
+
+package:
+  name: nqs-playground
+  version: {{ data.get('version') }}
+
+source:
+  path: ../../
+ 
+build:
+  number: 1
+  string: py{{ python }}_torch{{ pytorch }}_ls{{ ls }}_cpu
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+
+  host:
+    - python {{ python }}
+    - cmake
+    - ninja
+    - cpuonly
+    - pytorch {{ pytorch }}
+    - lattice-symmetries {{ ls }}
+
+  run:
+    - _openmp_mutex
+    - python
+    - numpy
+    - scipy
+    - psutil
+    - loguru
+    - tensorboard >=2.0
+    - {{ pin_compatible('pytorch', min_pin='x.x.x', max_pin='x.x.x') }}
+    - {{ pin_compatible('lattice-symmetries', min_pin='x.x.x', max_pin='x.x.x') }}
