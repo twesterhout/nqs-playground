@@ -11,22 +11,22 @@ get_repo_root() {
 
 activate_environment() {
   if [ $USE_CUDA -eq 0 ]; then
-	  declare -r env_name="nqs_devel_cpu"
-	  declare -r env_file="conda-cpu.yml"
+    declare -r env_name="nqs_devel_cpu"
+    declare -r env_file="conda-cpu.yml"
   else
-	  declare -r env_name="nqs_devel_gpu"
-	  declare -r env_file="conda-gpu.yml"
+    declare -r env_name="nqs_devel_gpu"
+    declare -r env_file="conda-gpu.yml"
   fi
   if ! conda env list | grep -q "$env_name"; then
     echo "You do not have $env_name Conda environment. Creating it..."
     conda env create --file "$env_file"
   fi
   if ! echo "$CONDA_DEFAULT_ENV" | grep -q "$env_name"; then
-	echo "Activating $env_name environment..."
-	if ! which activate; then
-	  . $(dirname "$CONDA_EXE")/../etc/profile.d/conda.sh
-	fi
-	conda activate "$env_name"
+    echo "Activating $env_name environment..."
+    if ! which activate; then
+      . $(dirname "$CONDA_EXE")/../etc/profile.d/conda.sh
+    fi
+    conda activate "$env_name"
   fi
 }
 
@@ -36,13 +36,13 @@ build_cxx_code() {
   pushd build
   declare -r site_packages_dir=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
   cmake -GNinja \
-	$CMAKE_ARGS \
-	-DCMAKE_CUDA_FLAGS="-cudart shared --compiler-options -march=nehalem" \
+    $CMAKE_ARGS \
+    -DCMAKE_CUDA_FLAGS="-cudart shared --compiler-options -march=nehalem" \
     -DCMAKE_CXX_FLAGS="$CXXFLAGS -march=nehalem" \
     -DCMAKE_C_FLAGS="$CFLAGS -march=nehalem" \
     -DCMAKE_PREFIX_PATH="$site_packages_dir/torch/share/cmake" \
     -DCMAKE_BUILD_TYPE=Release \
-	-DNQS_PLAYGROUND_USE_CUDA=$USE_CUDA \
+    -DNQS_PLAYGROUND_USE_CUDA=$USE_CUDA \
     ..
   cmake --build . --target install
   popd
@@ -80,8 +80,8 @@ main() {
       ;;
     *)
       echo "Error: unexpected argument '$1'"
-	  print_help
-	  exit 1
+      print_help
+      exit 1
       ;;
     esac
   done
