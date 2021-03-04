@@ -23,9 +23,9 @@ activate_environment() {
   fi
   if ! echo "$CONDA_DEFAULT_ENV" | grep -q "$env_name"; then
     echo "Activating $env_name environment..."
-    if ! which activate; then
-      . $(dirname "$CONDA_EXE")/../etc/profile.d/conda.sh
-    fi
+    # if ! which activate; then
+    . $(dirname "$CONDA_EXE")/../etc/profile.d/conda.sh
+    # fi
     conda activate "$env_name"
   fi
 }
