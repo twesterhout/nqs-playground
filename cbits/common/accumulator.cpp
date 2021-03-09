@@ -71,7 +71,7 @@ TCM_NOINLINE auto Task::operator()() const -> std::tuple<torch::Tensor, bool>
     TCM_ASSERT(!torch::any(torch::isnan(output)).item<bool>(), "");
     auto const dtype = output.dtype();
     auto       real  = torch::real(output);
-    auto const scale = torch::max(real);
+    auto const scale = torch::max(real).item();
     real -= scale;
     output.exp_();
 
