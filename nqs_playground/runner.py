@@ -60,11 +60,16 @@ class RunnerBase:
 
     @torch.no_grad()
     def do_sampling(self):
-        logger.info("Sampling from |ψ(σ)|² with sampling_mode='{}'...", self.config.sampling_mode)
+        logger.info(
+            "Sampling from |ψ(σ)|² with sampling_mode='{}'...",
+            self.config.sampling_mode,
+        )
         states, log_probs, info = sample_some(
             self.config.amplitude,
             self.basis,
-            self.config.sampling_options,
+            self.config.sampling_options._replace(
+                device=_get_device(self.config.amplitude)
+            ),
             mode=self.config.sampling_mode,
         )
         if states.dim() == 2:
@@ -91,32 +96,38 @@ class RunnerBase:
         else:
             weights = info["weights"]
             del info["weights"]
-            assert torch.isclose(torch.sum(weights), torch.scalar_tensor(1, dtype=weights.dtype))
+            assert torch.isclose(
+                torch.sum(weights), torch.scalar_tensor(1, dtype=weights.dtype)
+            )
         if info is not None and len(info) > 0:
             logger.info("Additional info from the sampler: {}", info)
             for (k, v) in info.items():
                 self._tb_writer.add_scalar("sampling/{}".format(k), v, self._epoch)
         return states, log_probs, weights
 
-    def checkpoint(self):
+    def checkpoint(self, init=None):
+        if hasattr(self.config, "checkpoint_every"):
+            checkpoint_every = self.config.checkpoint_every
+        else:
+            checkpoint_every = 1
+        if self._epoch % checkpoint_every != 0:
+            return
+
         logger.info("Saving weights...")
-        folder = os.path.join(self.config.output, "epochs", "{:04d}".format(self._epoch))
+        folder = os.path.join(self.config.output, "checkpoints")
         os.makedirs(folder, exist_ok=True)
-        torch.save(
-            self.config.amplitude.state_dict(),
-            os.path.join(folder, "amplitude_weights.pt"),
-        )
+
+        state = init
+        if state is None:
+            state = {}
+        state["amplitude"] = self.config.amplitude.state_dict()
         # We do not know whether phase of sign network is used, so we check both
         if hasattr(self.config, "phase"):
-            torch.save(
-                self.config.phase.state_dict(),
-                os.path.join(folder, "phase_weights.pt"),
-            )
+            state["phase"] = self.config.phase.state_dict()
         if hasattr(self.config, "sign"):
-            torch.save(
-                self.config.sign.state_dict(),
-                os.path.join(folder, "sign_weights.pt"),
-            )
+            state["sign"] = self.config.sign.state_dict()
+
+        torch.save(state, os.path.join(folder, "state_dict_{:04d}.pt".format(self._epoch)))
 
     @torch.no_grad()
     def compute_local_loss(self, states, weights):
@@ -134,7 +145,8 @@ class RunnerBase:
         local_energies = local_energies.view(-1)
         weights = weights.view(-1)
         energy = torch.complex(
-            torch.dot(weights, local_energies.real), torch.dot(weights, local_energies.imag)
+            torch.dot(weights, local_energies.real),
+            torch.dot(weights, local_energies.imag),
         )
         logger.info("Energy: {}", energy.item())
         self._tb_writer.add_scalar("loss/energy_real", energy.real.item(), self._epoch)

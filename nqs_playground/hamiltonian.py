@@ -151,7 +151,6 @@ def local_values(
     if isinstance(state, torch.jit.ScriptModule):
         state = state._c._get_method("forward")
     # Compute log(⟨s|H|ψ⟩) for all s.
-    logger.debug("Using _C.log_apply...")
     log_h_psi = _C.log_apply(spins, hamiltonian, state, batch_size)
     if debug:
         logger.debug("Checking against reference_log_apply...")

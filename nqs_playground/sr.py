@@ -61,9 +61,12 @@ Config = namedtuple(
 )
 
 
+@torch.no_grad()
 def solve_linear_problem(A: Tensor, b: Tensor, rcond: float) -> Tensor:
     r"""Solve linear problem `A · x = b` where `A` is approximately positive-definite."""
-    u, s, v = torch.svd(A)
+    logger.debug("Computing SVD of {} matrix...", A.size())
+    u, s, v = (t.to(A.device) for t in torch.svd(A.cpu()))
+    logger.debug("Computing inverse...")
     s_inv = torch.where(
         s > rcond * torch.max(s),
         torch.reciprocal(s),
@@ -76,7 +79,11 @@ def _compute_centered_jacobian(module, inputs, weights):
     parameters = list(filter(lambda p: p.requires_grad, module.parameters()))
     if len(parameters) > 0:
         logger.info("Calculating jacobian...")
-        gradients = jacobian(module, parameters, inputs)
+        if hasattr(module, "log_prob"):
+            f = lambda x: module.log_prob(x)
+        else:
+            f = module
+        gradients = jacobian(f, parameters, inputs)
         with torch.no_grad():
             gradients -= weights @ gradients
         return gradients
@@ -91,7 +98,9 @@ def compute_centered_jacobian(amplitude, phase, inputs, weights):
     return Ore, Oim
 
 
-def _compute_gradient_with_curvature(O: Tensor, E: Tensor, weights: Tensor, **kwargs) -> Tensor:
+def _compute_gradient_with_curvature(
+    O: Tensor, E: Tensor, weights: Tensor, **kwargs
+) -> Tensor:
     if O is None:
         return None
     logger.debug("Computing simple gradient...")
@@ -125,7 +134,9 @@ def compute_gradient_with_curvature(
 class Runner(RunnerBase):
     def __init__(self, config):
         super().__init__(config)
-        self.combined_state = combine_amplitude_and_phase(self.config.amplitude, self.config.phase)
+        self.combined_state = combine_amplitude_and_phase(
+            self.config.amplitude, self.config.phase, use_jit=False
+        )
 
     @torch.no_grad()
     def _set_gradient(self, grads):
@@ -152,10 +163,16 @@ class Runner(RunnerBase):
         E = self.compute_local_loss(states, weights)
         states = states.view(-1, states.size(-1))
         weights = weights.view(-1)
-        Os = compute_centered_jacobian(self.config.amplitude, self.config.phase, states, weights)
-        grads = compute_gradient_with_curvature(*Os, E, weights, **self.config.linear_system_kwargs)
+        Os = compute_centered_jacobian(
+            self.config.amplitude, self.config.phase, states, weights
+        )
+        grads = compute_gradient_with_curvature(
+            *Os, E, weights, **self.config.linear_system_kwargs
+        )
         self._set_gradient(grads)
         self.config.optimizer.step()
         self.checkpoint()
         tock = time.time()
-        logger.info("Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick)
+        logger.info(
+            "Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick
+        )

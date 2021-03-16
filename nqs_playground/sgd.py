@@ -50,9 +50,11 @@ Config = namedtuple(
         "sampling_options",
         "sampling_mode",
         "optimizer",
+        "scheduler",
         "exact",
         "constraints",
         "inference_batch_size",
+        "checkpoint_every",
     ],
     defaults=[],
 )
@@ -73,7 +75,8 @@ class Runner(RunnerBase):
         number_spins = self.basis.number_spins
         if target is None:
             target = number_spins // 2
-        loss = hamming_weight(states, number_spins)
+        device = states.device
+        loss = hamming_weight(states.cpu(), number_spins).to(device)
         loss = torch.abs(loss - target)
         loss = loss.view(output.size())
         r = torch.logsumexp(torch.log(loss) + 2 * output, dim=0)
@@ -105,18 +108,21 @@ class Runner(RunnerBase):
             else:
                 forward_fn = self.config.amplitude
 
-            hamming_weight_loss = 0.0
+            if "hamming_weight" in self.config.constraints:
+                hamming_weight_loss = 0.0
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)
                 output.backward(grad_chunk, retain_graph=True)
-                loss, count = self.hamming_weight_loss(states_chunk, output)
-                hamming_weight_loss += count
-                if "hamming_weight" in self.config.constraints and count > 0:
-                    loss = self.config.constraints["hamming_weight"](self._epoch) * loss
-                    loss.backward()
-            hamming_weight_loss /= states.size(0)
-            logger.info("Hamming weight loss: {}".format(hamming_weight_loss))
-            self._tb_writer.add_scalar("loss/hamming_weight", hamming_weight_loss, self._epoch)
+                if "hamming_weight" in self.config.constraints:
+                    loss, count = self.hamming_weight_loss(states_chunk, output)
+                    hamming_weight_loss += count
+                    if count > 0:
+                        loss = self.config.constraints["hamming_weight"](self._epoch) * loss
+                        loss.backward()
+            if "hamming_weight" in self.config.constraints:
+                hamming_weight_loss /= states.size(0)
+                logger.info("Hamming weight loss: {}".format(hamming_weight_loss))
+                self._tb_writer.add_scalar("loss/hamming_weight", hamming_weight_loss, self._epoch)
         # Computing gradients for the phase network
         if _should_optimize(self.config.phase):
             forward_fn = self.config.phase
@@ -125,6 +131,8 @@ class Runner(RunnerBase):
                 output.backward(grad_chunk)
 
         self.config.optimizer.step()
-        self.checkpoint()
+        if self.config.scheduler is not None:
+            self.config.scheduler.step()
+        self.checkpoint({"optimizer": self.config.optimizer.state_dict()})
         tock = time.time()
         logger.info("Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick)
