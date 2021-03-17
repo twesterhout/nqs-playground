@@ -17,8 +17,8 @@ struct OutInfo {
     int32_t const stride[2];
 };
 
-__device__ inline auto unpack_one(uint64_t bits, int32_t const count, float* const out,
-                                  int32_t const stride) noexcept -> void
+__device__ inline auto unpack_rest(uint64_t bits, int32_t const count, float* const out,
+                                   int32_t const stride) noexcept -> void
 {
     for (auto i = 0; i < count; ++i, bits >>= 1) {
         out[i * stride] = 2.0f * static_cast<float>(bits & 0x01) - 1.0f;
@@ -33,8 +33,8 @@ __device__ inline auto unpack_word(uint64_t bits, float* const out, int32_t cons
     }
 }
 
-__device__ inline auto unpack_one(uint64_t const bits[], int32_t const count, float* out,
-                                  int32_t const stride) noexcept -> void
+__device__ inline auto unpack_full(uint64_t const bits[], int32_t const count, float* out,
+                                   int32_t const stride) noexcept -> void
 {
     constexpr auto block = 64;
 
@@ -45,7 +45,7 @@ __device__ inline auto unpack_one(uint64_t const bits[], int32_t const count, fl
     {
         auto const rest = count % block;
         if (rest != 0) {
-            unpack_one(bits[i], rest, out, stride);
+            unpack_rest(bits[i], rest, out, stride);
             // out += rest * stride;
         }
     }
@@ -57,8 +57,8 @@ __global__ auto unpack_kernel_cuda(TensorInfo<uint64_t const, 2> const spins,
     auto const idx    = blockIdx.x * blockDim.x + threadIdx.x;
     auto const stride = blockDim.x * gridDim.x;
     for (auto i = idx; i < out.sizes[0]; i += stride) {
-        unpack_one(spins.data[i * spins.strides[0]], out.sizes[1], out.data + i * out.strides[0],
-                   out.strides[1]);
+        unpack_full(spins.data + i * spins.strides[0], out.sizes[1], out.data + i * out.strides[0],
+                    out.strides[1]);
     }
 }
 } // namespace detail
