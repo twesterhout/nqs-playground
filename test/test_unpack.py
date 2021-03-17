@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+
 try:
     from nqs_playground import *
 except ImportError:
@@ -11,7 +12,7 @@ except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
     from nqs_playground import *
 
-np.random.seed(52339877)
+rng = np.random.default_rng(seed=52339877)
 torch.manual_seed(9218823294)
 # manual_seed(3362121853)
 
@@ -35,9 +36,7 @@ def unpack_complete(spins):
 
 @torch.no_grad()
 def generate(batch_size, device):
-    data = np.random.default_rng().integers(
-        1 << 64 - 1, size=(batch_size, 8), dtype=np.uint64, endpoint=True
-    )
+    data = rng.integers(1 << 64 - 1, size=(batch_size, 8), dtype=np.uint64, endpoint=True)
     data = torch.from_numpy(data.view(np.int64)).clone().to(device)
     return data
 

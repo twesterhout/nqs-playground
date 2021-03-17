@@ -630,7 +630,7 @@ def sampled_histogram(spins: Tensor, basis) -> Tensor:
         spins = spins[:, 0]
     device = spins.device
     spins, counts = torch.unique(spins, sorted=True, return_counts=True)
-    indices = ls.batched_index(basis, spins.cpu().numpy().view(np.uint64))
+    indices = basis.batched_index(spins.cpu().numpy().view(np.uint64))
     indices = torch.from_numpy(indices.view(np.int64)).to(device)
     r = torch.zeros(basis.number_states, device=device, dtype=torch.int64)
     r[indices] += counts
