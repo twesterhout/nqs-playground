@@ -28,6 +28,7 @@
 
 #include "random.hpp"
 #include <random>
+#include <omp.h>
 
 TCM_NAMESPACE_BEGIN
 
@@ -47,6 +48,15 @@ TCM_EXPORT auto global_random_generator() -> RandomGenerator&
 {
     static thread_local RandomGenerator generator{detail::really_need_that_random_seed_now()};
     return generator;
+}
+
+TCM_EXPORT auto manual_seed(uint64_t const seed) -> void
+{
+#pragma omp parallel default(none) firstprivate(seed)
+    {
+        auto i = omp_get_thread_num();
+        global_random_generator().seed(seed + static_cast<unsigned>(i));
+    }
 }
 
 TCM_NAMESPACE_END

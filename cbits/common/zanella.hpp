@@ -37,10 +37,11 @@ TCM_NAMESPACE_BEGIN
 
 class ZanellaGenerator {
   private:
-    gsl::not_null<ls_spin_basis const*> _basis;
+    gsl::not_null<ls_spin_basis const*>        _basis;
+    std::vector<std::pair<unsigned, unsigned>> _edges;
 
   public:
-    ZanellaGenerator(ls_spin_basis const& basis);
+    ZanellaGenerator(ls_spin_basis const& basis, std::vector<std::pair<unsigned, unsigned>> edges);
     ~ZanellaGenerator();
 
     auto operator()(torch::Tensor x) const -> std::tuple<torch::Tensor, torch::Tensor>;
@@ -58,7 +59,10 @@ class ZanellaGenerator {
     }
 
   private:
-    auto generate(ls_bits512 const& spin, TensorInfo<ls_bits512, 1> out) const -> unsigned;
+    auto generate_general(ls_bits512 const& spin, TensorInfo<ls_bits512> out) const -> int64_t;
+    auto project_states(TensorInfo<ls_bits512> spins, int64_t count, int num_threads) const -> int64_t;
+
+    // auto generate(ls_bits512 const& spin, TensorInfo<ls_bits512, 1> out) const -> unsigned;
 };
 
 auto zanella_choose_samples(torch::Tensor weights, int64_t number_samples, double time_step,
