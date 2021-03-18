@@ -186,11 +186,7 @@ def sample_exactly(
         # shorter than 2²⁴.
         # NOTE: replacement=True is IMPORTANT because it more closely
         # emulates the actual Monte Carlo behaviour
-        indices = torch.multinomial(
-            prob,
-            num_samples=number_samples,
-            replacement=True,
-        )
+        indices = torch.multinomial(prob, num_samples=number_samples, replacement=True,)
     else:
         logger.debug("Using numpy.random.choice to sample indices...")
         # If we have more than 2²⁴ different probabilities chances are,
@@ -325,6 +321,7 @@ def sample_using_metropolis(log_prob_fn, basis, options):
     return states, log_probs, info
 
 
+@torch.jit.script
 @torch.no_grad()
 def _zanella_jump_rates(current_log_prob: Tensor, possible_log_prob: Tensor) -> Tensor:
     r"""Calculate jump rates (i.e. probabilities) for all possible states.
@@ -346,20 +343,22 @@ def _zanella_jump_rates(current_log_prob: Tensor, possible_log_prob: Tensor) -> 
     return torch.minimum(r, torch.scalar_tensor(1), out=r)
 
 
+@torch.jit.script
 @torch.no_grad()
 def _sample_exponential(rates: Tensor, out: Tensor) -> Tensor:
     r"""Sample from exponential distribution with given rates."""
     if rates.size() != out.size():
         raise ValueError("'out' has wrong shape: {}; expected {}".format(out.size(), rates.size()))
-    return out.copy_(torch.distributions.Exponential(rates).sample())
-    # out = torch.rand(*rates.size(), out=out)
-    # out *= -1
-    # out = torch.log1p_(out)
-    # out *= -1
-    # out /= rates
-    # return out
+    out = torch.rand(rates.size(), out=out)
+    out *= -1
+    torch.log1p_(out)
+    out *= -1
+    out /= rates
+    return out
+    # return out.copy_(torch.distributions.Exponential(rates).sample())
 
 
+@torch.jit.script
 @torch.no_grad()
 def _zanella_next_state_index(rates: Tensor) -> Tensor:
     r"""Choose indices of states to which to move.
@@ -371,6 +370,7 @@ def _zanella_next_state_index(rates: Tensor) -> Tensor:
     return torch.multinomial(rates, num_samples=1).view(-1)
 
 
+@torch.jit.script
 @torch.no_grad()
 def _zanella_update_current(possible: Tensor, indices: Tensor, out: Tensor) -> Tensor:
     r"""Pick the next state from `possible` based on `indices` and store it to `out`.
@@ -381,29 +381,52 @@ def _zanella_update_current(possible: Tensor, indices: Tensor, out: Tensor) -> T
     :param indices: a tensor of shape `(number_chains,)`.
     :param out: a tensor of shape `(number_chains, K)`.
     """
-    (number_chains, max_number_states, *extra) = possible.size()
     offsets = torch.arange(
         start=0,
-        end=number_chains * max_number_states,
-        step=max_number_states,
+        end=possible.size(0) * possible.size(1),
+        step=possible.size(1),
         dtype=indices.dtype,
         device=indices.device,
     )
     offsets += indices
-    torch.index_select(possible.view(-1, *extra), dim=0, index=offsets, out=out)
+    torch.index_select(possible.flatten(0, 1), dim=0, index=offsets, out=out)
     return out
 
 
+# @torch.no_grad()
+# def _pad_log_prob(log_probs: Tensor, counts: Tensor, value: float) -> Tensor:
+#     indices = torch.arange(log_probs.size(1), device=log_probs.device).view(1, -1)
+#     return log_probs.masked_fill_(indices >= counts.view(-1, 1), value)
+
+
+@torch.jit.script
 @torch.no_grad()
-def _pad_log_prob(log_probs: Tensor, counts: Tensor, value: float) -> Tensor:
-    indices = torch.arange(log_probs.size(1), device=log_probs.device).view(1, -1)
-    return log_probs.masked_fill_(indices >= counts.view(-1, 1), value)
+def _flatten_states(states: Tensor, counts: Tensor, total_count: int) -> Tensor:
+    flat_states = states.new_empty((total_count, states.size(-1)))
+    offset = 0
+    for i in range(counts.size(0)):
+        n = counts[i].item()
+        flat_states[offset : offset + n].copy_(states[i, :n], non_blocking=True)
+        offset += n
+    return flat_states
+
+
+@torch.jit.script
+@torch.no_grad()
+def _unflatten_log_probs(flat_log_probs: Tensor, counts: Tensor, max_count: int) -> Tensor:
+    log_probs = flat_log_probs.new_full((counts.size(0), max_count), -1e7)
+    offset = 0
+    for i in range(counts.size(0)):
+        n = counts[i].item()
+        log_probs[i, :n].copy_(flat_log_probs[offset : offset + n], non_blocking=True)
+        offset += n
+    return log_probs
 
 
 @torch.no_grad()
 def zanella_process(
     current_state: Tensor,
-    log_prob_fn: Callable[[Tensor], Tensor],
+    _log_prob_fn: Callable[[Tensor], Tensor],
     generator_fn: Callable[[Tensor], Tuple[Tensor, List[int]]],
     number_samples: int,
     number_discarded: int,
@@ -418,20 +441,18 @@ def zanella_process(
     :param generator_fn:
     :param number_samples:
     """
-    if number_samples < 1:
-        raise ValueError(
-            "invalid 'number_samples': {}; expected a positive integer".format(number_samples)
-        )
-    if number_discarded < 0:
-        raise ValueError(
-            "invalid 'number_discarded': {}; expected a positive integer".format(number_discarded)
-        )
+    assert number_samples >= 1
+
+    def log_prob_fn(x):
+        y = _log_prob_fn(x)
+        if y.dim() > 1:
+            y.squeeze_(dim=1)
+        return y
+
     # Device is determined by the location of initial state
     device = current_state.device
     (number_chains, configuration_size) = current_state.size()
     current_log_prob = log_prob_fn(current_state)
-    if current_log_prob.dim() > 1:
-        current_log_prob.squeeze_(dim=1)
     # Number of chains is also deduced from current_state. It is simply
     # current_state.size(0). In the following we pre-allocate storage for
     # states and log probabilities.
@@ -449,16 +470,20 @@ def zanella_process(
 
     # Main loop. We keep track of the iteration manually since we want to stop
     # in the middle of the loop body rather than at the end. We also keep a
-    # flag which indicated whether we are still in the thermalisation phase and
+    # flag which indicates whether we are still in the thermalisation phase and
     # that samples should be discarded
     iteration = 0
     discard = True
     while True:
         # Generates all states to which we could jump
         possible_states, counts = generator_fn(current_state)
-        possible_log_probs = log_prob_fn(possible_states.view(-1, configuration_size))
-        possible_log_probs = possible_log_probs.view(number_chains, -1)
-        _pad_log_prob(possible_log_probs, counts, value=-1e7)
+        total_count = torch.sum(counts).item()
+        max_count = possible_states.size(1)
+        flat_possible_states = _flatten_states(possible_states, counts, total_count)
+        flat_possible_log_probs = log_prob_fn(flat_possible_states)
+        possible_log_probs = _unflatten_log_probs(flat_possible_log_probs, counts, max_count)
+        # possible_log_probs = possible_log_probs.view(number_chains, -1)
+        # _pad_log_prob(possible_log_probs, counts, value=-1e7)
         jump_rates = _zanella_jump_rates(current_log_prob, possible_log_probs)
         # Calculate for how long we have to sit in the current state
         # Note that only now have we computed all quantities for `iteration`.
@@ -485,10 +510,15 @@ def zanella_process(
 
 
 @torch.no_grad()
-def sample_using_zanella(log_prob_fn, basis, options):
+def sample_using_zanella(log_prob_fn, basis, options, edges=None):
     current_state = prepare_initial_state(basis, options.number_chains)
     current_state = current_state.to(options.device)
-    generator_fn = ZanellaGenerator(basis)
+    if edges is None:
+        edges: List[Tuple[int, int]] = []
+        for i in range(basis.number_spins - 1):
+            for j in range(i + 1, basis.number_spins):
+                edges.append((i, j))
+    generator_fn = ZanellaGenerator(basis, edges)
     sweep_size = options.sweep_size
     t1 = time.time()
     states, log_probs, weights = zanella_process(
@@ -520,8 +550,9 @@ def sample_some(
     log_ψ: Callable[[Tensor], Tensor],
     basis,
     options: SamplingOptions,
-    mode="exact",
+    mode: str = "exact",
     is_log_prob_fn: bool = False,
+    **kwargs
 ) -> Tuple[Tensor, Tensor, Optional[Any]]:
     if is_log_prob_fn or mode == "autoregressive":
         log_prob_fn = log_ψ
@@ -533,15 +564,15 @@ def sample_some(
             return x
 
     if mode == "exact":
-        return sample_exactly(log_prob_fn, basis, options)
+        return sample_exactly(log_prob_fn, basis, options, **kwargs)
     elif mode == "full":
-        return sample_full(log_prob_fn, basis, options)
+        return sample_full(log_prob_fn, basis, options, **kwargs)
     elif mode == "autoregressive":
-        return sample_autoregressive(log_prob_fn, basis, options)
+        return sample_autoregressive(log_prob_fn, basis, options, **kwargs)
     elif mode == "metropolis":
-        return sample_using_metropolis(log_prob_fn, basis, options)
+        return sample_using_metropolis(log_prob_fn, basis, options, **kwargs)
     elif mode == "zanella":
-        return sample_using_zanella(log_prob_fn, basis, options)
+        return sample_using_zanella(log_prob_fn, basis, options, **kwargs)
     else:
         supported = {"exact", "full", "autoregressive", "metropolis", "zanella"}
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
