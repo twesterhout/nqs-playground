@@ -10,13 +10,23 @@ get_repo_root() {
 }
 
 activate_environment() {
-  if [ $USE_CUDA -eq 0 ]; then
-    declare -r env_name="nqs_devel_cpu"
-    declare -r env_file="conda-cpu.yml"
-  else
-    declare -r env_name="nqs_devel_gpu"
-    declare -r env_file="conda-gpu.yml"
-  fi
+  declare -r HOST=$(hostname)
+  case $HOST in
+	  int*.bullx|gcn*.bullx)
+		  # We're on Cartesius
+		  declare -r env_name="cartesius_devel"
+		  declare -r env_file="cartesius/conda-cartesius.yml"
+		  ;;
+	  *)
+		  if [ $USE_CUDA -eq 0 ]; then
+			declare -r env_name="nqs_devel_cpu"
+			declare -r env_file="conda-cpu.yml"
+		  else
+			declare -r env_name="nqs_devel_gpu"
+			declare -r env_file="conda-gpu.yml"
+		  fi
+		  ;;
+  esac
   if ! conda env list | grep -q "$env_name"; then
     echo "You do not have $env_name Conda environment. Creating it..."
     conda env create --file "$env_file"

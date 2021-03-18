@@ -75,6 +75,9 @@ def _array_to_int(xs) -> int:
     r"""Convert an array of 8 int64 values (i.e. something like bits512) to a
     Python integer.
     """
+    if not isinstance(xs, np.ndarray):
+        xs = xs.cpu().numpy()
+    xs = xs.view(np.uint64)
     if len(xs) == 0:
         return 0
     n = int(xs[-1])
@@ -103,9 +106,9 @@ def reference_log_apply(spins, operator, log_psi, batch_size=None):
     """
     device = spins.device
     result = torch.empty(spins.size(0), dtype=torch.complex128)
-    for (i, spin) in enumerate(spins):
+    for (i, spin) in enumerate(spins.cpu()):
         result[i] = _reference_log_apply_one(_array_to_int(spin), operator, log_psi, device)
-    return result
+    return result.to(device)
 
 
 def _isclose(a, b):

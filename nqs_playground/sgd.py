@@ -102,24 +102,25 @@ class Runner(RunnerBase):
         batch_size = self.config.inference_batch_size
         # Computing gradients for the amplitude network
         logger.info("Computing gradients...")
+        with_hamming_weight_constraint = "hamming_weight" in self.config.constraints
         if _should_optimize(self.config.amplitude):
             if hasattr(self.config.amplitude, "log_prob"):
                 forward_fn = lambda x: 0.5 * self.config.amplitude.log_prob(x).view(-1, 1)
             else:
                 forward_fn = self.config.amplitude
 
-            if "hamming_weight" in self.config.constraints:
+            if with_hamming_weight_constraint:
                 hamming_weight_loss = 0.0
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)
                 output.backward(grad_chunk, retain_graph=True)
-                if "hamming_weight" in self.config.constraints:
+                if with_hamming_weight_constraint:
                     loss, count = self.hamming_weight_loss(states_chunk, output)
                     hamming_weight_loss += count
                     if count > 0:
                         loss = self.config.constraints["hamming_weight"](self._epoch) * loss
                         loss.backward()
-            if "hamming_weight" in self.config.constraints:
+            if with_hamming_weight_constraint:
                 hamming_weight_loss /= states.size(0)
                 logger.info("Hamming weight loss: {}".format(hamming_weight_loss))
                 self._tb_writer.add_scalar("loss/hamming_weight", hamming_weight_loss, self._epoch)
