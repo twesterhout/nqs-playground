@@ -33,7 +33,7 @@ __all__ = [
 
 _SamplingOptionsBase = namedtuple(
     "_SamplingOptions",
-    ["number_samples", "number_chains", "number_discarded", "sweep_size", "device"],
+    ["number_samples", "number_chains", "number_discarded", "sweep_size", "device", "other"],
 )
 
 
@@ -47,6 +47,7 @@ class SamplingOptions(_SamplingOptionsBase):
         number_discarded: Optional[int] = None,
         sweep_size: Optional[int] = None,
         device: torch.device = "cpu",
+        other = None,
     ):
         r"""Create SamplingOptions.
 
@@ -106,8 +107,10 @@ class SamplingOptions(_SamplingOptionsBase):
             )
         if not isinstance(device, torch.device):
             device = torch.device(device)
+        if other is None:
+            other = dict()
         return super(SamplingOptions, cls).__new__(
-            cls, number_samples, number_chains, number_discarded, sweep_size, device
+            cls, number_samples, number_chains, number_discarded, sweep_size, device, other
         )
 
 
@@ -510,9 +513,10 @@ def zanella_process(
 
 
 @torch.no_grad()
-def sample_using_zanella(log_prob_fn, basis, options, edges=None):
+def sample_using_zanella(log_prob_fn, basis, options):
     current_state = prepare_initial_state(basis, options.number_chains)
     current_state = current_state.to(options.device)
+    edges = options.other.get("edges")
     if edges is None:
         edges: List[Tuple[int, int]] = []
         for i in range(basis.number_spins - 1):
@@ -552,7 +556,6 @@ def sample_some(
     options: SamplingOptions,
     mode: str = "exact",
     is_log_prob_fn: bool = False,
-    **kwargs
 ) -> Tuple[Tensor, Tensor, Optional[Any]]:
     if is_log_prob_fn or mode == "autoregressive":
         log_prob_fn = log_ψ
@@ -564,15 +567,15 @@ def sample_some(
             return x
 
     if mode == "exact":
-        return sample_exactly(log_prob_fn, basis, options, **kwargs)
+        return sample_exactly(log_prob_fn, basis, options)
     elif mode == "full":
-        return sample_full(log_prob_fn, basis, options, **kwargs)
+        return sample_full(log_prob_fn, basis, options)
     elif mode == "autoregressive":
-        return sample_autoregressive(log_prob_fn, basis, options, **kwargs)
+        return sample_autoregressive(log_prob_fn, basis, options)
     elif mode == "metropolis":
-        return sample_using_metropolis(log_prob_fn, basis, options, **kwargs)
+        return sample_using_metropolis(log_prob_fn, basis, options)
     elif mode == "zanella":
-        return sample_using_zanella(log_prob_fn, basis, options, **kwargs)
+        return sample_using_zanella(log_prob_fn, basis, options)
     else:
         supported = {"exact", "full", "autoregressive", "metropolis", "zanella"}
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
