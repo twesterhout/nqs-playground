@@ -74,6 +74,16 @@ def prepare_even_chain(n: int):
         },
     }
 
+def test_compiles():
+    ε = 1e-4
+    for n in [4]:
+        info = prepare_even_chain(n)
+        for mode in ["full", "exact", "metropolis", "zanella"]:
+            sampling_options = nqs.SamplingOptions(number_samples=10, number_chains=4, sweep_size=n, mode=mode)
+            for variant in ["full", "symm"]:
+                data = info[variant]
+                _ = nqs.sample_some(data["log_amplitude"], data["basis"], sampling_options)
+
 
 def test_via_l1_closeness():
     ε = 1e-4
