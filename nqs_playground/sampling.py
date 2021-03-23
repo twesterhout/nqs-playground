@@ -55,7 +55,7 @@ class SamplingOptions(_SamplingOptionsBase):
         number_discarded: Optional[int] = None,
         sweep_size: Optional[int] = None,
         mode: Optional[str] = None,
-        device: Union[str, torch.device] = "cpu",
+        device: Union[str, torch.device] = None,
         other: Optional[Dict[str, Any]] = None,
     ):
         r"""Create SamplingOptions.
@@ -136,7 +136,7 @@ class SamplingOptions(_SamplingOptionsBase):
                 "`sweep_size` not specified when constructing SamplingOptions, "
                 "`sweep_size` will be set to 1. Make sure this is what you want!"
             )
-        if not isinstance(device, torch.device):
+        if device is not None and not isinstance(device, torch.device):
             device = torch.device(device)
         if other is None:
             other = dict()
@@ -186,14 +186,15 @@ def sample_full(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samplin
     batch_size = _determine_batch_size(options)
     device = options.device
     states = torch.from_numpy(basis.states.view(np.int64)).to(device)
-    logger.info("Applying log_prob_fn to all basis vectors in the Hilbert space...")
+    logger.debug("Applying log_prob_fn to all basis vectors in the Hilbert space...")
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
     _check_log_prob_shape(log_prob, device)
-    logger.info("Computing weights...")
+    logger.debug("Computing weights...")
+    log_prob = log_prob.unsqueeze_(dim=1)
     weights = safe_exp(log_prob, normalise=True)
-    states = _pad_states(states)
+    states = _pad_states(states).unsqueeze_(dim=1)
     return states, log_prob, {"weights": weights}
 
 
@@ -205,7 +206,9 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
     samples are already i.i.d.
     """
     states, log_prob, _extra = sample_full(log_prob_fn, basis, options)
-    prob = _extra["weights"]
+    states = states.squeeze_(dim=1)
+    log_prob = log_prob.squeeze_(dim=1)
+    prob = _extra["weights"].squeeze_(dim=1)
     # batch_size = _determine_batch_size(options)
     # device = options.device
     # states = torch.from_numpy(basis.states.view(np.int64)).to(device)
