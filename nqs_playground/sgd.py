@@ -38,6 +38,7 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from . import *
+from .runner import _RunnerBase
 
 Config = namedtuple(
     "Config",
@@ -48,7 +49,6 @@ Config = namedtuple(
         "output",
         "epochs",
         "sampling_options",
-        "sampling_mode",
         "optimizer",
         "scheduler",
         "exact",
@@ -137,3 +137,50 @@ class Runner(RunnerBase):
         self.checkpoint({"optimizer": self.config.optimizer.state_dict()})
         tock = time.time()
         logger.info("Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick)
+
+
+class NewRunner(_RunnerBase):
+    def __init__(self, config):
+        super().__init__(config)
+        self.combined_state = combine_amplitude_and_phase(
+            self.config.amplitude, self.config.phase, use_jit=False
+        )
+
+    def inner_iteration(self, states, log_probs, weights):
+        logger.info("Inner iteration...")
+        tick = time.time()
+        E = self.compute_local_energies(states, weights)
+        states = states.view(-1, states.size(-1))
+        log_probs = states.view(-1)
+        weights = weights.view(-1)
+
+        # Compute output gradient
+        with torch.no_grad():
+            grad = E.real - torch.dot(E.real, weights)
+            grad *= 2 * weights
+            grad = grad.view(-1, 1)
+
+        self.config.optimizer.zero_grad()
+        batch_size = self.config.inference_batch_size
+
+        # Computing gradients for the amplitude network
+        logger.info("Computing gradients...")
+        if _should_optimize(self.config.amplitude):
+            forward_fn = self.amplitude_forward_fn
+            for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
+                output = forward_fn(states_chunk)
+                output.backward(grad_chunk, retain_graph=True)
+
+        # Computing gradients for the phase network
+        if _should_optimize(self.config.phase):
+            forward_fn = self.config.phase
+            for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
+                output = forward_fn(states_chunk)
+                output.backward(grad_chunk)
+
+        self.config.optimizer.step()
+        if self.config.scheduler is not None:
+            self.config.scheduler.step()
+        self.checkpoint(init={"optimizer": self.config.optimizer.state_dict()})
+        tock = time.time()
+        logger.info("Completed inner iteration in {:.1f} seconds!", tock - tick)

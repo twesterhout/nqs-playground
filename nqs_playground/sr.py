@@ -40,7 +40,8 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-from nqs_playground import *
+from . import *
+from .runner import _RunnerBase
 
 Config = namedtuple(
     "Config",
@@ -51,8 +52,8 @@ Config = namedtuple(
         "output",
         "epochs",
         "sampling_options",
-        "sampling_mode",
         "optimizer",
+        "scheduler",
         "exact",
         "linear_system_kwargs",
         "inference_batch_size",
@@ -98,9 +99,7 @@ def compute_centered_jacobian(amplitude, phase, inputs, weights):
     return Ore, Oim
 
 
-def _compute_gradient_with_curvature(
-    O: Tensor, E: Tensor, weights: Tensor, **kwargs
-) -> Tensor:
+def _compute_gradient_with_curvature(O: Tensor, E: Tensor, weights: Tensor, **kwargs) -> Tensor:
     if O is None:
         return None
     logger.debug("Computing simple gradient...")
@@ -131,7 +130,7 @@ def compute_gradient_with_curvature(
     return δre, δim
 
 
-class Runner(RunnerBase):
+class Runner(_RunnerBase):
     def __init__(self, config):
         super().__init__(config)
         self.combined_state = combine_amplitude_and_phase(
@@ -155,24 +154,20 @@ class Runner(RunnerBase):
         run(self.config.amplitude, grads[0])
         run(self.config.phase, grads[1])
 
-    def step(self):
-        self._epoch += 1
-        logger.info("Starting epoch {}...", self._epoch)
+    def inner_iteration(self, states, log_probs, weights):
+        logger.info("Inner iteration...")
         tick = time.time()
-        states, _, weights = self.do_sampling()
-        E = self.compute_local_loss(states, weights)
+        E = self.compute_local_energies(states, weights)
         states = states.view(-1, states.size(-1))
+        log_probs = states.view(-1)
         weights = weights.view(-1)
-        Os = compute_centered_jacobian(
-            self.config.amplitude, self.config.phase, states, weights
-        )
-        grads = compute_gradient_with_curvature(
-            *Os, E, weights, **self.config.linear_system_kwargs
-        )
+
+        Os = compute_centered_jacobian(self.config.amplitude, self.config.phase, states, weights)
+        grads = compute_gradient_with_curvature(*Os, E, weights, **self.config.linear_system_kwargs)
         self._set_gradient(grads)
         self.config.optimizer.step()
-        self.checkpoint()
+        if self.config.scheduler is not None:
+            self.config.scheduler.step()
+        self.checkpoint(init={"optimizer": self.config.optimizer.state_dict()})
         tock = time.time()
-        logger.info(
-            "Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick
-        )
+        logger.info("Completed inner iteration in {:.1f} seconds!", tock - tick)
