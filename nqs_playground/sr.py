@@ -41,7 +41,6 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from . import *
-from .runner import _RunnerBase
 
 Config = namedtuple(
     "Config",
@@ -130,7 +129,7 @@ def compute_gradient_with_curvature(
     return δre, δim
 
 
-class Runner(_RunnerBase):
+class Runner(RunnerBase):
     def __init__(self, config):
         super().__init__(config)
         self.combined_state = combine_amplitude_and_phase(
