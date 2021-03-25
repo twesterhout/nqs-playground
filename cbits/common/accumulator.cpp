@@ -142,8 +142,10 @@ Buffer::Buffer(ForwardT forward, uint64_t max_required_size, uint64_t batch_size
 
 auto Buffer::make_spins() const -> torch::Tensor
 {
-    return torch::zeros({static_cast<int64_t>(_batch_size + _max_required_size), 8},
-                        torch::TensorOptions{}.device(torch::kCPU).dtype(torch::kInt64));
+    auto out = torch::empty({static_cast<int64_t>(_batch_size + _max_required_size), 8},
+                            torch::TensorOptions{}.device(torch::kCPU).dtype(torch::kInt64));
+    std::memset(out.data_ptr(), 0, sizeof(int64_t) * static_cast<size_t>(out.numel()));
+    return out;
 }
 
 auto Buffer::make_coeffs() const -> torch::Tensor
@@ -361,9 +363,9 @@ auto Accumulator::process_result_helper(torch::TensorAccessor<T, 1> const& coeff
         _output.back() = log_plus_log(_output.back(), static_cast<std::complex<double>>(coeffs[i]));
         ++i;
     }
-    _output.reserve(_output.size() + static_cast<uint64_t>(coeffs.size(0) - i));
+    // _output.reserve(_output.size() + static_cast<uint64_t>(coeffs.size(0) - i));
     for (; i < coeffs.size(0); ++i) {
-        _output.push_back(static_cast<std::complex<double>>(coeffs[i]));
+        _output.emplace_back(static_cast<std::complex<double>>(coeffs[i]));
     }
     _complete = complete;
 }
@@ -418,6 +420,7 @@ auto Accumulator::operator()(torch::Tensor spins) -> torch::Tensor
     auto const device = spins.device();
     spins             = spins.to(spins.options().device(torch::kCPU));
     auto accessor     = spins.accessor<int64_t, 2>();
+    _output.reserve(static_cast<size_t>(accessor.size(0) + 1));
     for (auto i = int64_t{0}; i < accessor.size(0); ++i) {
         auto const row = accessor[i];
 

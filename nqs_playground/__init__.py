@@ -1,5 +1,5 @@
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 # NOTE: We need to import PyTorch first, because we don't explicitly link
 # against it in C++ code.
