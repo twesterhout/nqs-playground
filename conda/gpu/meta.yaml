@@ -5,14 +5,12 @@ package:
   version: {{ data.get('version') }}
 
 source:
-  # git_url: https://github.com/twesterhout/nqs-playground
-  # git_rev: develop
   path: ../../
  
 build:
-  string: py{{ python }}_cuda{{ cudatoolkit }}_torch{{ pytorch }}_ls{{ ls }}
-  stript_env:
-    - TMPDIR
+  string: py{{ python }}_cuda{{ cudatoolkit }}_torch{{ torch }}_ls{{ ls }}_1
+  ignore_run_exports:
+    - cudnn
 
 requirements:
   build:
@@ -23,19 +21,19 @@ requirements:
     - python {{ python }}
     - cmake
     - ninja
-    - _pytorch_select ==0.2
     - cudatoolkit {{ cudatoolkit }}
-    - pytorch {{ pytorch }}
+    - pytorch {{ torch }}
+    - cudnn >=7.6.0,<8.1.0
     - lattice-symmetries {{ ls }}
 
   run:
+    - _openmp_mutex
     - python
-    - numpy x.x
+    - numpy
     - scipy
     - psutil
     - loguru
     - tensorboard >=2.0
-    - _pytorch_select ==0.2
-    - {{ pin_compatible('cudatoolkit', max_pin='x.x') }}
+    - cudatoolkit
     - {{ pin_compatible('pytorch', min_pin='x.x.x', max_pin='x.x.x') }}
-    - {{ pin_compatible('lattice-symmetries', min_pin='x.x.x', max_pin='x.x.x') }}
+    - lattice-symmetries
