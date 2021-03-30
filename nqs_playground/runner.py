@@ -169,14 +169,24 @@ class RunnerBase:
         ).view(states.size()[:2])
 
     def outer_iteration(self, number_inner: int):
-        (states, original_log_probs, original_weights) = self.perform_sampling()
-        if original_log_probs is None and number_inner > 1:
-            original_log_probs = self.compute_log_probs(states)
-        self.inner_iteration(states, original_log_probs, original_weights)
+        (states, log_probs, weights) = self.perform_sampling()
+        original_log_probs: Optional[Tensor] = None
+        log_original_weights: Optional[Tensor] = None
+        if number_inner > 1:
+            if log_probs is None:
+                log_probs = self.compute_log_probs(states)
+            original_log_probs = log_probs.to(torch.float64)
+            log_original_weights = weights.to(torch.float64, copy=True).log_()
+        self.inner_iteration(states, log_probs, weights)
         self.global_index += 1
         for i in range(1, number_inner):
             log_probs = self.compute_log_probs(states)
-            weights = original_weights * torch.exp_(log_probs - original_log_probs)
+            with torch.no_grad():
+                weights = log_original_weights + log_probs.to(torch.float64) - original_log_probs
+                weights -= torch.max(weights, dim=0, keepdim=True)[0] - 5.0
+                weights = torch.exp_(weights).to(torch.float32)
+                weights /= torch.sum(weights)
+                assert not torch.any(torch.isnan(weights))
             self.inner_iteration(states, log_probs, weights)
             self.global_index += 1
 
