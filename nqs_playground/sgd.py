@@ -159,7 +159,9 @@ class Runner(RunnerBase):
             grad = E.real - torch.dot(E.real, weights)
             grad *= 2 * weights
             grad = grad.view(-1, 1)
-            logger.info("‖∇E‖₂ = {}", torch.linalg.norm(grad))
+            grad_norm = torch.linalg.norm(grad)
+            logger.info("‖∇E‖₂ = {}", grad_norm)
+            self.tb_writer.add_scalar("loss/grad", grad_norm, self.global_index)
 
         self.config.optimizer.zero_grad()
         batch_size = self.config.inference_batch_size
