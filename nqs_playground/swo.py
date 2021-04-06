@@ -18,6 +18,10 @@ import nqs_playground._C as _C
 from nqs_playground.core import _get_device
 
 
+TrainingOptions = namedtuple(
+    "TrainingOptions", ["epochs", "batch_size", "optimizer", "scheduler"], defaults=[None],
+)
+
 Config = namedtuple(
     "Config",
     [
@@ -29,6 +33,7 @@ Config = namedtuple(
         "epochs",
         "sampling_options",
         "inference_batch_size",
+        "training_options",
     ],
 )
 
@@ -63,7 +68,7 @@ def negative_log_overlap(log_ψ: Tensor, log_φ: Tensor, log_weights: Tensor) ->
 
 
 def supervised_loop_once(
-    dataset, model, optimizer, loss_fn,
+    dataset, model, optimizer, scheduler, loss_fn,
 ):
     tick = time.time()
     model.train()
@@ -76,6 +81,24 @@ def supervised_loop_once(
         loss = loss_fn(ŷ, y, w)
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+        total_loss += x.size(0) * loss.item()
+        total_count += x.size(0)
+    tock = time.time()
+    return {"loss": total_loss / total_count, "time": tock - tick}
+
+
+@torch.no_grad()
+def compute_average_loss(dataset, model, loss_fn):
+    tick = time.time()
+    model.eval()
+    total_loss = 0
+    total_count = 0
+    for batch in dataset:
+        (x, y, w) = batch
+        ŷ = model(x)
+        loss = loss_fn(ŷ, y, w)
         total_loss += x.size(0) * loss.item()
         total_count += x.size(0)
     tock = time.time()
@@ -104,10 +127,7 @@ def supervised_loop_once(
 #     return log_target.view(original_shape)
 @torch.no_grad()
 def compute_log_target_state(
-    spins: Tensor,
-    evolution_operator,
-    state: torch.nn.Module,
-    batch_size: int,
+    spins: Tensor, evolution_operator, state: torch.nn.Module, batch_size: int,
 ) -> Tensor:
     logger.debug("Applying evolution operator using batch_size={}...", batch_size)
     batch_size = int(batch_size)
@@ -143,20 +163,30 @@ class Runner(RunnerBase):
             self.config.inference_batch_size,
         )
 
-        dataset = TensorIterableDataset(
-            states, log_target.real, torch.log(weights),
-            batch_size=states.size(0),
-            shuffle=False # True
-        )
-        optimizer = torch.optim.Adam(self.config.amplitude.parameters(), lr=1e-3)
-        for epoch in range(100):
-            info = supervised_loop_once(dataset, self.config.amplitude, optimizer, negative_log_overlap)
-            if epoch == 0 or epoch == 99:
-                logger.info("-log(⟨ψ|ϕ⟩) = {}", info["loss"])
-            self.tb_writer.add_scalar("loss/negative_log_overlap", info["loss"], self.global_index)
-            self.global_index += 1
-
-        self.global_index -= 1
+        self.train_amplitude(states, log_target, weights)
         self.checkpoint()
         tock = time.time()
         logger.info("Completed inner iteration in {:.1f} seconds!", tock - tick)
+
+    def train_amplitude(self, states, log_target, weights):
+        logger.info("Supervised training...")
+        dataset = TensorIterableDataset(
+            states,
+            log_target.real,
+            torch.log(weights),
+            batch_size=self.config.training_options.batch_size,
+            shuffle=True,
+        )
+        model = self.config.amplitude
+        optimizer = self.config.training_options.optimizer
+        scheduler = self.config.training_options.scheduler
+        loss_fn = negative_log_overlap
+
+        info = compute_average_loss(dataset, model, loss_fn)
+        logger.debug("Initial loss: -log(⟨ψ|ϕ⟩) = {}", info["loss"])
+        self.tb_writer.add_scalar("loss/negative_log_overlap", info["loss"], self.global_index)
+        for epoch in range(self.config.training_options.epochs):
+            info = supervised_loop_once(dataset, model, optimizer, scheduler, loss_fn)
+            self.global_index += 1
+            self.tb_writer.add_scalar("loss/negative_log_overlap", info["loss"], self.global_index)
+        logger.debug("Final loss:   -log(⟨ψ|ϕ⟩) = {}", info["loss"])
