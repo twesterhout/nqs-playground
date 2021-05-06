@@ -416,8 +416,8 @@ def load_ground_state(
 
         logger.info("Loading ground state from '{}'...", filename)
         with h5py.File(filename, "r") as f:
-            ground_state = f["/hamiltonian/eigenvectors"][0, :]
-            ground_state = torch.from_numpy(ground_state)
+            ground_state = f["/hamiltonian/eigenvectors"][:]
+            ground_state = torch.from_numpy(ground_state).squeeze()
             energy = f["/hamiltonian/eigenvalues"][0]
             basis_representatives = None
             if representatives:
