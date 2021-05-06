@@ -1,7 +1,7 @@
 name: nqs_devel_cpu
 channels:
   - twesterhout
-  - pytorch-nightly
+  - pytorch
   - defaults
   - conda-forge
 dependencies:
@@ -11,9 +11,11 @@ dependencies:
   # Dependencies for Python code
   - lattice-symmetries
   - cpuonly
-  - pytorch
+  - pytorch=1.8.1
   - numpy
   - scipy
+  - h5py
+  - pyyaml
   - tensorboard
   - pip:
     - loguru
