@@ -1,0 +1,27 @@
+name: cartesius_devel
+channels:
+  - twesterhout
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  # Pytorch dependencies
+  - numpy
+  - pyyaml
+  - scipy
+  - mkl
+  - mkl-include
+  - cmake
+  - ninja
+  - magma-cuda110
+  # Dependencies for Python code
+  - pip:
+    - pynvim # Python support for Neovim
+    - py-spy # For performance analysis
+  - loguru
+  - lattice-symmetries
+  - tensorboard
+  - psutil
+  # Code formatting
+  - black

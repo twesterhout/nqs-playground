@@ -21,6 +21,9 @@ dependencies:
     - loguru
     - pynvim # Python support for Neovim
     - py-spy # For performance analysis
+  # For running experiments
+  - pyyaml
+  - h5py
   # Stuff to compile the package locally
   - gcc_linux-64
   - gxx_linux-64

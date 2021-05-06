@@ -89,7 +89,7 @@ namespace {
 auto calculate_number_states(QuantumOperator const& op, uint64_t const number_roots) noexcept
     -> uint64_t
 {
-    return static_cast<uint64_t>(std::ceil(std::pow(op.max_states, number_roots)));
+    return 1 + static_cast<uint64_t>(std::ceil(std::pow(op.max_states, number_roots)));
 }
 } // namespace
 
@@ -97,7 +97,7 @@ TCM_EXPORT Polynomial::Polynomial(QuantumOperator op, std::vector<complex_type> 
                                   bool const normalising)
     : _op{std::move(op)}
     , _roots{std::move(roots)}
-    , _max_states{calculate_number_states(op, roots.size())}
+    , _max_states{calculate_number_states(_op, _roots.size())}
     , _normalising{normalising}
 {
     TCM_CHECK(!_roots.empty(), std::invalid_argument, "zero-degree polynomials are not supported");

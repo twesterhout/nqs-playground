@@ -28,31 +28,24 @@
 
 #include "../common/accumulator.hpp"
 #include "../common/metropolis.hpp"
+#include "../common/polynomial.hpp"
 #include "../common/wrappers.hpp"
 #include "../common/zanella.hpp"
 #include "pybind11_helpers.hpp"
 
 namespace py = pybind11;
 
-// #if defined(TCM_CLANG)
-// #    pragma clang diagnostic push
-// #    pragma clang diagnostic ignored "-Wmissing-prototypes"
-// #endif
 PYBIND11_MODULE(_C, m)
 {
     using namespace TCM_NAMESPACE;
-    // #if defined(TCM_CLANG)
-    // #    pragma clang diagnostic pop
-    // #endif
 
     m.doc() = R"EOF()EOF";
-
-    m.def("is_operator_real", [](ls_operator const& op) { return ls_operator_is_real(&op); });
 
     m.def("log_apply", [](torch::Tensor spins, py::object py_op, ForwardT psi,
                           uint64_t batch_size) {
         auto operator_type = py::module_::import("lattice_symmetries").attr("Operator");
-        TCM_CHECK(isinstance(py_op, operator_type), std::invalid_argument, "");
+        TCM_CHECK(isinstance(py_op, operator_type), std::invalid_argument,
+                  "'operator' argument has wrong type; expected lattice_symmetries.Operator");
         auto const* _op =
             reinterpret_cast<ls_operator*>(py_op.attr("_payload").attr("value").cast<intptr_t>());
         TCM_ASSERT(_op != nullptr, "");
@@ -60,12 +53,31 @@ PYBIND11_MODULE(_C, m)
         py::gil_scoped_release release;
         return apply(std::move(spins), std::move(op), std::move(psi), max_required_size,
                      batch_size);
-    });
+    }, py::arg{"spins"}.noconvert(), py::arg{"operator"}.noconvert(), py::arg{"psi"}, py::arg{"batch_size"});
 
-    // Currently, we only access the generator from one thread
+    m.def("log_apply_polynomial", [](torch::Tensor spins, py::object py_op,
+                                     std::vector<std::complex<double>> roots,
+                                     ForwardT psi, uint64_t batch_size, bool normalizing) {
+        auto operator_type = py::module_::import("lattice_symmetries").attr("Operator");
+        TCM_CHECK(isinstance(py_op, operator_type), std::invalid_argument,
+                  "'operator' argument has wrong type; expected lattice_symmetries.Operator");
+        auto const* _op =
+            reinterpret_cast<ls_operator*>(py_op.attr("_payload").attr("value").cast<intptr_t>());
+        TCM_ASSERT(_op != nullptr, "");
+        auto [op, max_required_size] = view_as_operator(*_op);
+        auto polynomial = Polynomial{QuantumOperator{std::move(op), max_required_size},
+                                     std::move(roots), normalizing};
+        py::print("Hamiltonian max_required_size:", max_required_size);
+        py::print("Polynomial max_required_size:", polynomial.max_states());
+        py::gil_scoped_release release;
+        return apply(std::move(spins), std::cref(polynomial), std::move(psi),
+                     polynomial.max_states(), batch_size);
+    }, py::arg{"spins"}.noconvert(), py::arg{"operator"}.noconvert(), py::arg{"roots"},
+       py::arg{"psi"}, py::arg{"batch_size"}, py::arg{"normalizing"} = false);
+
     m.def(
-        "manual_seed", [](uint64_t const seed) { global_random_generator().seed(seed); },
-        R"EOF(Seed the random number generator used by nqs_playground.)EOF", py::arg{"seed"});
+        "manual_seed", [](uint64_t const seed) { manual_seed(seed); },
+        R"EOF(Seed random number generators used by nqs_playground.)EOF", py::arg{"seed"});
 
     m.def(
         "random_spin", [](ls_spin_basis const& basis) { return random_spin(basis); },
@@ -82,7 +94,8 @@ PYBIND11_MODULE(_C, m)
             py::arg{"x"}.noconvert(), py::arg{"dtype"}.noconvert());
 
     py::class_<ZanellaGenerator>(m, "ZanellaGenerator")
-        .def(py::init<ls_spin_basis const&>(), py::arg{"basis"}.noconvert(), R"EOF(
+        .def(py::init<ls_spin_basis const&, std::vector<std::pair<unsigned, unsigned>>>(),
+             py::arg{"basis"}.noconvert(), py::arg{"edges"}, R"EOF(
             :param basis: specifies the Hilbert space basis.)EOF")
         .def(
             "__call__",

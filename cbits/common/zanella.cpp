@@ -28,6 +28,7 @@
 
 #include "zanella.hpp"
 #include "errors.hpp"
+#include <omp.h>
 
 TCM_NAMESPACE_BEGIN
 
@@ -80,15 +81,25 @@ auto check_basis(ls_spin_basis const& basis) -> ls_spin_basis const&
 }
 } // namespace
 
-TCM_EXPORT ZanellaGenerator::ZanellaGenerator(ls_spin_basis const& basis)
+TCM_EXPORT ZanellaGenerator::ZanellaGenerator(ls_spin_basis const& basis,
+                                              std::vector<std::pair<unsigned, unsigned>> edges)
     : _basis{ls_copy_spin_basis(&check_basis(basis))}
-{}
+    , _edges{std::move(edges)}
+{
+    if (omp_get_max_active_levels() < 2) { omp_set_max_active_levels(2); }
+    TCM_CHECK(!_edges.empty(), std::invalid_argument, "'edges' list must not be empty");
+    for (auto const [i, j] : _edges) {
+        TCM_CHECK(i != j && i < ls_get_number_spins(_basis) && j < ls_get_number_spins(_basis),
+                  std::invalid_argument, fmt::format("'edges' list contains an invalid edge: ({}, {})", i, j));
+    }
+}
 
 TCM_EXPORT ZanellaGenerator::~ZanellaGenerator()
 {
     ls_destroy_spin_basis(const_cast<ls_spin_basis*>(static_cast<ls_spin_basis const*>(_basis)));
 }
 
+#if 0
 TCM_EXPORT auto ZanellaGenerator::operator()(torch::Tensor x) const
     -> std::tuple<torch::Tensor, torch::Tensor>
 {
@@ -129,7 +140,116 @@ TCM_EXPORT auto ZanellaGenerator::operator()(torch::Tensor x) const
     }
     return {std::move(y), std::move(counts)};
 }
+#else
+TCM_EXPORT auto ZanellaGenerator::operator()(torch::Tensor x) const
+    -> std::tuple<torch::Tensor, torch::Tensor>
+{
+    auto       pin_memory = false;
+    auto const device     = x.device();
+    auto const batch_size = x.size(0);
+    TCM_CHECK(batch_size > 0, std::invalid_argument, "expected 'x' to contain a least one row");
+    if (device.type() != torch::DeviceType::CPU) {
+        pin_memory = true;
+        x          = x.to(x.options().device(torch::DeviceType::CPU),
+                 /*non_blocking=*/true);
+    }
+    TCM_CHECK(ls_get_hamming_weight(_basis) != -1, std::runtime_error,
+              "ZanellaGenerator currently only supports bases with fixed magnetisation");
+    auto const max_possible_states = static_cast<int64_t>(max_states());
+    auto const options = torch::TensorOptions{}.dtype(torch::kInt64).pinned_memory(pin_memory);
+    auto       y =
+        torch::zeros(std::initializer_list<int64_t>{batch_size, max_possible_states, 8L}, options);
+    auto counts = torch::empty(std::initializer_list<int64_t>{batch_size}, options);
 
+    auto const x_info      = tensor_info<ls_bits512 const>(x, "x");
+    auto const y_info      = tensor_info<ls_bits512, 2>(y);
+    auto const counts_info = tensor_info<int64_t>(counts);
+
+    auto const outer_num_threads = std::min<int>(x_info.size(), omp_get_max_threads());
+    auto const inner_num_threads = omp_get_max_threads() / outer_num_threads;
+#pragma omp parallel for num_threads(outer_num_threads)
+    for (auto i = int64_t{0}; i < x_info.size(); ++i) {
+        auto const initial_count = generate_general(x_info[i], row(y_info, i));
+        counts_info[i] = project_states(row(y_info, i), initial_count, inner_num_threads);
+    }
+    auto const size = *std::max_element(counts_info.data, counts_info.data + batch_size);
+
+    y = torch::narrow(y, /*dim=*/1, /*start=*/0, /*length=*/size);
+    if (device.type() != torch::DeviceType::CPU) {
+        y      = y.to(y.options().device(device), /*non_blocking=*/pin_memory);
+        counts = counts.to(counts.options().device(device), /*non_blocking=*/pin_memory);
+    }
+    else {
+        y = y.contiguous();
+    }
+    return {std::move(y), std::move(counts)};
+}
+#endif
+
+TCM_NOINLINE auto ZanellaGenerator::generate_general(ls_bits512 const& spin, TensorInfo<ls_bits512> out) const -> int64_t
+{
+    auto const number_spins = ls_get_number_spins(_basis);
+    auto       count = int64_t{0};
+    // for (auto i = 0U; i < number_spins - 1; ++i) {
+    //     for (auto j = i + 1U; j < number_spins; ++j) {
+    for (auto const [i, j] : _edges) {
+        if (test_bit(spin, i) != test_bit(spin, j)) {
+            auto possible = spin;
+            toggle_bit(possible, i);
+            toggle_bit(possible, j);
+            out[count++] = possible;
+        }
+    }
+    //}
+    TCM_CHECK(count > 0, std::runtime_error,
+              "ZanellaGenerator got stuck: all potential states lie in a "
+              "different magnetization sector");
+    return count;
+}
+
+TCM_NOINLINE auto ZanellaGenerator::project_states(TensorInfo<ls_bits512> spins, int64_t count, int const num_threads) const -> int64_t
+{
+    TCM_ASSERT(count <= spins.size(), "buffer overflow");
+    TCM_CHECK(spins.stride() == 1, std::runtime_error, "expected 'spins' to be contiguous");
+    std::mutex zero_norm_mutex;
+    std::vector<int64_t> zero_norm;
+
+#pragma omp parallel for if(num_threads > 0) num_threads(num_threads)
+    for (auto i = int64_t{0}; i < count; ++i) {
+        std::complex<double> dummy;
+        double norm;
+        auto& spin = spins[i];
+        auto repr = spin;
+        ls_get_state_info(_basis, &spin, &repr, &dummy, &norm);
+        if (norm > 0) { spin = repr; }
+        else {
+            std::unique_lock<std::mutex> lock{zero_norm_mutex};
+            zero_norm.push_back(i);
+        }
+    }
+
+    TCM_CHECK(static_cast<int64_t>(zero_norm.size()) < count, std::runtime_error,
+              "ZanellaGenerator got stuck: all potential states have norm 0");
+    if (!zero_norm.empty()) {
+        std::sort(std::begin(zero_norm), std::end(zero_norm));
+        auto const& fill_value = [&]() -> ls_bits512 const& {
+            auto i = int64_t{0};
+            for (; i < static_cast<int64_t>(zero_norm.size())
+                        && zero_norm[static_cast<size_t>(i)] == i;
+                    ++i) {}
+            return spins[i];
+        }();
+        for (auto const i : zero_norm) {
+            spins[i] = fill_value;
+        }
+    }
+
+    std::sort(spins.data, spins.data + count);
+    count = std::unique(spins.data, spins.data + count) - spins.data;
+    return count;
+}
+
+#if 0
 TCM_EXPORT auto ZanellaGenerator::generate(ls_bits512 const&         spin,
                                            TensorInfo<ls_bits512, 1> out) const -> unsigned
 {
@@ -155,16 +275,17 @@ TCM_EXPORT auto ZanellaGenerator::generate(ls_bits512 const&         spin,
     count = std::unique(out.data, out.data + count) - out.data;
     return count;
 }
+#endif
 
 TCM_EXPORT auto zanella_choose_samples(torch::Tensor weights, int64_t const number_samples,
                                        double const time_step, c10::Device const device)
     -> torch::Tensor
 {
     TCM_CHECK(weights.dim() == 1, std::invalid_argument,
-              fmt::format("weights has wrong shape: [{}]; expected it to be a vector",
+              fmt::format("'weights' has wrong shape: [{}]; expected it to be a vector",
                           fmt::join(weights.sizes(), ", ")));
     TCM_CHECK(weights.device().type() == c10::DeviceType::CPU, std::invalid_argument,
-              "weights must reside on the CPU");
+              "'weights' must reside on the CPU");
 
     auto const pinned_memory = device != c10::DeviceType::CPU;
     auto       indices =

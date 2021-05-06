@@ -5,14 +5,13 @@ set -ex
 export CMAKE_LIBRARY_PATH=$PREFIX/lib:$CMAKE_LIBRARY_PATH
 export CMAKE_PREFIX_PATH=$PREFIX:$SP_DIR/torch:$CMAKE_PREFIX_PATH
 
-which cmake
-cmake --version
-
 mkdir -p build
 pushd build
 rm -rf *
 cmake -GNinja \
-      -DCMAKE_CUDA_FLAGS="-cudart shared" \
+	  -DCMAKE_CUDA_FLAGS="-cudart shared --compiler-options -march=nehalem" \
+      -DCMAKE_CXX_FLAGS="$CXXFLAGS -march=nehalem" \
+      -DCMAKE_C_FLAGS="$CFLAGS -march=nehalem" \
       -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . --target install
 popd

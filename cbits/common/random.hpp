@@ -198,6 +198,7 @@ class xoshiro256starstar {
 using RandomGenerator = xoshiro256starstar;
 
 auto global_random_generator() -> RandomGenerator&;
+auto manual_seed(uint64_t seed) -> void;
 
 constexpr auto random_bounded(uint32_t const range, RandomGenerator& g) noexcept -> uint32_t
 {

@@ -53,7 +53,7 @@ def prepare_even_chain(n: int):
                 spins = spins[:, 0]
             device = spins.device
             spins = spins.cpu().numpy().view(np.uint64)
-            indices = ls.batched_index(basis, spins)
+            indices = basis.batched_index(spins)
             out = torch.from_numpy(log_ground_state[indices]).view(-1, 1)
             return out.to(device)
 
@@ -74,19 +74,29 @@ def prepare_even_chain(n: int):
         },
     }
 
+def test_compiles():
+    ε = 1e-4
+    for n in [4]:
+        info = prepare_even_chain(n)
+        for mode in ["full", "exact", "metropolis", "zanella"]:
+            sampling_options = nqs.SamplingOptions(number_samples=10, number_chains=4, sweep_size=n, mode=mode)
+            for variant in ["full", "symm"]:
+                data = info[variant]
+                _ = nqs.sample_some(data["log_amplitude"], data["basis"], sampling_options)
 
-def notest_via_l1_closeness():
+
+def test_via_l1_closeness():
     ε = 1e-4
     for n in [4, 6, 8]:
         info = prepare_even_chain(n)
         for mode in ["metropolis", "zanella"]:
             sampling_options = nqs.SamplingOptions(
-                number_samples=10000, number_chains=32, sweep_size=n
+                number_samples=1, number_chains=32, sweep_size=n
             )
             for variant in ["full", "symm"]:
                 data = info[variant]
                 r = nqs.are_close_l1(
-                    10000,
+                    100000,
                     data["basis"],
                     lambda o: nqs.sample_some(data["log_amplitude"], data["basis"], o, mode),
                     data["exact_prob"],
@@ -133,3 +143,25 @@ def test_via_chisquare():
                 _, combined_p_value = combine_pvalues(p_values, method="fisher")
                 logger.info("combined p-value: {}", combined_p_value)
                 assert combined_p_value > ε
+
+def test_zanella_graphs():
+    ε = 1e-4
+    info = prepare_even_chain(6)
+    graphs = [
+        # None,
+        [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)],
+    ]
+    for g in graphs:
+        sampling_options = nqs.SamplingOptions(number_samples=1, number_chains=32, sweep_size=6, other={"edges": g})
+        for variant in ["full", "symm"]:
+            data = info[variant]
+            r = nqs.are_close_l1(
+                1000,
+                data["basis"],
+                lambda o: nqs.sample_some(data["log_amplitude"], data["basis"], o, mode="zanella"),
+                data["exact_prob"],
+                ε,
+                sampling_options,
+            )
+            logger.info("Results: {}", r)
+            assert sum(r) > len(r) / 2

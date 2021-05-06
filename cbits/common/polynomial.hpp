@@ -55,6 +55,8 @@ class Polynomial {
     auto operator()(ls_bits512 const& spin, complex_type coeff, gsl::span<ls_bits512> out_spins,
                     gsl::span<complex_type> out_coeffs) const -> uint64_t;
 
+    constexpr auto max_states() const noexcept -> uint64_t { return _max_states; }
+
   private:
     struct Buffer;
     auto iteration(complex_type root, Buffer& buffer) const -> void;
