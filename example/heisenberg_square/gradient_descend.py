@@ -32,7 +32,8 @@ def make_amplitude(arch="dense"):
             torch.nn.Linear(64, 1, bias=False),
         )
     if arch == "nade":
-        return nqs_playground.autoregressive.NADE(36, 100)
+        return nqs_playground.autoregressive.PixelCNN((6, 6)) # 36, 100)
+        # return nqs_playground.autoregressive.NADE(36, 100)
     raise ValueError("invalid arch: {}".format(arch))
 
 
@@ -80,22 +81,26 @@ def main():
 
     amplitude = make_amplitude("nade" if use_autoregressive else "dense")
     phase = make_phase()
-    optimizer = torch.optim.SGD(
+    optimizer = torch.optim.Adam(
         list(amplitude.parameters()) + list(phase.parameters()),
-        lr=1e-3,
-        momentum=0.9,
-        weight_decay=1e-4,
+        lr=5e-3,
     )
+    # optimizer = torch.optim.SGD(
+    #     list(amplitude.parameters()) + list(phase.parameters()),
+    #     lr=1e-3,
+    #     momentum=0.9,
+    #     weight_decay=1e-4,
+    # )
     options = nqs_playground.sgd.Config(
         amplitude=amplitude,
         phase=phase,
         hamiltonian=hamiltonian,
         output="data/6x6",
         epochs=500,
-        sampling_options=nqs_playground.SamplingOptions(number_samples=256, number_chains=1),
+        sampling_options=nqs_playground.SamplingOptions(number_samples=4096, number_chains=1),
         sampling_mode="autoregressive" if use_autoregressive else "exact",
         exact=None,  # ground_state[:, 0],
-        constraints={"hamming_weight": lambda i: 0.2},
+        constraints=dict(), # {"hamming_weight": lambda i: 0.2},
         optimizer=optimizer,
         inference_batch_size=8192,
     )

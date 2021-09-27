@@ -1,19 +1,19 @@
 PyTorch-based implementation of SR and SWO for NQS.
 
 
-**Contents**  
-- [Installation](#installation-and-use)
-  - [Conda package](#conda-package)
+**Contents**
+- [Installation](#installation)
+  - [Conda](#conda)
   - [Building from source](#building-from-source)
-- [Notes](#version-semantics)
-  - [Hilbert space basis](#hilbert-space-basis)
-- [Appendix](#appendix)
 
 
 ## Installation
 
 
-### Conda package
+## Conda
+
+> **WARNING:** The version available on Conda is currently out of date.
+> Please, build from source for the latest features.
 
 The simplest way to get started using `nqs_playground` package is to install it
 using [Conda](https://docs.conda.io/en/latest/):
@@ -21,95 +21,24 @@ using [Conda](https://docs.conda.io/en/latest/):
 conda install -c twesterhout nqs_playground
 ```
 
-Due to limitations of
-[Cartesius](https://userinfo.surfsara.nl/systems/cartesius) which we use for
-building the package, we are stuck with CUDA 10.0.
 
+## Building from source
 
-### Building from source
+### CPU-only version
 
-If you want to contribute to the development you will need to build the package
-from source. Luckily, with Conda, it is very simple.
+If you do not have access or do not wish to use a GPU you can use cpu-only
+version PyToch and nqs_playground. For this, first clone the repository:
 
-1. Clone the repository:
-   ```sh
-   git clone https://github.com/twesterhout/nqs-playground.git
-   ```
-   You do not have to initialise the submodules. CMake will do it automatically
-   for you. Just ensure that you are connected to Internet when you first build
-   the package.
+```sh
+git clone https://github.com/twesterhout/nqs-playground.git
+```
 
-2. Create a [Conda environment](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html):
-   ```sh
-   conda env create -f devel.yml
-   ```
-   This will create `nqs_dev` environment using packages listed in `devel.yml`.
-   This is a minimal environment necessary to compile and install the package.
-   Feel free to use your custom one just ensure that packages listed in
-   `devel.yml` are present.
+Now just run [`build_locally_cpu.sh`](./build_locally_cpu.sh):
 
-   If you are compiling on a cluster which provides CUDA as a module, now would
-   be a good time to load it. I.e. before activating the environment to ensure
-   that Conda paths are searched first.
+```sh
+./build_locally_cpu.sh
+```
 
-3. Activate the environment:
-   ```sh
-   conda activate nqs_dev
-   ```
+### Full version
 
-4. Compile the C++ extension:
-   ```sh
-   mkdir build && cd build
-   cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
-   # or cmake -GNinja -DCMAKE_BUILD_TYPE=Debug .. if you want the debug version
-   # with all asserts etc.
-   cmake --build . --target install
-   cd ..
-   ```
-   This should install two files: `libnqs.so` shared library and
-   `_C.cpython-...-x86_64-linux-gnu.so` Python extension into the
-   `nqs_playground/` directory. You do not have to worry about depencencies --
-   they are handled using git submodules and CMake, and it all happens
-   automatically. Also, CMake will determine whether you have a CUDA compiler
-   on your system and use it to compile GPU kernels. If you do not have CUDA,
-   do not despair, the code will compile and work on CPU-only systems as well.
-
-5. Install the Python package:
-   ```sh
-   python -m pip install --user -e .
-   ```
-   Alternatively, you can just import `nqs_playground` directly from the project
-   root without using `pip install`. This works, because all the necessary
-   shared library objects are inside the `nqs_playground/` directory.
-
-And that is it!
-
-
-## Notes
-
-### Hilbert space basis
-
-The very first thing one does when solving a quantum mechanical problem is
-defining the Hilbert space. The way to do it in `nqs_playground` is by using
-the `SpinBasis` constructor.
-
-> **Technical note:** `SpinBasis` is not a class, it's a simple function which
-> emulates a class. The reason is that under the hood (depending on the number
-> of spins in the system) one of the following two classes is used:
-> `nqs_playground._C.SmallSpinBasis` or `nqs_playground._C.BigSpinBasis`. These
-> two classes have slightly different functionality. E.g. `SmallSpinBasis` can
-> return all states and can be used for Exact Diagonalisation. As a user you
-> probably do not care about the underlying class, so `SpinBasis` function
-> automatically constructs the class most suitable for the problem.
-
-For example, `SpinBasis([], 20)` constructs Hilbert space basis for a system of
-20 spins. We can also restrict the Hilbert space to a sector of fixed
-magnetisation: `SpinBasis([], number_spins=20, hamming_weight=10)` will contain
-states which have zero magnetisation.
-
-**More information** can on constructing the basis can obtained by calling
-`help(nqs_playground.SpinBasis)`. `help(nqs_playground.SpinBasis([], 20))` will
-give more information specific to `SmallSpinBasis`, and
-`help(nqs_playground.SpinBasis([], 200))` -- specific to `BigSpinBasis`.
-
-## Appendix
+TODO
