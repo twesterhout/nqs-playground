@@ -1,33 +1,29 @@
 name: nqs_devel_gpu
 channels:
-  - pytorch-nightly
-  - conda-forge
+  - pytorch
   - twesterhout
+  - defaults
 dependencies:
-  - python=3.8
+  - python
   - pip
-  - black # For formatting code
-  # Dependencies for Python code
-  - lattice-symmetries
-  - pytorch==1.9.0.dev20210217
-  - cudatoolkit
-  - cudnn
-  - numpy>=1.19
-  - scipy
-  - tensorboard>=2.0.0
-  - loguru
   - pip:
     - pynvim # Python support for Neovim
     - py-spy # For performance analysis
-  # For running experiments
+    - black # For formatting code
+    - loguru # Logging
+  - pytorch=1.9.1
+  - cudatoolkit=10.2
+  - numpy>=1.19
   - pyyaml
   - h5py
-  # Stuff to compile the package locally
+  # Stuff to compile extensions
   - gcc_linux-64
   - gxx_linux-64
-  - cmake
   - ninja
   # Tools for generating Conda packages
   - anaconda-client
   - conda-build
   - conda-verify
+  # Our own packages
+  - lattice-symmetries
+  - unpack-bits
