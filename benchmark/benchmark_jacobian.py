@@ -37,16 +37,37 @@ def run_gpu():
     return r
 
 
+def _jacobian(module: torch.nn.Module, inputs: Tensor) -> Tensor:
+    r"""Trivial implementation of ``jacobian``. It is used to assess
+    correctness of fancier techniques.
+    """
+    parameters = list(module.parameters())
+    out = inputs.new_empty(
+        [inputs.size(0), sum(map(torch.numel, parameters))], dtype=parameters[0].dtype
+    )
+    outputs = module(inputs)
+    for i in range(inputs.size(0)):
+        dws = torch.autograd.grad([outputs[i]], parameters, retain_graph=True)
+        torch.cat([dw.flatten() for dw in dws], out=out[i])
+    return out
+
+
 def run_cpu():
     module = make_network()
     inputs = torch.randint(0, 1<<30 - 1, size=(BATCH_SIZE, 8), dtype=torch.int64, device='cpu')
 
+    r1 = _jacobian(module, inputs)
+    r2 = jacobian_simple(module, inputs)
+    assert torch.isclose(r1, r2, rtol=1e-4, atol=1e-6).all()
+
     def f():
-        return jacobian_cpu(module, inputs, num_threads=-1)
+        # return _jacobian(module, inputs)
+        return jacobian_simple(module, inputs)
 
     r = np.array(timeit.repeat(f, repeat=REPEAT, number=NUMBER))
     r *= 1000 / (BATCH_SIZE * NUMBER)
     return r
+
 
 # m = make_network()
 # xs = torch.rand((BATCH_SIZE, 5), device='cpu')

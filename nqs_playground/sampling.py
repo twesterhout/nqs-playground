@@ -11,19 +11,20 @@ import torch
 from torch import Tensor
 import lattice_symmetries as ls
 
-from ._C import MetropolisGenerator, ZanellaGenerator, zanella_choose_samples, random_spin
-from .core import forward_with_batches, as_spins_tensor, safe_exp, pack
+# from ._C import MetropolisGenerator, ZanellaGenerator, zanella_choose_samples, random_spin
+from .core import forward_with_batches, pad_states, as_spins_tensor, safe_exp, pack
+from ._extension import lib
 
 __all__ = [
     "SamplingOptions",
     "sample_some",
-    "sample_full",
-    "sample_exactly",
-    "sample_autoregressive",
-    "metropolis_process",
-    "sample_using_metropolis",
-    "zanella_process",
-    "sample_using_zanella",
+    # "sample_full",
+    # "sample_exactly",
+    # "sample_autoregressive",
+    # "metropolis_process",
+    # "sample_using_metropolis",
+    # "zanella_process",
+    # "sample_using_zanella",
     # "autocorr_function",
     "integrated_autocorr_time",
     "sampled_histogram",
@@ -159,7 +160,7 @@ def _determine_batch_size(options: SamplingOptions) -> int:
     return batch_size
 
 
-def _check_log_prob_shape(log_prob: Tensor, device: torch.device) -> None:
+def _check_log_prob_shape(log_prob: Tensor, device: Optional[torch.device]) -> None:
     if log_prob.dim() != 1:
         raise ValueError(
             "log_prob_fn should return the logarithm of the probability, "
@@ -167,7 +168,7 @@ def _check_log_prob_shape(log_prob: Tensor, device: torch.device) -> None:
             "sign instead of amplitude network?"
             "".format(log_prob.dim())
         )
-    if log_prob.device != device:
+    if device is not None and log_prob.device != device:
         raise ValueError(
             "log_prob_fn should return tensors residing on {}; received "
             "tensors residing on {} instead; make sure options.device matches "
@@ -175,18 +176,19 @@ def _check_log_prob_shape(log_prob: Tensor, device: torch.device) -> None:
         )
 
 
-def _pad_states(states: Tensor) -> Tensor:
-    """Pad states with zeros to get a Tensor of bits512 instead of int64."""
-    padding = torch.zeros(states.size(0), 7, device=states.device, dtype=torch.int64)
-    return torch.cat([states.unsqueeze(dim=1), padding], dim=1)
-
-
-def sample_full(log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
+def sample_full(
+    log_prob_fn: Callable[[Tensor], Tensor], basis: ls.SpinBasis, options: SamplingOptions
+) -> Tuple[Tensor, Tensor, Dict[str, Any]]:
     r"""Instead of sampling, take all basis vectors in the Hilbert space."""
     batch_size = _determine_batch_size(options)
     device = options.device
-    states = torch.from_numpy(basis.states.view(np.int64)).to(device)
-    logger.debug("Applying log_prob_fn to all basis vectors in the Hilbert space...")
+    states = torch.from_numpy(basis.states.view(np.int64))
+    if device is not None:
+        states = states.to(device)
+    logger.debug(
+        "Applying 'log_prob_fn' to all basis vectors in the Hilbert space using batch_size={}..."
+        "".format(batch_size)
+    )
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
@@ -194,11 +196,13 @@ def sample_full(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samplin
     logger.debug("Computing weights...")
     log_prob = log_prob.unsqueeze_(dim=1)
     weights = safe_exp(log_prob, normalise=True)
-    states = _pad_states(states).unsqueeze_(dim=1)
+    states = pad_states(states).unsqueeze_(dim=1)
     return states, log_prob, {"weights": weights}
 
 
-def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions):
+def sample_exactly(
+    log_prob_fn: Callable[[Tensor], Tensor], basis: ls.SpinBasis, options: SamplingOptions
+) -> Tuple[Tensor, Tensor, Dict[str, Any]]:
     r"""Sample states by explicitly constructing the discrete probability distribution.
 
     Number of samples is `options.number_chains * options.number_samples`, and
@@ -209,16 +213,6 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
     states = states.squeeze_(dim=1)
     log_prob = log_prob.squeeze_(dim=1)
     prob = _extra["weights"].squeeze_(dim=1)
-    # batch_size = _determine_batch_size(options)
-    # device = options.device
-    # states = torch.from_numpy(basis.states.view(np.int64)).to(device)
-    # logger.info("Applying log_prob_fn to all basis vectors in the Hilbert space...")
-    # log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
-    # if log_prob.dim() > 1:
-    #     log_prob.squeeze_(dim=1)
-    # _check_log_prob_shape(log_prob, device)
-    # prob = safe_exp(log_prob, normalise=True)
-
     number_samples = options.number_chains * options.number_samples
     if len(prob) < (1 << 24):
         logger.debug("Using torch.multinomial to sample indices...")
@@ -243,112 +237,112 @@ def sample_exactly(log_prob_fn: Callable[[Tensor], Tensor], basis, options: Samp
     log_prob = log_prob[indices]
     states = states[indices]
     shape = (options.number_samples, options.number_chains)
-    return states.view(*shape, 8), log_prob.view(*shape), {}
+    return states.view(*shape, 8), log_prob.view(*shape), dict()
 
 
-def sample_autoregressive(model: torch.nn.Module, basis, options: SamplingOptions):
-    if not hasattr(model, "sample"):
-        raise ValueError(
-            "Model has no 'sample' method. Did you try to use a standard neural "
-            "network with 'autoregressive' sampling mode?"
-        )
-    number_samples = options.number_chains * options.number_samples
-    logger.debug("Running model.sample...")
-    states = model.sample(number_samples).to(options.device)
-    r = (states, None, None)
-    states = pack(states)
-    if states.dim() < 2:
-        states = _pad_states(states)
-    shape = (options.number_samples, options.number_chains)
-    return states.view(*shape, 8), None, {}
+# def sample_autoregressive(model: torch.nn.Module, basis, options: SamplingOptions):
+#     if not hasattr(model, "sample"):
+#         raise ValueError(
+#             "Model has no 'sample' method. Did you try to use a standard neural "
+#             "network with 'autoregressive' sampling mode?"
+#         )
+#     number_samples = options.number_chains * options.number_samples
+#     logger.debug("Running model.sample...")
+#     states = model.sample(number_samples).to(options.device)
+#     r = (states, None, None)
+#     states = pack(states)
+#     if states.dim() < 2:
+#         states = _pad_states(states)
+#     shape = (options.number_samples, options.number_chains)
+#     return states.view(*shape, 8), None, {}
 
 
-def metropolis_process(
-    initial_state: Tensor,
-    _log_prob_fn: Callable[[Tensor], Tensor],
-    kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
-    number_samples: int,
-    number_discarded: int,
-    sweep_size: int,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    assert number_samples >= 1
-
-    def log_prob_fn(x):
-        y = _log_prob_fn(x)
-        if y.dim() > 1:
-            y.squeeze_(dim=1)
-        return y
-
-    current_state, current_norm = initial_state
-    current_log_prob = log_prob_fn(current_state)
-    dtype = current_log_prob.dtype
-    device = current_log_prob.device
-    current_norm = current_norm.to(dtype)
-    states = current_state.new_empty((number_samples,) + current_state.size())
-    log_probs = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
-    accepted = torch.zeros(current_state.size(0), dtype=torch.int64, device=device)
-
-    states[0].copy_(current_state)
-    log_probs[0].copy_(current_log_prob)
-    current_state = states[0]
-    current_log_prob = log_probs[0]
-
-    def sweep():
-        nonlocal accepted
-        for i in range(sweep_size):
-            proposed_state, proposed_norm = kernel_fn(current_state, dtype)
-            state_is_valid = proposed_norm > 0
-            proposed_log_prob = current_log_prob.new_zeros((proposed_state.size(0),))
-            proposed_log_prob[state_is_valid] = log_prob_fn(proposed_state[state_is_valid])
-            r = torch.rand(current_state.size(0), device=device, dtype=dtype)
-            r *= current_norm
-            r /= proposed_norm
-            t = r <= torch.exp_(proposed_log_prob - current_log_prob)
-            t &= state_is_valid
-            current_state[t] = proposed_state[t]
-            current_log_prob[t] = proposed_log_prob[t]
-            current_norm[t] = proposed_norm[t]
-            accepted += t
-
-    # Thermalisation
-    for i in range(number_discarded):
-        sweep()
-
-    # Reset acceptance count after thermalisation
-    accepted.fill_(0)
-    for i in range(1, number_samples):
-        states[i].copy_(current_state)
-        log_probs[i].copy_(current_log_prob)
-        current_state = states[i]
-        current_log_prob = log_probs[i]
-        sweep()
-
-    # Subtract 1 because the loop above starts at 1
-    acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
-    return states, log_probs, acceptance
-
-
-def sample_using_metropolis(
-    log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions
-):
-    initial_state = prepare_initial_state(basis, options.number_chains)
-    initial_norm = ls.batched_state_info(basis, initial_state.numpy().view(np.uint64))[2]
-    initial_norm *= initial_norm  # We need 1/N rather than 1/√N
-    initial_state = initial_state.to(options.device)
-    initial_norm = torch.from_numpy(initial_norm).to(options.device)
-    kernel_fn = MetropolisGenerator(basis)
-    t1 = time.time()
-    states, log_probs, acceptance = metropolis_process(
-        (initial_state, initial_norm),
-        log_prob_fn,
-        kernel_fn,
-        options.number_samples,
-        options.number_discarded,
-        options.sweep_size,
-    )
-    t2 = time.time()
-    info = {"acceptance_rate": torch.mean(acceptance).item(), "metropolis_process": t2 - t1}
-    return states, log_probs, info
+# def metropolis_process(
+#     initial_state: Tensor,
+#     _log_prob_fn: Callable[[Tensor], Tensor],
+#     kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
+#     number_samples: int,
+#     number_discarded: int,
+#     sweep_size: int,
+# ) -> Tuple[Tensor, Tensor, Tensor]:
+#     assert number_samples >= 1
+#
+#     def log_prob_fn(x):
+#         y = _log_prob_fn(x)
+#         if y.dim() > 1:
+#             y.squeeze_(dim=1)
+#         return y
+#
+#     current_state, current_norm = initial_state
+#     current_log_prob = log_prob_fn(current_state)
+#     dtype = current_log_prob.dtype
+#     device = current_log_prob.device
+#     current_norm = current_norm.to(dtype)
+#     states = current_state.new_empty((number_samples,) + current_state.size())
+#     log_probs = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
+#     accepted = torch.zeros(current_state.size(0), dtype=torch.int64, device=device)
+#
+#     states[0].copy_(current_state)
+#     log_probs[0].copy_(current_log_prob)
+#     current_state = states[0]
+#     current_log_prob = log_probs[0]
+#
+#     def sweep():
+#         nonlocal accepted
+#         for i in range(sweep_size):
+#             proposed_state, proposed_norm = kernel_fn(current_state, dtype)
+#             state_is_valid = proposed_norm > 0
+#             proposed_log_prob = current_log_prob.new_zeros((proposed_state.size(0),))
+#             proposed_log_prob[state_is_valid] = log_prob_fn(proposed_state[state_is_valid])
+#             r = torch.rand(current_state.size(0), device=device, dtype=dtype)
+#             r *= current_norm
+#             r /= proposed_norm
+#             t = r <= torch.exp_(proposed_log_prob - current_log_prob)
+#             t &= state_is_valid
+#             current_state[t] = proposed_state[t]
+#             current_log_prob[t] = proposed_log_prob[t]
+#             current_norm[t] = proposed_norm[t]
+#             accepted += t
+#
+#     # Thermalisation
+#     for i in range(number_discarded):
+#         sweep()
+#
+#     # Reset acceptance count after thermalisation
+#     accepted.fill_(0)
+#     for i in range(1, number_samples):
+#         states[i].copy_(current_state)
+#         log_probs[i].copy_(current_log_prob)
+#         current_state = states[i]
+#         current_log_prob = log_probs[i]
+#         sweep()
+#
+#     # Subtract 1 because the loop above starts at 1
+#     acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
+#     return states, log_probs, acceptance
+#
+#
+# def sample_using_metropolis(
+#     log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions
+# ):
+#     initial_state = prepare_initial_state(basis, options.number_chains)
+#     initial_norm = ls.batched_state_info(basis, initial_state.numpy().view(np.uint64))[2]
+#     initial_norm *= initial_norm  # We need 1/N rather than 1/√N
+#     initial_state = initial_state.to(options.device)
+#     initial_norm = torch.from_numpy(initial_norm).to(options.device)
+#     kernel_fn = MetropolisGenerator(basis)
+#     t1 = time.time()
+#     states, log_probs, acceptance = metropolis_process(
+#         (initial_state, initial_norm),
+#         log_prob_fn,
+#         kernel_fn,
+#         options.number_samples,
+#         options.number_discarded,
+#         options.sweep_size,
+#     )
+#     t2 = time.time()
+#     info = {"acceptance_rate": torch.mean(acceptance).item(), "metropolis_process": t2 - t1}
+#     return states, log_probs, info
 
 
 @torch.jit.script
@@ -550,6 +544,23 @@ def zanella_process(
     return states, log_prob, weights
 
 
+@torch.jit.script
+@torch.no_grad()
+def _zanella_choose_samples(weights: Tensor, number_samples: int) -> Tensor:
+    boundaries = weights.new_empty((weights.size(0) + 1,))
+    boundaries[0] = 0
+    torch.cumsum(weights, dim=0, out=boundaries[1:])
+    points = torch.linspace(0, boundaries[-1], number_samples)
+    points[0] = torch.nextafter(torch.scalar_tensor(points[0]), torch.scalar_tensor(boundaries[-1]))
+    points[-1] = torch.nextafter(
+        torch.scalar_tensor(points[-1]), torch.scalar_tensor(boundaries[0])
+    )
+    indices = torch.bucketize(points, boundaries=boundaries, right=False) - 1
+    # assert torch.all(indices >= 0)
+    # assert torch.all(indices < weights.size(0))
+    return indices
+
+
 @torch.no_grad()
 def sample_using_zanella(log_prob_fn, basis, options):
     current_state = prepare_initial_state(basis, options.number_chains)
@@ -560,7 +571,7 @@ def sample_using_zanella(log_prob_fn, basis, options):
         for i in range(basis.number_spins - 1):
             for j in range(i + 1, basis.number_spins):
                 edges.append((i, j))
-    generator_fn = ZanellaGenerator(basis, edges)
+    generator_fn = lib.ZanellaGenerator(basis, edges)
     sweep_size = options.sweep_size
     t1 = time.time()
     states, log_probs, weights = zanella_process(
@@ -575,12 +586,8 @@ def sample_using_zanella(log_prob_fn, basis, options):
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
     final_log_probs = log_probs.new_empty((options.number_samples,) + log_probs.size()[1:])
     device = final_states.device
-    time_steps = torch.sum(weights, dim=0)
-    time_steps /= options.number_samples
-    weights = weights.cpu()
     for chain in range(weights.size(1)):
-        Δt = time_steps[chain].item()
-        indices = zanella_choose_samples(weights[:, chain], options.number_samples, Δt, device)
+        indices = _zanella_choose_samples(weights[:, chain], options.number_samples)
         torch.index_select(states[:, chain], dim=0, index=indices, out=final_states[:, chain])
         torch.index_select(log_probs[:, chain], dim=0, index=indices, out=final_log_probs[:, chain])
     t3 = time.time()
@@ -636,44 +643,44 @@ def sample_some(
     fn = {
         "exact": sample_exactly,
         "full": sample_full,
-        "autoregressive": sample_autoregressive,
-        "metropolis": sample_using_metropolis,
+        # "autoregressive": sample_autoregressive,
+        # "metropolis": sample_using_metropolis,
         "zanella": sample_using_zanella,
     }[mode]
     return fn(log_prob_fn, basis, options)
 
 
-def prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
-    # First, we generate a bunch of representatives, and then sample uniformly from them.
-    states = dict()
-    for _ in range(max(2 * batch_size, 10000)):
-        states[random_spin(basis)] = None
-
-    out = torch.empty((batch_size, 8), dtype=torch.int64)
-    batch = out.numpy().view(np.uint64)
-    if len(states) >= batch_size:
-        indices = torch.randperm(len(states))[:batch_size]
+def _random_spins_chunk(basis, size):
+    spins = np.zeros((size, 8), dtype=np.uint64)
+    if basis.hamming_weight is None:
+        assert False
     else:
-        logger.warning(
-            "Failed to generate enough different spin configurations: {} generated, "
-            "but {} required".format(len(states), batch_size)
-        )
-        indices = torch.cat(
-            [
-                torch.arange(len(states)),
-                torch.randint(len(states), size=(batch_size - len(states),)),
-            ]
-        )
+        m = basis.hamming_weight
+        buf = np.empty((size, basis.number_spins), dtype=np.uint64)
+        buf[:, :m] = 1
+        buf[:, m:] = 0
+        buf = np.random.permutation(buf.T).T
+        i = 0
+        word = 0
+        for j in range(basis.number_spins):
+            spins[:, word] |= buf[:, j] << i
+            i += 1
+            if i == 64:
+                word += 1
+    spins, _, norms = basis.batched_state_info(spins)
+    spins = spins[norms > 0]
+    spins = np.unique(spins, axis=0)
+    return spins
 
-    def _int_to_ls_bits512(x: int, out: np.ndarray):
-        for i in range(8):
-            out[i] = x & 0xFFFFFFFFFFFFFFFF
-            x >>= 64
 
-    states = list(states.keys())
-    for i, index in enumerate(indices):
-        _int_to_ls_bits512(states[index], out=batch[i])
-    return out
+def random_spins(basis: ls.SpinBasis, size: int, scale: int = 2) -> Tensor:
+    spins = _random_spins_chunk(basis, scale * size)
+    indices = np.random.randint(spins.shape[0], size=size)
+    return spins[indices]
+
+
+def prepare_initial_state(basis, batch_size: int) -> torch.Tensor:
+    return torch.from_numpy(random_spins(basis, batch_size).view(np.int64))
 
 
 def autocorr_function(x: np.ndarray) -> np.ndarray:

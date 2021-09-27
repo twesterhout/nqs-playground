@@ -28,6 +28,7 @@
 
 #include "../common/accumulator.hpp"
 #include "../common/metropolis.hpp"
+#include "../common/polynomial.hpp"
 #include "../common/wrappers.hpp"
 #include "../common/zanella.hpp"
 #include "pybind11_helpers.hpp"
@@ -53,6 +54,26 @@ PYBIND11_MODULE(_C, m)
         return apply(std::move(spins), std::move(op), std::move(psi), max_required_size,
                      batch_size);
     }, py::arg{"spins"}.noconvert(), py::arg{"operator"}.noconvert(), py::arg{"psi"}, py::arg{"batch_size"});
+
+    m.def("log_apply_polynomial", [](torch::Tensor spins, py::object py_op,
+                                     std::vector<std::complex<double>> roots,
+                                     ForwardT psi, uint64_t batch_size, bool normalizing) {
+        auto operator_type = py::module_::import("lattice_symmetries").attr("Operator");
+        TCM_CHECK(isinstance(py_op, operator_type), std::invalid_argument,
+                  "'operator' argument has wrong type; expected lattice_symmetries.Operator");
+        auto const* _op =
+            reinterpret_cast<ls_operator*>(py_op.attr("_payload").attr("value").cast<intptr_t>());
+        TCM_ASSERT(_op != nullptr, "");
+        auto [op, max_required_size] = view_as_operator(*_op);
+        auto polynomial = Polynomial{QuantumOperator{std::move(op), max_required_size},
+                                     std::move(roots), normalizing};
+        py::print("Hamiltonian max_required_size:", max_required_size);
+        py::print("Polynomial max_required_size:", polynomial.max_states());
+        py::gil_scoped_release release;
+        return apply(std::move(spins), std::cref(polynomial), std::move(psi),
+                     polynomial.max_states(), batch_size);
+    }, py::arg{"spins"}.noconvert(), py::arg{"operator"}.noconvert(), py::arg{"roots"},
+       py::arg{"psi"}, py::arg{"batch_size"}, py::arg{"normalizing"} = false);
 
     m.def(
         "manual_seed", [](uint64_t const seed) { manual_seed(seed); },

@@ -165,6 +165,10 @@ auto split_counts(std::vector<uint64_t> counts, uint64_t const batch_size)
 
     for (auto i = uint64_t{0}; i < counts.size(); ++i) {
         auto current_count = counts[i];
+        if (current_count == 0) {
+            chunk.first.push_back(0);
+            chunk.second = true;
+        }
 
         while (chunk_count + current_count >= batch_size) {
             chunk.first.push_back(batch_size - chunk_count);

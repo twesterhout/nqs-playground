@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2020, Tom Westerhout
+// Copyright (c) 2021, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -26,40 +26,25 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include <lattice_symmetries/lattice_symmetries.h>
+#include <torch/types.h>
 
-#include "accumulator.hpp"
-#include <gsl/gsl-lite.hpp>
-#include <cmath>
-#include <vector>
+namespace tcm {
 
-TCM_NAMESPACE_BEGIN
-
-class Polynomial {
+class ZanellaGenerator {
   private:
-    QuantumOperator                   _op;
-    std::vector<std::complex<double>> _roots;
-    uint64_t                          _max_states;
-    bool                              _normalising;
+    ls_spin_basis const*                       _basis;
+    std::vector<std::pair<unsigned, unsigned>> _edges;
+
+    auto generate(ls_bits512 const& spin, ls_bits512* out) const -> int64_t;
+    auto project(ls_bits512* spins, int64_t count) const -> int64_t;
 
   public:
-    Polynomial(QuantumOperator op, std::vector<complex_type> roots, bool normalising);
-    Polynomial(Polynomial const&)           = delete;
-    Polynomial(Polynomial&& other) noexcept = default;
-    Polynomial& operator=(Polynomial const&) = delete;
-    Polynomial& operator=(Polynomial&&) = delete;
+    ZanellaGenerator(ls_spin_basis const& basis, std::vector<std::pair<unsigned, unsigned>> edges);
+    ~ZanellaGenerator();
 
-    auto degree() const noexcept -> uint64_t;
-    auto roots() const noexcept -> gsl::span<std::complex<double> const>;
-
-    auto operator()(ls_bits512 const& spin, complex_type coeff, gsl::span<ls_bits512> out_spins,
-                    gsl::span<complex_type> out_coeffs) const -> uint64_t;
-
-    constexpr auto max_states() const noexcept -> uint64_t { return _max_states; }
-
-  private:
-    struct Buffer;
-    auto iteration(complex_type root, Buffer& buffer) const -> void;
+    auto operator()(torch::Tensor x) const -> std::tuple<torch::Tensor, torch::Tensor>;
+    auto max_states() const noexcept -> uint64_t;
 };
 
-TCM_NAMESPACE_END
+} // namespace tcm
