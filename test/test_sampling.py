@@ -31,7 +31,8 @@ def prepare_even_chain(n: int):
     full_basis.build()
 
     # Diagonalize the Hamiltonian in two bases
-    terms = [nqs.heisenberg_interaction([(i, (i + 1) % n) for i in range(n)])]
+    matrix = np.array([[1, 0, 0, 0], [0, -1, 2, 0], [0, 2, -1, 0], [0, 0, 0, 1]])
+    terms = [ls.Interaction(matrix, [(i, (i + 1) % n) for i in range(n)])]
     symm_H = ls.Operator(symm_basis, terms)
     symm_E, symm_ψ = ls.diagonalize(symm_H)
     symm_ψ = symm_ψ.squeeze()
@@ -74,12 +75,15 @@ def prepare_even_chain(n: int):
         },
     }
 
+
 def test_compiles():
     ε = 1e-4
     for n in [4]:
         info = prepare_even_chain(n)
-        for mode in ["full", "exact", "metropolis", "zanella"]:
-            sampling_options = nqs.SamplingOptions(number_samples=10, number_chains=4, sweep_size=n, mode=mode)
+        for mode in ["full", "exact", "zanella"]:
+            sampling_options = nqs.SamplingOptions(
+                number_samples=10, number_chains=4, sweep_size=n, mode=mode
+            )
             for variant in ["full", "symm"]:
                 data = info[variant]
                 _ = nqs.sample_some(data["log_amplitude"], data["basis"], sampling_options)
@@ -89,16 +93,16 @@ def test_via_l1_closeness():
     ε = 1e-4
     for n in [4, 6, 8]:
         info = prepare_even_chain(n)
-        for mode in ["metropolis", "zanella"]:
+        for mode in ["zanella"]:
             sampling_options = nqs.SamplingOptions(
                 number_samples=1, number_chains=32, sweep_size=n
-            )
+            )._replace(mode=mode)
             for variant in ["full", "symm"]:
                 data = info[variant]
                 r = nqs.are_close_l1(
-                    100000,
+                    20000,
                     data["basis"],
-                    lambda o: nqs.sample_some(data["log_amplitude"], data["basis"], o, mode),
+                    lambda o: nqs.sample_some(data["log_amplitude"], data["basis"], o),
                     data["exact_prob"],
                     ε,
                     sampling_options,
@@ -144,6 +148,7 @@ def test_via_chisquare():
                 logger.info("combined p-value: {}", combined_p_value)
                 assert combined_p_value > ε
 
+
 def test_zanella_graphs():
     ε = 1e-4
     info = prepare_even_chain(6)
@@ -152,7 +157,9 @@ def test_zanella_graphs():
         [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)],
     ]
     for g in graphs:
-        sampling_options = nqs.SamplingOptions(number_samples=1, number_chains=32, sweep_size=6, other={"edges": g})
+        sampling_options = nqs.SamplingOptions(
+            number_samples=1, number_chains=32, sweep_size=6, other={"edges": g}
+        )
         for variant in ["full", "symm"]:
             data = info[variant]
             r = nqs.are_close_l1(
@@ -165,3 +172,6 @@ def test_zanella_graphs():
             )
             logger.info("Results: {}", r)
             assert sum(r) > len(r) / 2
+
+test_compiles()
+test_via_l1_closeness()

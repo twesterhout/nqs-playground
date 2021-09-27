@@ -1,4 +1,4 @@
-# Copyright Tom Westerhout (c) 2019
+# Copyright Tom Westerhout (c) 2019-2021
 #
 # All rights reserved.
 #
@@ -34,6 +34,7 @@ __all__ = [
     "setup_random_generators",
     "Unpack",
     "pack",
+    "pad_states",
     "split_into_batches",
     "forward_with_batches",
     "as_spins_tensor",
@@ -42,10 +43,10 @@ __all__ = [
     # "combine_amplitude_and_sign_classifier",
     "combine_amplitude_and_phase",
     "safe_exp",
-    "load_ground_state",
-    "load_hamiltonian",
-    "_get_device",
-    "_get_dtype",
+    # "load_ground_state",
+    # "load_hamiltonian",
+    "get_device",
+    "get_dtype",
 ]
 
 import os
@@ -57,7 +58,6 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor
-import lattice_symmetries as ls
 from loguru import logger
 
 # from typing_extensions import Final
@@ -67,8 +67,10 @@ from loguru import logger
 #     # If you don't have `typing_extensions` installed, you can use a
 #     # polyfill from `torch.jit`.
 #     from torch.jit import Final
+import lattice_symmetries as ls
+import unpack_bits
 
-from . import _C
+# from . import _C
 
 
 # Taken from torch; all credit goes to PyTorch developers.
@@ -108,22 +110,29 @@ def setup_random_generators(*args):
     for x in args:
         sha1.update(get_bytes(x))
     sha1 = sha1.hexdigest()
-    seeds = int(sha1[:8], base=16), int(sha1[8:16], base=16), int(sha1[16:24], base=16)
-    logger.info("Seeding NumPy with {}, Torch with {}, nqs_playground with {}...", *seeds)
+    seeds = int(sha1[:8], base=16), int(sha1[8:16], base=16)  # , int(sha1[16:24], base=16)
+    logger.info("Seeding NumPy with {}, PyTorch with {} ...", *seeds)
     np.random.seed(seeds[0])
     torch.manual_seed(seeds[1])
-    _C.manual_seed(seeds[2])
+    # _C.manual_seed(seeds[2])
 
 
 class Unpack(torch.nn.Module):
-    n: int
+    r"""Unpacks spin configurations represented as bits (`uint64_t` or `ls_bits512`) into a
+    2D-tensor of `float32`.
+    """
+    __constants__ = ["number_spins"]
+    number_spins: int
 
-    def __init__(self, n: int):
+    def __init__(self, number_spins: int):
         super().__init__()
-        self.n = n
+        self.number_spins = number_spins
 
-    def forward(self, x):
-        return torch.ops.tcm.unpack(x, self.n)
+    def forward(self, x: Tensor) -> Tensor:
+        return unpack_bits.unpack(x, self.number_spins)
+
+    def extra_repr(self) -> str:
+        return "number_spins={}".format(self.number_spins)
 
 
 def pack(xs: torch.Tensor) -> torch.Tensor:
@@ -135,6 +144,23 @@ def pack(xs: torch.Tensor) -> torch.Tensor:
     # print(xs, torch.ops.tcm.unpack(r, xs.size(1)))
     assert torch.all(torch.ops.tcm.unpack(r, xs.size(1)) == xs)
     return r
+
+
+def pad_states(states: Tensor) -> Tensor:
+    """Pad states with zeros to get a Tensor of bits512 instead of int64."""
+    if states.ndim == 0 or states.ndim == 1:
+        states = states.reshape(-1, 1)
+    if states.ndim != 2:
+        raise ValueError("'states' has invalid shape: {}".format(states.size()))
+    if states.size(1) == 1:
+        padding = torch.zeros(states.size(0), 7, device=states.device, dtype=torch.int64)
+        states = torch.cat([states, padding], dim=1)
+    elif spins.size(1) != 8:
+        raise ValueError(
+            "'states' has invalid shape: {}; size along the last dimension "
+            "must be either 1 or 8".format(states.size())
+        )
+    return states
 
 
 def as_spins_tensor(spins: Tensor, force_width: bool = True) -> Tensor:
@@ -281,7 +307,8 @@ class SpinDataset(torch.utils.data.IterableDataset):
             spins = self.spins
             values = self.values
         return zip(
-            torch.split(self.spins, self.batch_size), torch.split(self.values, self.batch_size),
+            torch.split(self.spins, self.batch_size),
+            torch.split(self.values, self.batch_size),
         )
 
 
@@ -503,15 +530,15 @@ def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
     return x
 
 
-def _get_device(obj) -> Optional[torch.device]:
-    return __get_a_var(obj).device
+def get_device(obj) -> Optional[torch.device]:
+    return _get_a_var(obj).device
 
 
-def _get_dtype(obj) -> Optional[torch.dtype]:
-    return __get_a_var(obj).dtype
+def get_dtype(obj) -> Optional[torch.dtype]:
+    return _get_a_var(obj).dtype
 
 
-def __get_a_var(obj):
+def _get_a_var(obj):
     if isinstance(obj, Tensor):
         return obj
     if isinstance(obj, torch.nn.Module):
