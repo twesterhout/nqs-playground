@@ -1,4 +1,4 @@
-// Copyright (c) 2020, Tom Westerhout
+// Copyright (c) 2020-2021, Tom Westerhout
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -70,7 +70,6 @@ auto _check_forward_result(torch::Tensor const& output, int64_t const expected_b
 HEDLEY_NEVER_INLINE auto Task::operator()() const -> torch::Tensor
 {
     torch::NoGradGuard no_grad;
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "Starting operator()...");
 
     auto const device = spins.device();
     auto output = forward(spins);
@@ -80,15 +79,11 @@ HEDLEY_NEVER_INLINE auto Task::operator()() const -> torch::Tensor
     // likely std::complex<float> to avoid the loss of precision when we do
     // exponentiation and other stuff)
     output = output.to(at::kComplexDouble);
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "Computed output");
     // Compute exp(output), but making sure it does not overflow
     auto       real  = torch::real(output);
     auto const scale = torch::max(real); // .item();
     real -= scale;
     output.exp_();
-    if (torch::any(torch::isnan(output)).item<bool>()) {
-        throw std::runtime_error{"isnan"};
-    }
 
     auto       results = torch::empty({static_cast<int64_t>(counts.size())},
                                 torch::TensorOptions{}.device(device).dtype(at::kComplexDouble));
@@ -96,8 +91,13 @@ HEDLEY_NEVER_INLINE auto Task::operator()() const -> torch::Tensor
     // TCM_ASSERT(!torch::any(torch::isnan(cs)).item<bool>(), "");
     auto offset = int64_t{0};
     for (auto j = 0U; j < counts.size(); offset += counts[j++]) {
-        if (counts[j] <= 0) {
-            throw std::runtime_error{""};
+        if (HEDLEY_UNLIKELY(counts[j] <= 0)) {
+            std::ostringstream msg;
+            msg << "counts[" << j << "] = " << counts[j]
+                << ", but expected a positive integer. This could be caused by the fact that "
+                   "your lattice_symmetries.Operator contains a zero row. In that case, adding "
+                   "a small diagonal correction might help.";
+            throw std::runtime_error{msg.str()};
         }
         auto const slice_fn = [this, j, offset](auto const& t) {
             return torch::narrow(t, /*dim=*/0, /*start=*/offset, /*length=*/counts[j]);
@@ -149,15 +149,10 @@ HEDLEY_NEVER_INLINE auto process_chunk(ls_bits512 const* spins, int64_t const ba
 auto log_apply(ls_bits512 const* spins, int64_t const count, ls_operator const& op,
                ForwardT fn, c10::Device const device, int64_t const batch_size) -> torch::Tensor
 {
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "inner log_apply called");
     std::optional<ThreadPool> pool{std::nullopt};
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "initialized pool");
-    // if (device.type() != torch::kCPU) { pool.emplace(); }
+    if (device.type() != torch::kCPU) { pool.emplace(); }
     std::vector<std::future<std::invoke_result_t<Task>>> futures;
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "initialized vector");
-    LATTICE_SYMMETRIES_LOG_DEBUG("Calling reserve with %zu, %zu ...\n", count, batch_size);
     futures.reserve(static_cast<size_t>((count + batch_size - 1) / batch_size));
-    LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "reserved memory");
     auto const make_future = [&pool](auto&& task) {
         if (pool.has_value()) {
             return pool->enqueue(std::forward<decltype(task)>(task));
@@ -167,15 +162,11 @@ auto log_apply(ls_bits512 const* spins, int64_t const count, ls_operator const& 
 
     auto i = int64_t{0};
     for (; i + batch_size <= count; i += batch_size) {
-        LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "processing full chunk ...");
         auto task = process_chunk(spins + i, batch_size, op, fn, device);
-        LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "creating future ...");
         futures.emplace_back(make_future(std::move(task)));
     }
     if (i != count) {
-        LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "processing last chunk ...");
         auto task = process_chunk(spins + i, count - i, op, fn, device);
-        LATTICE_SYMMETRIES_LOG_DEBUG("%s\n", "creating future ...");
         futures.emplace_back(make_future(std::move(task)));
     }
 
