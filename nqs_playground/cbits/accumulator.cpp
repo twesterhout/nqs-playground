@@ -159,7 +159,15 @@ auto log_apply(ls_bits512 const* spins, int64_t const count, ls_operator const& 
         }
         return sync_task(std::forward<decltype(task)>(task));
     };
-
+    // This is a hack to initialize CUcontext needed by Halide
+    if (device.type() != torch::kCPU) {
+        auto task = [device]() {
+            auto dummy_tensor = torch::zeros(std::initializer_list<int64_t>{1},
+                    torch::TensorOptions{}.device(device));
+        };
+        auto f = make_future(std::move(task));
+        f.get();
+    }
     auto i = int64_t{0};
     for (; i + batch_size <= count; i += batch_size) {
         auto task = process_chunk(spins + i, batch_size, op, fn, device);
