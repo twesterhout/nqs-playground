@@ -149,7 +149,7 @@ def pack(xs: torch.Tensor) -> torch.Tensor:
 def pad_states(states: Tensor) -> Tensor:
     """Pad states with zeros to get a Tensor of bits512 instead of int64."""
     if states.ndim == 0 or states.ndim == 1:
-        states = states.reshape(-1, 1)
+        states = states.view(-1, 1)
     if states.ndim != 2:
         raise ValueError("'states' has invalid shape: {}".format(states.size()))
     if states.size(1) == 1:
@@ -174,15 +174,18 @@ def as_spins_tensor(spins: Tensor, force_width: bool = True) -> Tensor:
     if spins.dtype != torch.int64:
         raise TypeError("'spins' has invalid datatype: {}; expected int64".format(spins.dtype))
     if spins.ndim == 0 or spins.ndim == 1:
-        spins = spins.reshape(-1, 1)
+        spins = spins.view(-1, 1)
     if force_width:
+        if spins.size(-1) == 1:
+            padding = spins.new_zeros(spins.size()[:-1] + (7,))
+            spins = torch.cat([spins, padding], dim=spins.ndim - 1)
         if spins.size(-1) != 8:
             raise ValueError(
                 "'spins' has invalid shape: {}; size along the last dimension "
                 "must be 8".format(spins.size())
             )
-        if spins.stride(-1) != 1:
-            raise ValueError("'spins' must be contiguous along the last dimension")
+    if spins.stride(-1) != 1:
+        raise ValueError("'spins' must be contiguous along the last dimension")
     return spins
 
 
@@ -386,6 +389,8 @@ def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Modu
         def forward(self, x: Tensor) -> Tensor:
             a = self.amplitude(x)
             b = self.phase(x)
+            # print(a.size(), b.size())
+            # print(torch.complex(a, b).size())
             return torch.complex(a, b)
 
     m = CombiningState()

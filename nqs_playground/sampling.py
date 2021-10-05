@@ -540,7 +540,9 @@ def zanella_process(
             log_prob[i, :m].copy_(current_log_prob[:m], non_blocking=True)
             possible_states, counts = _future.result()
             _future = executor.submit(_generate, current_state[m:])
-            indices, possible_log_probs = _process(possible_states, counts, current_log_prob[:m], weights[i, :m])
+            indices, possible_log_probs = _process(
+                possible_states, counts, current_log_prob[:m], weights[i, :m]
+            )
             _zanella_update_current(possible_states, indices, out=current_state[:m])
             _zanella_update_current(possible_log_probs, indices, out=current_log_prob[:m])
 
@@ -549,7 +551,9 @@ def zanella_process(
             possible_states, counts = _future.result()
             _future = executor.submit(_generate, current_state[:m])
             # _generate(current_state[m:])
-            indices, possible_log_probs = _process(possible_states, counts, current_log_prob[m:], weights[i, m:])
+            indices, possible_log_probs = _process(
+                possible_states, counts, current_log_prob[m:], weights[i, m:]
+            )
             _zanella_update_current(possible_states, indices, out=current_state[m:])
             _zanella_update_current(possible_log_probs, indices, out=current_log_prob[m:])
 
@@ -596,13 +600,14 @@ def _zanella_choose_samples(weights: Tensor, number_samples: int) -> Tensor:
     boundaries[0] = 0
     torch.cumsum(weights, dim=0, out=boundaries[1:])
     points = torch.linspace(0, boundaries[-1], number_samples, device=weights.device)
-    points[0] = torch.nextafter(torch.scalar_tensor(points[0]), torch.scalar_tensor(boundaries[-1]))
-    points[-1] = torch.nextafter(
-        torch.scalar_tensor(points[-1]), torch.scalar_tensor(boundaries[0])
-    )
+    # points[0] = torch.nextafter(torch.scalar_tensor(points[0]), torch.scalar_tensor(boundaries[-1]))
+    # points[-1] = torch.nextafter(
+    #     torch.scalar_tensor(points[-1]), torch.scalar_tensor(boundaries[0])
+    # )
     indices = torch.bucketize(points, boundaries=boundaries, right=False) - 1
-    # assert torch.all(indices >= 0)
-    # assert torch.all(indices < weights.size(0))
+    assert torch.all(indices >= -1)
+    assert torch.all(indices <= weights.size(0))
+    indices = torch.clamp(indices, 0, weights.size(0) - 1)
     return indices
 
 

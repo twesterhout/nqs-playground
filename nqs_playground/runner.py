@@ -44,7 +44,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .sampling import *
 from .hamiltonian import *
-from .core import forward_with_batches, _get_dtype, _get_device
+from .core import forward_with_batches, get_dtype, get_device
 
 
 def _determine_initial_weights(
@@ -95,16 +95,18 @@ class RunnerBase:
     def device(self):
         if hasattr(self.config, "device"):
             return self.config.device
-        return _get_device(self.config.amplitude)
+        return get_device(self.config.amplitude)
+
+    @property
+    def dtype(self):
+        return get_dtype(self.config.amplitude)
 
     @torch.no_grad()
     def perform_sampling(self) -> Tuple[Tensor, Tensor, Tensor]:
         logger.info("Sampling from |ψ(σ)|²...")
         device = self.device
-        dtype = _get_dtype(self.config.amplitude)
+        dtype = self.dtype
         options = self.config.sampling_options._replace(device=device)
-        if hasattr(self.config, "sampling_mode"):
-            options = options._replace(mode=self.config.sampling_mode)
         states, log_probs, info = sample_some(self.config.amplitude, self.basis, options)
         weights = _determine_initial_weights(states, log_probs, info, dtype)
         if len(info) > 0:
@@ -124,7 +126,7 @@ class RunnerBase:
             states,
             self.config.hamiltonian,
             self.combined_state,
-            batch_size=self.config.inference_batch_size,
+            batch_size=self.config.inference_batch_size // self.basis.number_spins,
         )
         tau = integrated_autocorr_time(local_energies)
         logger.info("Autocorrelation time of Eₗ(σ): {}", tau)
