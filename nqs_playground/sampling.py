@@ -192,6 +192,7 @@ def sample_full(
         "Applying 'log_prob_fn' to all basis vectors in the Hilbert space using batch_size={}..."
         "".format(batch_size)
     )
+    states = pad_states(states)
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
@@ -199,7 +200,7 @@ def sample_full(
     logger.debug("Computing weights...")
     log_prob = log_prob.unsqueeze_(dim=1)
     weights = safe_exp(log_prob, normalise=True)
-    states = pad_states(states).unsqueeze_(dim=1)
+    states = states.unsqueeze_(dim=1)
     return states, log_prob, {"weights": weights}
 
 
@@ -531,7 +532,7 @@ def zanella_process(
 
     m = number_chains // 2
 
-    iterations = itertools.chain(itertools.repeat(0, number_discarded), range(number_samples - 1))
+    iterations = itertools.chain(itertools.repeat(0, number_discarded), range(number_samples))
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         _future = executor.submit(_generate, current_state[:m])
@@ -556,7 +557,7 @@ def zanella_process(
             )
             _zanella_update_current(possible_states, indices, out=current_state[m:])
             _zanella_update_current(possible_log_probs, indices, out=current_log_prob[m:])
-
+        _ = _future.result()
         # Generates all states to which we could jump
         # possible_states, counts = generator_fn(current_state)
         # total_count = torch.sum(counts).item()
@@ -600,10 +601,6 @@ def _zanella_choose_samples(weights: Tensor, number_samples: int) -> Tensor:
     boundaries[0] = 0
     torch.cumsum(weights, dim=0, out=boundaries[1:])
     points = torch.linspace(0, boundaries[-1], number_samples, device=weights.device)
-    # points[0] = torch.nextafter(torch.scalar_tensor(points[0]), torch.scalar_tensor(boundaries[-1]))
-    # points[-1] = torch.nextafter(
-    #     torch.scalar_tensor(points[-1]), torch.scalar_tensor(boundaries[0])
-    # )
     indices = torch.bucketize(points, boundaries=boundaries, right=False) - 1
     assert torch.all(indices >= -1)
     assert torch.all(indices <= weights.size(0))
@@ -613,7 +610,9 @@ def _zanella_choose_samples(weights: Tensor, number_samples: int) -> Tensor:
 
 @torch.no_grad()
 def sample_using_zanella(log_prob_fn, basis, options):
+    t1 = time.time()
     current_state = prepare_initial_state(basis, options.number_chains)
+    t2 = time.time()
     current_state = current_state.to(options.device)
     edges = options.other.get("edges")
     if edges is None:
@@ -623,7 +622,6 @@ def sample_using_zanella(log_prob_fn, basis, options):
                 edges.append((i, j))
     generator_fn = lib.ZanellaGenerator(basis, edges)
     sweep_size = options.sweep_size
-    t1 = time.time()
     states, log_probs, weights = zanella_process(
         current_state,
         log_prob_fn,
@@ -631,7 +629,7 @@ def sample_using_zanella(log_prob_fn, basis, options):
         options.number_samples * sweep_size,
         options.number_discarded * sweep_size,
     )
-    t2 = time.time()
+    t3 = time.time()
     # return states, log_probs, weights
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
     final_log_probs = log_probs.new_empty((options.number_samples,) + log_probs.size()[1:])
@@ -640,8 +638,12 @@ def sample_using_zanella(log_prob_fn, basis, options):
         indices = _zanella_choose_samples(weights[:, chain], options.number_samples)
         torch.index_select(states[:, chain], dim=0, index=indices, out=final_states[:, chain])
         torch.index_select(log_probs[:, chain], dim=0, index=indices, out=final_log_probs[:, chain])
-    t3 = time.time()
-    return final_states, final_log_probs, {"zanella_process": t2 - t1, "choose_samples": t3 - t2}
+    t4 = time.time()
+    return (
+        final_states,
+        final_log_probs,
+        {"initial_state": t2 - t1, "zanella_process": t3 - t2, "choose_samples": t4 - t3},
+    )
 
 
 @torch.no_grad()
@@ -697,18 +699,24 @@ def _random_spins_chunk(basis, size):
     if basis.hamming_weight is None:
         assert False
     else:
+        indices = torch.multinomial(
+            torch.ones((size, basis.number_spins)), basis.number_spins, replacement=False
+        )
+
         m = basis.hamming_weight
-        buf = np.empty((size, basis.number_spins), dtype=np.uint64)
-        buf[:, :m] = 1
-        buf[:, m:] = 0
-        buf = np.random.permutation(buf.T).T
-        i = 0
-        word = 0
-        for j in range(basis.number_spins):
-            spins[:, word] |= buf[:, j] << i
-            i += 1
-            if i == 64:
-                word += 1
+        initial = torch.empty((basis.number_spins,), dtype=torch.int64)
+        initial[:m] = 1
+        initial[m:] = 0
+
+        for k in range(size):
+            i = 0
+            word = 0
+            for j in range(basis.number_spins):
+                spins[k, word] = int(spins[k, word]) | (int(initial[indices[k, j]]) << i)
+                i += 1
+                if i == 64:
+                    word += 1
+                    i = 0
     spins, _, norms = basis.batched_state_info(spins)
     spins = spins[norms > 0]
     spins = np.unique(spins, axis=0)

@@ -31,6 +31,7 @@
 
 from collections import namedtuple
 import time
+import os
 from loguru import logger
 import numpy as np
 import torch
@@ -38,7 +39,6 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from . import *
-# from .runner import _RunnerBase
 
 Config = namedtuple(
     "Config",
@@ -147,21 +147,47 @@ class Runner(RunnerBase):
         )
 
     def inner_iteration(self, states, log_probs, weights):
+        assert weights.dtype == torch.float64
+        assert log_probs.dtype == torch.float64
         logger.info("Inner iteration...")
         tick = time.time()
         E = self.compute_local_energies(states, weights)
+        E = E.real.to(dtype=weights.dtype)
         states = states.view(-1, states.size(-1))
         log_probs = states.view(-1)
         weights = weights.view(-1)
 
         # Compute output gradient
         with torch.no_grad():
-            grad = E.real - torch.dot(E.real, weights)
+            grad = E - torch.dot(E, weights)
             grad *= 2 * weights
             grad = grad.view(-1, 1)
             grad_norm = torch.linalg.norm(grad)
             logger.info("‖∇E‖₂ = {}", grad_norm)
             self.tb_writer.add_scalar("loss/grad", grad_norm, self.global_index)
+
+        # checkpoint_name = "checkpoint_{}.pt".format(self.global_index)
+        # if not os.path.exists(checkpoint_name):
+        #     logger.debug("Saving...")
+        #     obj = {
+        #         "states": states,
+        #         "log_probs": log_probs,
+        #         "weights": weights,
+        #         "grad": grad,
+        #     }
+        #     torch.save(obj, checkpoint_name)
+        # else:
+        #     logger.debug("Loading...")
+        #     obj = torch.load(checkpoint_name)
+        #     if not torch.all(states == obj["states"]):
+        #         other_states = obj["states"]
+        #         for i in range(states.size(0)):
+        #             if not torch.all(states[i] == other_states[i]):
+        #                 logger.error("{}: {} != {}", i, states[i, 0], other_states[i, 0])
+        #     assert torch.all(log_probs == obj["log_probs"])
+        #     assert torch.all(weights == obj["weights"])
+        #     assert torch.all(grad == obj["grad"])
+
 
         self.config.optimizer.zero_grad()
         batch_size = self.config.inference_batch_size
@@ -169,13 +195,15 @@ class Runner(RunnerBase):
         # Computing gradients for the amplitude network
         logger.info("Computing gradients...")
         if _should_optimize(self.config.amplitude):
+            self.config.amplitude.train()
             forward_fn = self.amplitude_forward_fn
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)
-                output.backward(grad_chunk, retain_graph=True)
+                output.backward(grad_chunk) # , retain_graph=True)
 
         # Computing gradients for the phase network
         if _should_optimize(self.config.phase):
+            self.config.phase.train()
             forward_fn = self.config.phase
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)

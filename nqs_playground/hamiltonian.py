@@ -91,12 +91,14 @@ def _reference_log_apply_one(spin, operator, log_psi, device):
     spins, coeffs = operator.apply(spin)
     spins = torch.from_numpy(spins.view(np.int64)).to(device)
     output = log_psi(spins)
+    coeffs = torch.from_numpy(coeffs).to(device=device)
+    output = output.to(dtype=coeffs.dtype)
     if output.dim() > 1:
         output.squeeze_(dim=1)
     scale = torch.max(output.real)
     output.real -= scale
     torch.exp_(output)
-    coeffs = torch.from_numpy(coeffs).to(device=device, dtype=output.dtype)
+    # coeffs = torch.from_numpy(coeffs).to(device=device, dtype=output.dtype)
     return scale + torch.log(torch.dot(coeffs, output))
 
 
@@ -172,7 +174,7 @@ def local_values(
         through ``state``.
     """
     spins = as_spins_tensor(spins, force_width=True)
-    log_h_psi = log_apply(spins, hamiltonian, state, batch_size)
+    log_h_psi = log_apply(spins, hamiltonian, state, batch_size, debug=debug)
     if log_psi is None:
         # Compute log(⟨s|ψ⟩) for all s.
         log_psi = forward_with_batches(state, spins.view(-1, spins.size(-1)), batch_size)
