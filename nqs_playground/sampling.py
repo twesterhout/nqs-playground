@@ -2,6 +2,9 @@
 from collections import namedtuple
 import math
 import time
+import itertools
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from random import randint
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -189,6 +192,7 @@ def sample_full(
         "Applying 'log_prob_fn' to all basis vectors in the Hilbert space using batch_size={}..."
         "".format(batch_size)
     )
+    states = pad_states(states)
     log_prob = forward_with_batches(log_prob_fn, states, batch_size=batch_size, device=device)
     if log_prob.dim() > 1:
         log_prob.squeeze_(dim=1)
@@ -196,7 +200,7 @@ def sample_full(
     logger.debug("Computing weights...")
     log_prob = log_prob.unsqueeze_(dim=1)
     weights = safe_exp(log_prob, normalise=True)
-    states = pad_states(states).unsqueeze_(dim=1)
+    states = states.unsqueeze_(dim=1)
     return states, log_prob, {"weights": weights}
 
 
@@ -497,11 +501,13 @@ def zanella_process(
     weights = current_log_prob.new_empty(number_samples, current_state.size(0))
     # Store results of the first iteration. Note that current_weight is not yet
     # computed! It will be done inside the loop
-    states[0].copy_(current_state)
-    log_prob[0].copy_(current_log_prob)
-    current_state = states[0]
-    current_log_prob = log_prob[0]
-    current_weight = weights[0]
+    # states[0].copy_(current_state)
+    # log_prob[0].copy_(current_log_prob)
+    # current_state = states[0]
+    # current_log_prob = log_prob[0]
+    # current_weight = weights[0]
+
+    assert number_chains > 1
 
     # Main loop. We keep track of the iteration manually since we want to stop
     # in the middle of the loop body rather than at the end. We also keep a
@@ -509,61 +515,104 @@ def zanella_process(
     # that samples should be discarded
     iteration = 0
     discard = True
-    while True:
-        # Generates all states to which we could jump
-        possible_states, counts = generator_fn(current_state)
+
+    def _generate(_current_state):
+        return generator_fn(_current_state)
+
+    def _process(possible_states, counts, _current_log_prob, _current_weight):
         total_count = torch.sum(counts).item()
         max_count = possible_states.size(1)
         flat_possible_states = _flatten_states(possible_states, counts, total_count)
         flat_possible_log_probs = log_prob_fn(flat_possible_states)
         possible_log_probs = _unflatten_log_probs(flat_possible_log_probs, counts, max_count)
-        # possible_log_probs = possible_log_probs.view(number_chains, -1)
-        # _pad_log_prob(possible_log_probs, counts, value=-1e7)
-        jump_rates = _zanella_jump_rates(current_log_prob, possible_log_probs)
+        jump_rates = _zanella_jump_rates(_current_log_prob, possible_log_probs)
+        _sample_exponential(jump_rates.sum(dim=1), out=_current_weight)
+        indices = _zanella_next_state_index(jump_rates)
+        return indices, possible_log_probs
+
+    m = number_chains // 2
+
+    iterations = itertools.chain(itertools.repeat(0, number_discarded), range(number_samples))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        _future = executor.submit(_generate, current_state[:m])
+        for i in iterations:
+            states[i, :m].copy_(current_state[:m], non_blocking=True)
+            log_prob[i, :m].copy_(current_log_prob[:m], non_blocking=True)
+            possible_states, counts = _future.result()
+            _future = executor.submit(_generate, current_state[m:])
+            indices, possible_log_probs = _process(
+                possible_states, counts, current_log_prob[:m], weights[i, :m]
+            )
+            _zanella_update_current(possible_states, indices, out=current_state[:m])
+            _zanella_update_current(possible_log_probs, indices, out=current_log_prob[:m])
+
+            states[i, m:].copy_(current_state[m:], non_blocking=True)
+            log_prob[i, m:].copy_(current_log_prob[m:], non_blocking=True)
+            possible_states, counts = _future.result()
+            _future = executor.submit(_generate, current_state[:m])
+            # _generate(current_state[m:])
+            indices, possible_log_probs = _process(
+                possible_states, counts, current_log_prob[m:], weights[i, m:]
+            )
+            _zanella_update_current(possible_states, indices, out=current_state[m:])
+            _zanella_update_current(possible_log_probs, indices, out=current_log_prob[m:])
+        _ = _future.result()
+        # Generates all states to which we could jump
+        # possible_states, counts = generator_fn(current_state)
+        # total_count = torch.sum(counts).item()
+        # max_count = possible_states.size(1)
+        # flat_possible_states = _flatten_states(possible_states, counts, total_count)
+        # flat_possible_log_probs = log_prob_fn(flat_possible_states)
+        # possible_log_probs = _unflatten_log_probs(flat_possible_log_probs, counts, max_count)
+        # jump_rates = _zanella_jump_rates(current_log_prob, possible_log_probs)
         # Calculate for how long we have to sit in the current state
         # Note that only now have we computed all quantities for `iteration`.
-        _sample_exponential(jump_rates.sum(dim=1), out=current_weight)
+        # _sample_exponential(jump_rates.sum(dim=1), out=current_weight)
 
-        iteration += 1
-        if discard:
-            if iteration >= number_discarded:
-                iteration = 0
-                discard = False
-        else:
-            if iteration == number_samples:
-                break
-            current_state = states[iteration]
-            current_log_prob = log_prob[iteration]
-            current_weight = weights[iteration]
+        # iteration += 1
+        # if discard:
+        #     if iteration >= number_discarded:
+        #         iteration = 0
+        #         discard = False
+        # else:
+        #     if iteration == number_samples:
+        #         return states, log_prob, weights
+        #         # break
+        #     current_state = states[iteration]
+        #     current_log_prob = log_prob[iteration]
+        #     current_weight = weights[iteration]
 
         # Pick the next state
-        indices = _zanella_next_state_index(jump_rates)
-        _zanella_update_current(possible_states, indices, out=current_state)
-        _zanella_update_current(possible_log_probs, indices, out=current_log_prob)
-
+        # indices = _zanella_next_state_index(jump_rates)
+        # _zanella_update_current(possible_states, indices, out=current_state)
+        # _zanella_update_current(possible_log_probs, indices, out=current_log_prob)
     return states, log_prob, weights
 
 
 @torch.jit.script
 @torch.no_grad()
 def _zanella_choose_samples(weights: Tensor, number_samples: int) -> Tensor:
+    if number_samples == 1:
+        return torch.scalar_tensor(0, dtype=torch.int64, device=weights.device)
+    if number_samples == 2:
+        return torch.tensor([0, weights.size(0) - 1], dtype=torch.int64, device=weights.device)
     boundaries = weights.new_empty((weights.size(0) + 1,))
     boundaries[0] = 0
     torch.cumsum(weights, dim=0, out=boundaries[1:])
-    points = torch.linspace(0, boundaries[-1], number_samples)
-    points[0] = torch.nextafter(torch.scalar_tensor(points[0]), torch.scalar_tensor(boundaries[-1]))
-    points[-1] = torch.nextafter(
-        torch.scalar_tensor(points[-1]), torch.scalar_tensor(boundaries[0])
-    )
+    points = torch.linspace(0, boundaries[-1], number_samples, device=weights.device)
     indices = torch.bucketize(points, boundaries=boundaries, right=False) - 1
-    # assert torch.all(indices >= 0)
-    # assert torch.all(indices < weights.size(0))
+    assert torch.all(indices >= -1)
+    assert torch.all(indices <= weights.size(0))
+    indices = torch.clamp(indices, 0, weights.size(0) - 1)
     return indices
 
 
 @torch.no_grad()
 def sample_using_zanella(log_prob_fn, basis, options):
+    t1 = time.time()
     current_state = prepare_initial_state(basis, options.number_chains)
+    t2 = time.time()
     current_state = current_state.to(options.device)
     edges = options.other.get("edges")
     if edges is None:
@@ -573,7 +622,6 @@ def sample_using_zanella(log_prob_fn, basis, options):
                 edges.append((i, j))
     generator_fn = lib.ZanellaGenerator(basis, edges)
     sweep_size = options.sweep_size
-    t1 = time.time()
     states, log_probs, weights = zanella_process(
         current_state,
         log_prob_fn,
@@ -581,7 +629,7 @@ def sample_using_zanella(log_prob_fn, basis, options):
         options.number_samples * sweep_size,
         options.number_discarded * sweep_size,
     )
-    t2 = time.time()
+    t3 = time.time()
     # return states, log_probs, weights
     final_states = states.new_empty((options.number_samples,) + states.size()[1:])
     final_log_probs = log_probs.new_empty((options.number_samples,) + log_probs.size()[1:])
@@ -590,16 +638,19 @@ def sample_using_zanella(log_prob_fn, basis, options):
         indices = _zanella_choose_samples(weights[:, chain], options.number_samples)
         torch.index_select(states[:, chain], dim=0, index=indices, out=final_states[:, chain])
         torch.index_select(log_probs[:, chain], dim=0, index=indices, out=final_log_probs[:, chain])
-    t3 = time.time()
-    return final_states, final_log_probs, {"zanella_process": t2 - t1, "choose_samples": t3 - t2}
+    t4 = time.time()
+    return (
+        final_states,
+        final_log_probs,
+        {"initial_state": t2 - t1, "zanella_process": t3 - t2, "choose_samples": t4 - t3},
+    )
 
 
 @torch.no_grad()
 def sample_some(
     log_ψ: Callable[[Tensor], Tensor],
-    basis,
+    basis: ls.SpinBasis,
     options: SamplingOptions,
-    mode: str = None,
     is_log_prob_fn: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor], Dict[str, Any]]:
     r"""Sample from |ψ(σ)|².
@@ -619,14 +670,7 @@ def sample_some(
         Whether log_ψ already specifies the probability distribution. If it
         does we do not need to square ψ.
     """
-    if mode is None:
-        mode = options.mode
-    else:
-        logger.warning(
-            "'mode' argument is deprecated and will be removed in the future. "
-            "Please, specify 'options.mode' instead."
-        )
-
+    mode = options.mode
     supported = {"exact", "full", "autoregressive", "metropolis", "zanella"}
     if not mode in supported:
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
@@ -655,18 +699,24 @@ def _random_spins_chunk(basis, size):
     if basis.hamming_weight is None:
         assert False
     else:
+        indices = torch.multinomial(
+            torch.ones((size, basis.number_spins)), basis.number_spins, replacement=False
+        )
+
         m = basis.hamming_weight
-        buf = np.empty((size, basis.number_spins), dtype=np.uint64)
-        buf[:, :m] = 1
-        buf[:, m:] = 0
-        buf = np.random.permutation(buf.T).T
-        i = 0
-        word = 0
-        for j in range(basis.number_spins):
-            spins[:, word] |= buf[:, j] << i
-            i += 1
-            if i == 64:
-                word += 1
+        initial = torch.empty((basis.number_spins,), dtype=torch.int64)
+        initial[:m] = 1
+        initial[m:] = 0
+
+        for k in range(size):
+            i = 0
+            word = 0
+            for j in range(basis.number_spins):
+                spins[k, word] = int(spins[k, word]) | (int(initial[indices[k, j]]) << i)
+                i += 1
+                if i == 64:
+                    word += 1
+                    i = 0
     spins, _, norms = basis.batched_state_info(spins)
     spins = spins[norms > 0]
     spins = np.unique(spins, axis=0)

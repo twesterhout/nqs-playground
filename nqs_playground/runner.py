@@ -44,7 +44,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .sampling import *
 from .hamiltonian import *
-from .core import forward_with_batches, _get_dtype, _get_device
+from .core import forward_with_batches, get_dtype, get_device
 
 
 def _determine_initial_weights(
@@ -95,23 +95,27 @@ class RunnerBase:
     def device(self):
         if hasattr(self.config, "device"):
             return self.config.device
-        return _get_device(self.config.amplitude)
+        return get_device(self.config.amplitude)
+
+    @property
+    def dtype(self):
+        return get_dtype(self.config.amplitude)
 
     @torch.no_grad()
     def perform_sampling(self) -> Tuple[Tensor, Tensor, Tensor]:
         logger.info("Sampling from |ψ(σ)|²...")
+        self.config.amplitude.eval()
         device = self.device
-        dtype = _get_dtype(self.config.amplitude)
+        dtype = self.dtype
         options = self.config.sampling_options._replace(device=device)
-        if hasattr(self.config, "sampling_mode"):
-            options = options._replace(mode=self.config.sampling_mode)
         states, log_probs, info = sample_some(self.config.amplitude, self.basis, options)
-        weights = _determine_initial_weights(states, log_probs, info, dtype)
+        weights = _determine_initial_weights(states, log_probs, info, dtype=torch.float64)
         if len(info) > 0:
             logger.info("Additional info from the sampler: {}", info)
             for (k, v) in info.items():
                 self.tb_writer.add_scalar("sampling/{}".format(k), v, self.global_index)
         if log_probs is not None and options.mode != "full":
+            assert not torch.any(torch.isnan(log_probs))
             # Compute autocorrelation time based on log(|ψ(s)|²)
             tau = integrated_autocorr_time(log_probs)
             logger.info("Autocorrelation time of log(|ψ(σ)|²): {}", tau)
@@ -120,17 +124,20 @@ class RunnerBase:
 
     @torch.no_grad()
     def compute_local_energies(self, states: Tensor, weights: Tensor) -> Tensor:
+        self.combined_state.eval()
         local_energies = local_values(
             states,
             self.config.hamiltonian,
             self.combined_state,
-            batch_size=self.config.inference_batch_size,
+            batch_size=self.config.inference_batch_size // self.basis.number_spins,
+            debug=False,
         )
+        assert not torch.any(torch.isnan(local_energies))
         tau = integrated_autocorr_time(local_energies)
         logger.info("Autocorrelation time of Eₗ(σ): {}", tau)
         self.tb_writer.add_scalar("sampling/tau_energy", tau, self.global_index)
 
-        scale = 1 / weights.sum(dim=0)
+        scale = torch.reciprocal(weights.sum(dim=0))
         weighted_energies = scale * torch.complex(
             weights * local_energies.real, weights * local_energies.imag
         )
@@ -170,21 +177,24 @@ class RunnerBase:
 
     def outer_iteration(self, number_inner: int):
         (states, log_probs, weights) = self.perform_sampling()
-        original_log_probs: Optional[Tensor] = None
-        log_original_weights: Optional[Tensor] = None
-        if number_inner > 1:
-            if log_probs is None:
-                log_probs = self.compute_log_probs(states)
-            original_log_probs = log_probs.to(torch.float64)
-            log_original_weights = weights.to(torch.float64, copy=True).log_()
+        if log_probs is None:
+            log_probs = self.compute_log_probs(states)
+            assert not torch.any(torch.isnan(log_probs))
+        weights = weights.to(torch.float64)
+        log_probs = log_probs.to(torch.float64)
+
+        original_log_probs = log_probs
+        log_original_weights = weights.to(torch.float64, copy=True).log_()
         self.inner_iteration(states, log_probs, weights)
         self.global_index += 1
         for i in range(1, number_inner):
             log_probs = self.compute_log_probs(states)
+            assert not torch.any(torch.isnan(log_probs))
+            log_probs = log_probs.to(torch.float64)
             with torch.no_grad():
-                weights = log_original_weights + log_probs.to(torch.float64) - original_log_probs
+                weights = log_original_weights + log_probs - original_log_probs
                 weights -= torch.max(weights, dim=0, keepdim=True)[0] - 5.0
-                weights = torch.exp_(weights).to(torch.float32)
+                weights = torch.exp_(weights)
                 weights /= torch.sum(weights)
                 assert not torch.any(torch.isnan(weights))
             self.inner_iteration(states, log_probs, weights)

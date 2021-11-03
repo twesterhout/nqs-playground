@@ -8,11 +8,11 @@ __version__ = '1.0.1'
 from .core import *
 from .sampling import *
 # from ._extension import PACKAGE_DIR, lib
-# from .hamiltonian import *
+from .hamiltonian import *
 # from ._jacobian import *
 # from ._C import manual_seed, random_spin
 
-# from .runner import *
+from .runner import *
 
 # This operator becomes available only after loading _C
 # unpack = __torch.ops.tcm.unpack

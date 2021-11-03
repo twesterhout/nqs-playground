@@ -1,4 +1,4 @@
-# Copyright Tom Westerhout (c) 2019-2020
+# Copyright Tom Westerhout (c) 2019-2021
 #
 # All rights reserved.
 #
@@ -29,14 +29,14 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from lattice_symmetries import Interaction, Operator
 from loguru import logger
 import numpy as np
 import torch
 from torch import Tensor
 
-from . import _C
+from ._extension import lib
 from .core import as_spins_tensor, forward_with_batches
 
 __all__ = [
@@ -91,12 +91,14 @@ def _reference_log_apply_one(spin, operator, log_psi, device):
     spins, coeffs = operator.apply(spin)
     spins = torch.from_numpy(spins.view(np.int64)).to(device)
     output = log_psi(spins)
+    coeffs = torch.from_numpy(coeffs).to(device=device)
+    output = output.to(dtype=coeffs.dtype)
     if output.dim() > 1:
         output.squeeze_(dim=1)
     scale = torch.max(output.real)
     output.real -= scale
     torch.exp_(output)
-    coeffs = torch.from_numpy(coeffs).to(device=device, dtype=output.dtype)
+    # coeffs = torch.from_numpy(coeffs).to(device=device, dtype=output.dtype)
     return scale + torch.log(torch.dot(coeffs, output))
 
 
@@ -113,6 +115,42 @@ def reference_log_apply(spins, operator, log_psi, batch_size=None):
 
 def _isclose(a, b):
     return torch.isclose(a, b, rtol=5e-5, atol=5e-7)
+
+
+@torch.no_grad()
+def log_apply(
+    spins: Tensor,
+    hamiltonian: Operator,
+    state: Callable[[Tensor], Tensor],
+    batch_size: int = 128,
+    debug: bool = False
+) -> Tensor:
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
+    spins = as_spins_tensor(spins, force_width=True)
+    # Flatten all dimensions except for the last
+    original_shape = spins.size()[:-1]
+    spins = spins.view(-1, spins.size(-1))
+    # This is to help C++ recognize that we're dealing with a ScriptModule and
+    # avoid going through Python for every forward pass
+    if isinstance(state, torch.jit.ScriptModule):
+        logger.debug("Using torch.jit.ScriptModule...")
+        state = state._c._get_method("forward")
+    else:
+        logger.debug("Using a general Python function...")
+    # Compute log(⟨s|H|ψ⟩) for all s.
+    log_h_psi = lib.log_apply(spins, hamiltonian, state, batch_size)
+    if debug:
+        logger.debug("Checking against reference_log_apply...")
+        _log_h_psi_py = reference_log_apply(spins, hamiltonian, state, batch_size)
+        if not torch.all(torch.isclose(log_h_psi, _log_h_psi_py)):
+        # if not torch.all(_isclose(log_h_psi, _log_h_psi_py)):
+            for i, (e_cxx, e_py) in enumerate(zip(log_h_psi, _log_h_psi_py)):
+                if not torch.isclose(e_cxx, e_py).item():
+                    logger.error("C++ and Python produced different results for i={}: {} != {}", i, e_cxx.item(), e_py.item())
+            assert False
+    return log_h_psi.view(original_shape)
 
 
 @torch.no_grad()
@@ -135,36 +173,14 @@ def local_values(
     :param batch_size: Batch size to use internally for forward propagationn
         through ``state``.
     """
-    logger.debug("Computing local values using batch_size={}...", batch_size)
-    batch_size = int(batch_size)
-    if batch_size <= 0:
-        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
     spins = as_spins_tensor(spins, force_width=True)
-    # Flatten all dimensions except for the last
-    original_shape = spins.size()[:-1]
-    spins = spins.view(-1, spins.size(-1))
+    log_h_psi = log_apply(spins, hamiltonian, state, batch_size, debug=debug)
     if log_psi is None:
         # Compute log(⟨s|ψ⟩) for all s.
-        log_psi = forward_with_batches(state, spins, batch_size)
-        assert not torch.any(torch.isnan(log_psi))
-        if log_psi.dim() > 1:
-            log_psi.squeeze_(dim=1)
-    # This is to help C++ recognize that we're dealing with a ScriptModule and
-    # avoid going through Python for every forward pass
-    if isinstance(state, torch.jit.ScriptModule):
-        state = state._c._get_method("forward")
-    # Compute log(⟨s|H|ψ⟩) for all s.
-    log_h_psi = _C.log_apply(spins, hamiltonian, state, batch_size)
-    if debug:
-        logger.debug("Checking against reference_log_apply...")
-        _log_h_psi_py = reference_log_apply(spins, hamiltonian, state, batch_size)
-        if not torch.all(_isclose(log_h_psi, _log_h_psi_py)):
-            for i, (e_cxx, e_py) in enumerate(zip(log_h_psi, _log_h_psi_py)):
-                if not _isclose(e_cxx, e_py).item():
-                    logger.error("{} != {}", e_cxx.item(), e_py.item())
-            assert False
+        log_psi = forward_with_batches(state, spins.view(-1, spins.size(-1)), batch_size)
+        log_psi = log_psi.view(spins.size()[:-1])
     # Compute ⟨s|H|ψ⟩/⟨s|ψ⟩
+    log_psi = log_psi.to(log_h_psi.dtype)
     log_h_psi -= log_psi
     log_h_psi.exp_()
-    # Reshape log_h_psi to match the original shape of spins
-    return log_h_psi.to(log_psi.dtype).view(original_shape)
+    return log_h_psi
