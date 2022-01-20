@@ -4,11 +4,11 @@ import torch
 from torch.nn import functional as F
 from typing import Tuple
 import nqs_playground as nqs
+from unpack_bits import unpack
 import lattice_symmetries as ls
 
-np.random.seed(52)
-torch.manual_seed(92)
-nqs.manual_seed(42)
+# np.random.seed(52)
+# torch.manual_seed(92)
 
 
 class SpinRBM(torch.nn.Linear):
@@ -16,7 +16,7 @@ class SpinRBM(torch.nn.Linear):
         super().__init__(number_visible, number_hidden, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = nqs.unpack(x, self.in_features).to(self.weight.dtype)
+        x = unpack(x, self.in_features).to(self.weight.dtype)
         y = F.linear(x, self.weight, self.bias)
         y = y - 2.0 * F.softplus(y, beta=-2.0)
         return y.sum(dim=1, keepdim=True)
@@ -116,11 +116,7 @@ def reproduce_results_of_askar(filename: str = "amplitude_weights_439.pt"):
     logger.info("Info from the sampler: {}", info)
 
     combined_state = nqs.combine_amplitude_and_phase(log_ψ, Phase(dtype=torch.float32))
-    local_energies = nqs.local_values(
-        states,
-        hamiltonian,
-        combined_state,
-    )
+    local_energies = nqs.local_values(states, hamiltonian, combined_state,)
     logger.info("Energy: {}", local_energies.mean(dim=0).cpu())
     logger.info("Energy variance: {}", local_energies.var(dim=0).cpu())
 
@@ -141,9 +137,14 @@ def reproduce_results_of_carleo2017(filename: str):
 
     basis = hamiltonian.basis
     sampling_options = nqs.SamplingOptions(
-        number_samples=2000, number_chains=4, number_discarded=100, sweep_size=1, device=device
+        number_samples=2000,
+        number_chains=4,
+        number_discarded=100,
+        sweep_size=1,
+        mode="zanella",
+        device=device,
     )
-    states, _, info = nqs.sample_some(log_ψ, basis, sampling_options, mode="zanella")
+    states, _, _, info = nqs.sample_some(log_ψ, basis, sampling_options)
     logger.info("Info from the sampler: {}", info)
 
     combined_state = nqs.combine_amplitude_and_phase(log_ψ, Phase(dtype=torch.float64))
