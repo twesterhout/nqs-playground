@@ -15,7 +15,7 @@ from torch import Tensor
 import lattice_symmetries as ls
 
 # from ._C import MetropolisGenerator, ZanellaGenerator, zanella_choose_samples, random_spin
-from .core import forward_with_batches, pad_states, as_spins_tensor, safe_exp, pack
+from .core import forward_with_batches, pad_states, as_spins_tensor, safe_exp, pack, get_device
 from ._extension import lib
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     # "zanella_process",
     # "sample_using_zanella",
     # "autocorr_function",
+    "determine_initial_weights",
     "integrated_autocorr_time",
     "sampled_histogram",
     "are_close_l1",
@@ -147,6 +148,16 @@ class SamplingOptions(_SamplingOptionsBase):
         return super(SamplingOptions, cls).__new__(
             cls, number_samples, number_chains, number_discarded, sweep_size, mode, device, other
         )
+
+    def hparams(self) -> Dict[str, Any]:
+        p = {
+            "number_samples": self.number_samples,
+            "number_chains": self.number_chains,
+            "mode": self.mode,
+        }
+        if "mode" in ["zanella", "metropolis"]:
+            p["sweep_size"] = self.sweep_size
+        return p
 
 
 def _determine_batch_size(options: SamplingOptions) -> int:
@@ -481,15 +492,21 @@ def zanella_process(
     :param number_samples:
     """
     assert number_samples >= 1
+    # Device is determined by the location of initial state
+    device = current_state.device
+    logger.debug("Sampling using Zanella algorithm on {} ...", device)
 
     def log_prob_fn(x):
         y = _log_prob_fn(x)
         if y.dim() > 1:
             y.squeeze_(dim=1)
+        if y.device != device:
+            raise ValueError(
+                "log_prob_fn returned a tensor on {}; expected a tensor on {}"
+                "".format(y.device, device)
+            )
         return y
 
-    # Device is determined by the location of initial state
-    device = current_state.device
     (number_chains, configuration_size) = current_state.size()
     current_log_prob = log_prob_fn(current_state)
     # Number of chains is also deduced from current_state. It is simply
@@ -647,6 +664,27 @@ def sample_using_zanella(log_prob_fn, basis, options):
 
 
 @torch.no_grad()
+def determine_initial_weights(
+    states: Tensor, log_probs: Tensor, info: Dict[str, Any], dtype: Optional[torch.dtype] = None
+) -> Tensor:
+    weights = info.get("weights")
+    if weights is None:
+        logger.debug(
+            "Sampler did not return 'weights'. We assume that no importance sampling "
+            "is used and initialize all weights with 1..."
+        )
+        value = 1.0 / (states.size(0) * states.size(1))
+        device = states.device
+        if dtype is None:
+            dtype = log_probs.dtype
+        weights = torch.full(states.size()[:2], value, device=device, dtype=dtype)
+    else:
+        assert torch.isclose(torch.sum(weights), torch.scalar_tensor(1, dtype=weights.dtype))
+        del info["weights"]
+    return weights
+
+
+@torch.no_grad()
 def sample_some(
     log_ψ: Callable[[Tensor], Tensor],
     basis: ls.SpinBasis,
@@ -664,16 +702,27 @@ def sample_some(
         belong to this basis.
     options: SamplingOptions
         Options specifying number of samples, algorithm etc.
-    mode: str, deprecated!
-        Please, specify `options.mode` instead.
     is_log_prob_fn: bool
         Whether log_ψ already specifies the probability distribution. If it
-        does we do not need to square ψ.
+        does, we do not need to square ψ.
     """
+    logger.info("Sampling...")
     mode = options.mode
     supported = {"exact", "full", "autoregressive", "metropolis", "zanella"}
     if not mode in supported:
         raise ValueError("invalid mode: {!r}; must be one of {}".format(mode, supported))
+    if isinstance(log_ψ, torch.nn.Module):
+        log_ψ.eval()
+
+    maybe_device = get_device(log_ψ)
+    if maybe_device is not None:
+        if options.device is None:
+            options = options._replace(device=maybe_device)
+        elif options.device != maybe_device:
+            raise ValueError(
+                "options.device={}, but log_ψ is located on {}"
+                "".format(options.device, maybe_device)
+            )
 
     if is_log_prob_fn or mode == "autoregressive":
         log_prob_fn = log_ψ
@@ -691,7 +740,22 @@ def sample_some(
         # "metropolis": sample_using_metropolis,
         "zanella": sample_using_zanella,
     }[mode]
-    return fn(log_prob_fn, basis, options)
+
+    states, log_probs, sampler_info = fn(log_prob_fn, basis, options)
+    weights = determine_initial_weights(states, log_probs, sampler_info, dtype=torch.float64)
+
+    logger_info: List[Tuple[str, Any]] = []
+    if len(sampler_info) > 0:
+        logger.debug("Additional info from the sampler: {}", sampler_info)
+        for (k, v) in sampler_info.items():
+            logger_info.append(("sampling/{}".format(k), v))
+    if log_probs is not None and mode != "full":
+        assert not torch.any(torch.isnan(log_probs))
+        # Compute autocorrelation time based on log(|ψ(s)|²)
+        tau = integrated_autocorr_time(log_probs)
+        logger.debug("Autocorrelation time of log(|ψ(σ)|²): {}", tau)
+        logger_info.append(("sampling/tau_log_prob", tau))
+    return states, log_probs, weights, logger_info
 
 
 def _random_spins_chunk(basis, size):
@@ -800,11 +864,7 @@ def are_close_l1(n: int, basis, sample_fn, exact: Tensor, eps: float, options):
     s = np.searchsorted(torch.cumsum(exact, dim=0).cpu().numpy(), eps / 8.0)
     ms = np.random.poisson(n, size=options.number_chains)
     logger.info("Sampling...")
-    states, log_prob, info = sample_fn(options._replace(number_samples=max(ms)))
-    if log_prob is not None:
-        logger.info("Autocorrelation time is {}", integrated_autocorr_time(log_prob))
-    if info is not None:
-        logger.info("Additional info from the sampler: {}", info)
+    states, log_prob, _, _ = sample_fn(options._replace(number_samples=max(ms)))
     logger.info("Computing histograms...")
     states = [sampled_histogram(states[:m, i], basis)[order] for i, m in enumerate(ms)]
 

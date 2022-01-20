@@ -31,6 +31,7 @@
 #include <lattice_symmetries/lattice_symmetries.h>
 #include <omp.h>
 #include <sstream>
+#include <iostream>
 
 auto operator==(ls_bits512 const& x, ls_bits512 const& y) noexcept -> bool
 {
@@ -62,21 +63,25 @@ namespace tcm {
 constexpr auto toggle_bit(uint64_t& bits, unsigned const i) noexcept -> void
 {
     // TCM_ASSERT(i < 64U, "index out of bounds");
+    LATTICE_SYMMETRIES_CHECK(i < 64U, "index out of bounds");
     bits ^= uint64_t{1} << uint64_t{i};
 }
 constexpr auto toggle_bit(ls_bits512& bits, unsigned const i) noexcept -> void
 {
     // TCM_ASSERT(i < 512U, "index out of bounds");
+    LATTICE_SYMMETRIES_CHECK(i < 512U, "index out of bounds");
     return toggle_bit(bits.words[i / 64U], i % 64U);
 }
 constexpr auto test_bit(uint64_t const bits, unsigned const i) noexcept -> bool
 {
     // TCM_ASSERT(i < 64U, "index out of bounds");
+    LATTICE_SYMMETRIES_CHECK(i < 64U, "index out of bounds");
     return static_cast<bool>((bits >> i) & 1U);
 }
 constexpr auto test_bit(ls_bits512 const& bits, unsigned const i) noexcept -> bool
 {
     // TCM_ASSERT(i < 512U, "index out of bounds");
+    LATTICE_SYMMETRIES_CHECK(i < 512U, "index out of bounds");
     return test_bit(bits.words[i / 64U], i % 64U);
 }
 constexpr auto set_zero(uint64_t& bits) noexcept -> void { bits = 0UL; }
@@ -85,6 +90,16 @@ constexpr auto set_zero(ls_bits512& bits) noexcept -> void
     for (auto& w : bits.words) {
         set_zero(w);
     }
+}
+
+auto operator<<(std::ostream& out, ls_bits512 const& spin) -> std::ostream&
+{
+    out << '[' << spin.words[0];
+    for (auto i = 1; i < 8; ++i) {
+        out << ", " << spin.words[i];
+    }
+    out << ']';
+    return out;
 }
 
 HEDLEY_PUBLIC ZanellaGenerator::ZanellaGenerator(ls_spin_basis const&                       basis,
@@ -126,10 +141,10 @@ HEDLEY_PUBLIC auto ZanellaGenerator::operator()(torch::Tensor x) const
     auto const device     = x.device();
     auto const batch_size = x.size(0);
     if (batch_size == 0) { throw std::invalid_argument{"expected 'x' to contain a least one row"}; }
+    if (x.size(1) != 8) { throw std::invalid_argument{"expected 'x' to have exactly 8 columns"}; }
     if (device.type() != torch::DeviceType::CPU) {
-        pin_memory = true;
-        x          = x.to(x.options().device(torch::DeviceType::CPU),
-                 /*non_blocking=*/true);
+        // pin_memory = true;
+        x          = x.to(x.options().device(torch::DeviceType::CPU)); // /*non_blocking=*/true);
     }
     // TCM_CHECK(ls_get_hamming_weight(_basis) != -1, std::runtime_error,
     //           "ZanellaGenerator currently only supports bases with fixed magnetisation");
@@ -147,12 +162,15 @@ HEDLEY_PUBLIC auto ZanellaGenerator::operator()(torch::Tensor x) const
     auto const* x_ptr      = reinterpret_cast<ls_bits512 const*>(x.data_ptr<int64_t>());
     auto*       y_ptr      = reinterpret_cast<ls_bits512*>(y.data_ptr<int64_t>());
     auto*       counts_ptr = counts.data_ptr<int64_t>();
-#pragma omp parallel for
+#pragma omp parallel for schedule(dynamic, 1)
     for (auto i = int64_t{0}; i < batch_size; ++i) {
         auto* dst     = y_ptr + max_possible_states * i;
         counts_ptr[i] = project(dst, generate(x_ptr[i], dst));
     }
     auto const size = *std::max_element(counts_ptr, counts_ptr + batch_size);
+    if (size > max_possible_states) {
+        throw std::runtime_error{"ZanellaGenerator generated more states than it should have..."};
+    }
 
     y = torch::narrow(y, /*dim=*/1, /*start=*/0, /*length=*/size);
     if (device.type() != torch::DeviceType::CPU) {
@@ -167,13 +185,21 @@ HEDLEY_PUBLIC auto ZanellaGenerator::operator()(torch::Tensor x) const
 
 auto ZanellaGenerator::generate(ls_bits512 const& spin, ls_bits512* out) const -> int64_t
 {
-    auto const number_spins = ls_get_number_spins(_basis);
+    // auto const number_spins = ls_get_number_spins(_basis);
+    auto const max_possible_states = max_states();
     auto       count        = int64_t{0};
     for (auto const [i, j] : _edges) {
         if (test_bit(spin, i) != test_bit(spin, j)) {
             auto possible = spin;
             toggle_bit(possible, i);
             toggle_bit(possible, j);
+            if (count >= max_possible_states) {
+                std::ostringstream msg;
+                msg << "ZanellaGenerator::generate(" << spin << ") generated "
+                    << count << " states, but max_states() = " << max_possible_states;
+                std::cerr << (msg.str() + "\n");
+                throw std::runtime_error{msg.str()};
+            }
             out[count++] = possible;
         }
     }
@@ -190,13 +216,10 @@ auto ZanellaGenerator::project(ls_bits512* spins, int64_t const count) const -> 
     set_zero(repr);
     auto offset = int64_t{0};
     for (auto i = int64_t{0}; i < count; ++i) {
-        std::complex<double> _dummy;
-        double               norm;
+        std::complex<double> _dummy = {0.0, 0.0};
+        double               norm = 0.0;
         ls_get_state_info(_basis, spins + i, &repr, &_dummy, &norm);
-        if (norm > 0) {
-            spins[offset] = repr;
-            ++offset;
-        }
+        if (norm > 0) { spins[offset++] = repr; }
     }
     if (offset == 0) {
         throw std::runtime_error{"ZanellaGenerator got stuck: all potential states have norm 0"};
