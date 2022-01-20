@@ -69,6 +69,8 @@ auto _check_forward_result(torch::Tensor const& output, int64_t const expected_b
 
 HEDLEY_NEVER_INLINE auto Task::operator()() const -> torch::Tensor
 {
+    torch::NoGradGuard no_grad;
+
     auto const device = spins.device();
     auto output = forward(spins);
     if (output.dim() > 1) { output.squeeze_(/*dim=*/1); }
@@ -147,11 +149,13 @@ HEDLEY_NEVER_INLINE auto process_chunk(ls_bits512 const* spins, int64_t const ba
 auto log_apply(ls_bits512 const* spins, int64_t const count, ls_operator const& op,
                ForwardT fn, c10::Device const device, int64_t const batch_size) -> torch::Tensor
 {
-    torch::NoGradGuard no_grad;
     std::optional<ThreadPool> pool{std::nullopt};
     if (device.type() != torch::kCPU) { pool.emplace(); }
-    std::vector<std::future<std::invoke_result_t<Task>>> futures;
-    futures.reserve(static_cast<size_t>((count + batch_size - 1) / batch_size));
+    std::queue<std::future<std::invoke_result_t<Task>>> futures;
+    // futures.reserve(static_cast<size_t>((count + batch_size - 1) / batch_size));
+    std::vector<torch::Tensor> results;
+    results.reserve(static_cast<size_t>((count + batch_size - 1) / batch_size));
+
     auto const make_future = [&pool](auto&& task) {
         if (pool.has_value()) {
             return pool->enqueue(std::forward<decltype(task)>(task));
@@ -170,20 +174,34 @@ auto log_apply(ls_bits512 const* spins, int64_t const count, ls_operator const& 
     auto i = int64_t{0};
     for (; i + batch_size <= count; i += batch_size) {
         auto task = process_chunk(spins + i, batch_size, op, fn, device);
-        futures.emplace_back(make_future(std::move(task)));
+        auto f = make_future(std::move(task));
+        if (futures.size() > 1) {
+            results.emplace_back(futures.front().get());
+            futures.pop();
+        }
+        futures.emplace(std::move(f));
         // futures.back().wait();
     }
     if (i != count) {
         auto task = process_chunk(spins + i, count - i, op, fn, device);
-        futures.emplace_back(make_future(std::move(task)));
+        auto f = make_future(std::move(task));
+        if (futures.size() > 1) {
+            results.emplace_back(futures.front().get());
+            futures.pop();
+        }
+        futures.emplace(std::move(f));
         // futures.back().wait();
     }
 
-    std::vector<torch::Tensor> results;
-    results.reserve(futures.size());
-    for (auto& f : futures) {
-        results.emplace_back(f.get());
+    // std::vector<torch::Tensor> results;
+    // results.reserve(futures.size());
+    while (!futures.empty()) {
+        results.emplace_back(futures.front().get());
+        futures.pop();
     }
+    // for (auto& f : futures) {
+    //     results.emplace_back(f.get());
+    // }
     return torch::cat(results, /*dim=*/0);
 }
 
