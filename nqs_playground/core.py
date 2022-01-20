@@ -526,13 +526,13 @@ def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
 
 
 def get_device(obj) -> Optional[torch.device]:
-    x = _get_a_var(obj)
-    return x.device if x is not None else None
+    r = _get_a_var(obj)
+    return r.device if r is not None else None
 
 
 def get_dtype(obj) -> Optional[torch.dtype]:
-    x = _get_a_var(obj)
-    return x.device if x is not None else None
+    r = _get_a_var(obj)
+    return r.dtype if r is not None else None
 
 
 def _get_a_var(obj):
