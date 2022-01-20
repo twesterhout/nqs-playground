@@ -36,7 +36,9 @@ from loguru import logger
 import numpy as np
 import torch
 from torch import Tensor
+import torch.utils.tensorboard.summary
 from torch.utils.tensorboard import SummaryWriter
+from typing import Dict, Any
 
 from . import *
 
@@ -70,7 +72,7 @@ def _should_optimize(module):
 #         self.combined_state = combine_amplitude_and_phase(
 #             self.config.amplitude, self.config.phase, use_jit=False
 #         )
-# 
+#
 #     def hamming_weight_loss(self, states, output, target=None):
 #         number_spins = self.basis.number_spins
 #         if target is None:
@@ -82,7 +84,7 @@ def _should_optimize(module):
 #         r = torch.logsumexp(torch.log(loss) + 2 * output, dim=0)
 #         r = r - np.log(states.size(0))
 #         return r, loss.sum().item()
-# 
+#
 #     def step(self):
 #         self._epoch += 1
 #         logger.info("Starting epoch {}...", self._epoch)
@@ -91,13 +93,13 @@ def _should_optimize(module):
 #         E = self.compute_local_loss(states, weights)
 #         states = states.view(-1, states.size(-1))
 #         weights = weights.view(-1)
-# 
+#
 #         # Compute output gradient
 #         with torch.no_grad():
 #             grad = E.real - torch.dot(E.real, weights)
 #             grad *= 2 * weights
 #             grad = grad.view(-1, 1)
-# 
+#
 #         self.config.optimizer.zero_grad()
 #         batch_size = self.config.inference_batch_size
 #         # Computing gradients for the amplitude network
@@ -108,7 +110,7 @@ def _should_optimize(module):
 #                 forward_fn = lambda x: 0.5 * self.config.amplitude.log_prob(x).view(-1, 1)
 #             else:
 #                 forward_fn = self.config.amplitude
-# 
+#
 #             if with_hamming_weight_constraint:
 #                 hamming_weight_loss = 0.0
 #             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
@@ -130,7 +132,7 @@ def _should_optimize(module):
 #             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
 #                 output = forward_fn(states_chunk)
 #                 output.backward(grad_chunk)
-# 
+#
 #         self.config.optimizer.step()
 #         if self.config.scheduler is not None:
 #             self.config.scheduler.step()
@@ -139,12 +141,33 @@ def _should_optimize(module):
 #         logger.info("Completed epoch {}! It took {:.1f} seconds...", self._epoch, tock - tick)
 
 
+def optimizer_hparams(optimizer: torch.optim.Optimizer) -> Dict[str, Any]:
+    hparams = {"optimizer": optimizer.__class__.__name__}
+    for g in optimizer.state_dict()["param_groups"]:
+        for key, value in g.items():
+            if key in {"lr", "momentum", "weight_decay"}:
+                hparams[key] = value
+    return hparams
+
+
+def sampling_hparams(options: SamplingOptions) -> Dict[str, Any]:
+    return options.hparams()
+
+
 class Runner(RunnerBase):
     def __init__(self, config):
         super().__init__(config)
         self.combined_state = combine_amplitude_and_phase(
             self.config.amplitude, self.config.phase, use_jit=False
         )
+        self.tb_writer.add_hparams(
+            {
+                **optimizer_hparams(self.config.optimizer),
+                **sampling_hparams(self.config.sampling_options),
+            },
+            {"dummy": 0}, # REQUIED! Otherwise, Tensorboard won't display hparams at all
+        )
+        self.tb_writer.flush()
 
     def inner_iteration(self, states, log_probs, weights):
         assert weights.dtype == torch.float64
@@ -154,7 +177,7 @@ class Runner(RunnerBase):
         E = self.compute_local_energies(states, weights)
         E = E.real.to(dtype=weights.dtype)
         states = states.view(-1, states.size(-1))
-        log_probs = states.view(-1)
+        log_probs = log_probs.view(-1)
         weights = weights.view(-1)
 
         # Compute output gradient
@@ -188,7 +211,6 @@ class Runner(RunnerBase):
         #     assert torch.all(weights == obj["weights"])
         #     assert torch.all(grad == obj["grad"])
 
-
         self.config.optimizer.zero_grad()
         batch_size = self.config.inference_batch_size
 
@@ -199,7 +221,7 @@ class Runner(RunnerBase):
             forward_fn = self.amplitude_forward_fn
             for (states_chunk, grad_chunk) in split_into_batches((states, grad), batch_size):
                 output = forward_fn(states_chunk)
-                output.backward(grad_chunk) # , retain_graph=True)
+                output.backward(grad_chunk)  # , retain_graph=True)
 
         # Computing gradients for the phase network
         if _should_optimize(self.config.phase):
@@ -212,6 +234,7 @@ class Runner(RunnerBase):
         self.config.optimizer.step()
         if self.config.scheduler is not None:
             self.config.scheduler.step()
-        self.checkpoint(init={"optimizer": self.config.optimizer.state_dict()})
+        if self.global_index % self.config.checkpoint_every == 0:
+            self.checkpoint(init={"optimizer": self.config.optimizer.state_dict()})
         tock = time.time()
         logger.info("Completed inner iteration in {:.1f} seconds!", tock - tick)

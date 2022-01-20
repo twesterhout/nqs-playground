@@ -38,10 +38,12 @@ from torch import Tensor
 
 from ._extension import lib
 from .core import as_spins_tensor, forward_with_batches
+from .sampling import integrated_autocorr_time
 
 __all__ = [
     "heisenberg_interaction",
     "local_values",
+    "local_values_with_extras",
     "reference_log_apply",
 ]
 
@@ -157,9 +159,9 @@ def log_apply(
 def local_values(
     spins: Tensor,
     hamiltonian: Operator,
-    state: torch.jit.ScriptModule,
+    state: torch.nn.Module,
     log_psi: Optional[Tensor] = None,
-    batch_size: int = 2048,
+    batch_size: int = 16384,
     debug: bool = False,
 ) -> Tensor:
     r"""Compute local values ``⟨s|H|ψ⟩/⟨s|ψ⟩`` for all ``s ∈ spins``.
@@ -184,3 +186,53 @@ def local_values(
     log_h_psi -= log_psi
     log_h_psi.exp_()
     return log_h_psi
+
+
+@torch.no_grad()
+def local_values_with_extras(
+    monte_carlo_result: Tuple[Tensor, Optional[Tensor], Optional[Tensor]],
+    hamiltonian: Operator,
+    log_psi: torch.nn.Module,
+    batch_size: int = 16384
+):
+    states, _, weights = monte_carlo_result
+    logger_info: List[Tuple[str, Any]] = []
+
+    if isinstance(log_psi, torch.nn.Module):
+        log_psi.eval()
+    local_energies = local_values(
+        states,
+        hamiltonian,
+        log_psi,
+        batch_size=batch_size // max(1, hamiltonian.basis.number_spins // 2),
+        debug=False,
+    )
+    assert not torch.any(torch.isnan(local_energies))
+    tau = integrated_autocorr_time(local_energies)
+    logger.debug("Autocorrelation time of Eₗ(σ): {}", tau)
+    logger_info.append(("sampling/tau_energy", tau))
+
+    scale = torch.reciprocal(weights.sum(dim=0))
+    weighted_energies = scale * torch.complex(
+        weights * local_energies.real, weights * local_energies.imag
+    )
+    energy_per_chain = weighted_energies.sum(dim=0, keepdim=True)
+    variance_per_chain = weights * torch.abs((local_energies - energy_per_chain) ** 2)
+    variance_per_chain = scale * variance_per_chain.sum(dim=0, keepdim=True)
+
+    energy_err, energy = torch.std_mean(energy_per_chain)
+    energy_err, energy = energy_err.item().real, energy.item()
+    variance_err, variance = torch.std_mean(variance_per_chain)
+    variance_err, variance = variance_err.item(), variance.item()
+
+    logger.info("Re[E] =  {:.5e} ± {:.2e}", energy.real, energy_err)
+    logger.info("Im[E] =  {:.5e}", energy.imag)
+    logger.info("Var[E] = {:.5e} ± {:.2e}", variance, variance_err)
+    logger_info.append(("loss/energy_real", energy.real))
+    logger_info.append(("loss/energy_imag", energy.imag))
+    logger_info.append(("loss/energy_err", energy_err))
+    logger_info.append(("loss/variance", variance))
+    logger_info.append(("loss/variance_err", variance_err))
+    return local_energies, energy, variance, logger_info
+
+
