@@ -39,12 +39,11 @@ __all__ = [
     "forward_with_batches",
     "as_spins_tensor",
     # "SpinDataset",
-    # "combine_amplitude_and_sign",
-    # "combine_amplitude_and_sign_classifier",
+    "combine_amplitude_and_sign",
     "combine_amplitude_and_phase",
     "safe_exp",
-    # "load_ground_state",
-    # "load_hamiltonian",
+    "load_ground_state",
+    "load_hamiltonian",
     "get_device",
     "get_dtype",
 ]
@@ -315,43 +314,28 @@ class SpinDataset(torch.utils.data.IterableDataset):
         )
 
 
-# def combine_amplitude_and_sign(
-#     *modules, apply_log: bool = False, out_dim: int = 1, use_jit: bool = True
-# ) -> torch.nn.Module:
-#     r"""Combines two torch.nn.Modules representing amplitudes and signs of the
-#     wavefunction coefficients into one model.
-#     """
-#     if out_dim != 1 and out_dim != 2:
-#         raise ValueError("invalid out_dim: {}; expected either 1 or 2".format(out_dim))
-#     if out_dim == 1 and apply_log:
-#         raise ValueError("apply_log is incompatible with out_dim=1")
-#
-#     class CombiningState(torch.nn.Module):
-#         __constants__ = ["apply_log", "out_dim"]
-#
-#         def __init__(self, amplitude, phase):
-#             super().__init__()
-#             self.apply_log = apply_log
-#             self.out_dim = out_dim
-#             self.amplitude = amplitude
-#             self.phase = phase
-#
-#         def forward(self, x):
-#             a = torch.log(self.amplitude(x)) if self.apply_log else self.amplitude(x)
-#             if self.out_dim == 1:
-#                 b = (1 - 2 * torch.argmax(self.phase(x), dim=1)).to(torch.float32).view([-1, 1])
-#                 a *= b
-#                 return a
-#             else:
-#                 b = 3.141592653589793 * torch.argmax(self.phase(x), dim=1).to(torch.float32).view(
-#                     [-1, 1]
-#                 )
-#                 return torch.cat([a, b], dim=1)
-#
-#     m = CombiningState(*modules)
-#     if use_jit:
-#         m = torch.jit.script(m)
-#     return m
+def combine_amplitude_and_sign(*modules, use_jit: bool = True) -> torch.nn.Module:
+    r"""Combines two torch.nn.Modules representing log amplitudes and signs of the
+    wavefunction coefficients into one model.
+    """
+    (log_amplitude, sign) = modules
+
+    class CombiningState(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.log_amplitude = log_amplitude
+            self.sign = sign
+
+        @torch.no_grad()
+        def forward(self, x: Tensor) -> Tensor:
+            a = self.log_amplitude(x)
+            b = 3.141592653589793 * torch.argmax(self.sign(x), dim=1).to(a.dtype).view([-1, 1])
+            return torch.complex(a, b)
+
+    m = CombiningState()
+    if use_jit:
+        m = torch.jit.script(m)
+    return m
 
 
 def combine_amplitude_and_phase(*modules, use_jit: bool = True) -> torch.nn.Module:
@@ -450,12 +434,18 @@ def load_ground_state(
         with h5py.File(filename, "r") as f:
             ground_state = f["/hamiltonian/eigenvectors"][:]
             ground_state = torch.from_numpy(ground_state).squeeze()
+            if ground_state.dim() > 1:
+                logger.info(
+                    "/hamiltonian/eigenvectors has shape {}, "
+                    "slicing along the 0th dimension ...",
+                    ground_state.shape,
+                )
+                ground_state = ground_state[0]
             energy = f["/hamiltonian/eigenvalues"][0]
             basis_representatives = None
             if representatives:
                 basis_representatives = f["/basis/representatives"][:]
             return ground_state, energy, basis_representatives
-
     raise ValueError(
         "Do not know how to read the ground state from files with extension '{}'..."
         "".format(extension)
@@ -499,7 +489,7 @@ def compute_overlap(combined_state, basis, ground_state: Tensor, batch_size: int
         raise ValueError(
             "'ground_state' has wrong shape: {}; expected a vector".format(ground_state.size())
         )
-    device = _get_device(combined_state)
+    device = get_device(combined_state)
     spins = torch.from_numpy(basis.states.view(np.int64)).view(-1, 1)
     state = forward_with_batches(lambda x: combined_state(x.to(device)).cpu(), spins, batch_size)
     if state.size() != (spins.size(0), 1):
@@ -536,18 +526,23 @@ def safe_exp(x: Tensor, normalise: bool = True) -> Tensor:
 
 
 def get_device(obj) -> Optional[torch.device]:
-    return _get_a_var(obj).device
+    x = _get_a_var(obj)
+    return x.device if x is not None else None
 
 
 def get_dtype(obj) -> Optional[torch.dtype]:
-    return _get_a_var(obj).dtype
+    x = _get_a_var(obj)
+    return x.device if x is not None else None
 
 
 def _get_a_var(obj):
     if isinstance(obj, Tensor):
         return obj
     if isinstance(obj, torch.nn.Module):
-        for result in obj.parameters():
+        for result in obj.parameters(recurse=True):
+            if isinstance(result, Tensor):
+                return result
+        for result in obj.buffers(recurse=True):
             if isinstance(result, Tensor):
                 return result
     if isinstance(obj, list) or isinstance(obj, tuple):
