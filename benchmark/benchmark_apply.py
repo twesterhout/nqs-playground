@@ -22,7 +22,7 @@ def load_basis_and_hamiltonian(
 
 def main():
     number_spins = 36
-    device = torch.device("cpu")
+    device = torch.device("cuda:0")
     amplitude = torch.nn.Sequential(
         nqs.Unpack(number_spins),
         torch.nn.Linear(number_spins, 144),

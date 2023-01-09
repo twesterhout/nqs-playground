@@ -272,92 +272,92 @@ def sample_exactly(
 #     return states.view(*shape, 8), None, {}
 
 
-# def metropolis_process(
-#     initial_state: Tensor,
-#     _log_prob_fn: Callable[[Tensor], Tensor],
-#     kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
-#     number_samples: int,
-#     number_discarded: int,
-#     sweep_size: int,
-# ) -> Tuple[Tensor, Tensor, Tensor]:
-#     assert number_samples >= 1
-#
-#     def log_prob_fn(x):
-#         y = _log_prob_fn(x)
-#         if y.dim() > 1:
-#             y.squeeze_(dim=1)
-#         return y
-#
-#     current_state, current_norm = initial_state
-#     current_log_prob = log_prob_fn(current_state)
-#     dtype = current_log_prob.dtype
-#     device = current_log_prob.device
-#     current_norm = current_norm.to(dtype)
-#     states = current_state.new_empty((number_samples,) + current_state.size())
-#     log_probs = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
-#     accepted = torch.zeros(current_state.size(0), dtype=torch.int64, device=device)
-#
-#     states[0].copy_(current_state)
-#     log_probs[0].copy_(current_log_prob)
-#     current_state = states[0]
-#     current_log_prob = log_probs[0]
-#
-#     def sweep():
-#         nonlocal accepted
-#         for i in range(sweep_size):
-#             proposed_state, proposed_norm = kernel_fn(current_state, dtype)
-#             state_is_valid = proposed_norm > 0
-#             proposed_log_prob = current_log_prob.new_zeros((proposed_state.size(0),))
-#             proposed_log_prob[state_is_valid] = log_prob_fn(proposed_state[state_is_valid])
-#             r = torch.rand(current_state.size(0), device=device, dtype=dtype)
-#             r *= current_norm
-#             r /= proposed_norm
-#             t = r <= torch.exp_(proposed_log_prob - current_log_prob)
-#             t &= state_is_valid
-#             current_state[t] = proposed_state[t]
-#             current_log_prob[t] = proposed_log_prob[t]
-#             current_norm[t] = proposed_norm[t]
-#             accepted += t
-#
-#     # Thermalisation
-#     for i in range(number_discarded):
-#         sweep()
-#
-#     # Reset acceptance count after thermalisation
-#     accepted.fill_(0)
-#     for i in range(1, number_samples):
-#         states[i].copy_(current_state)
-#         log_probs[i].copy_(current_log_prob)
-#         current_state = states[i]
-#         current_log_prob = log_probs[i]
-#         sweep()
-#
-#     # Subtract 1 because the loop above starts at 1
-#     acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
-#     return states, log_probs, acceptance
-#
-#
-# def sample_using_metropolis(
-#     log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions
-# ):
-#     initial_state = prepare_initial_state(basis, options.number_chains)
-#     initial_norm = ls.batched_state_info(basis, initial_state.numpy().view(np.uint64))[2]
-#     initial_norm *= initial_norm  # We need 1/N rather than 1/√N
-#     initial_state = initial_state.to(options.device)
-#     initial_norm = torch.from_numpy(initial_norm).to(options.device)
-#     kernel_fn = MetropolisGenerator(basis)
-#     t1 = time.time()
-#     states, log_probs, acceptance = metropolis_process(
-#         (initial_state, initial_norm),
-#         log_prob_fn,
-#         kernel_fn,
-#         options.number_samples,
-#         options.number_discarded,
-#         options.sweep_size,
-#     )
-#     t2 = time.time()
-#     info = {"acceptance_rate": torch.mean(acceptance).item(), "metropolis_process": t2 - t1}
-#     return states, log_probs, info
+def metropolis_process(
+    initial_state: Tensor,
+    _log_prob_fn: Callable[[Tensor], Tensor],
+    kernel_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
+    number_samples: int,
+    number_discarded: int,
+    sweep_size: int,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    assert number_samples >= 1
+
+    def log_prob_fn(x):
+        y = _log_prob_fn(x)
+        if y.dim() > 1:
+            y.squeeze_(dim=1)
+        return y
+
+    current_state, current_norm = initial_state
+    current_log_prob = log_prob_fn(current_state)
+    dtype = current_log_prob.dtype
+    device = current_log_prob.device
+    current_norm = current_norm.to(dtype)
+    states = current_state.new_empty((number_samples,) + current_state.size())
+    log_probs = current_log_prob.new_empty((number_samples,) + current_log_prob.size())
+    accepted = torch.zeros(current_state.size(0), dtype=torch.int64, device=device)
+
+    states[0].copy_(current_state)
+    log_probs[0].copy_(current_log_prob)
+    current_state = states[0]
+    current_log_prob = log_probs[0]
+
+    def sweep():
+        nonlocal accepted
+        for i in range(sweep_size):
+            proposed_state, proposed_norm = kernel_fn(current_state, dtype)
+            state_is_valid = proposed_norm > 0
+            proposed_log_prob = current_log_prob.new_zeros((proposed_state.size(0),))
+            proposed_log_prob[state_is_valid] = log_prob_fn(proposed_state[state_is_valid])
+            r = torch.rand(current_state.size(0), device=device, dtype=dtype)
+            r *= current_norm
+            r /= proposed_norm
+            t = r <= torch.exp_(proposed_log_prob - current_log_prob)
+            t &= state_is_valid
+            current_state[t] = proposed_state[t]
+            current_log_prob[t] = proposed_log_prob[t]
+            current_norm[t] = proposed_norm[t]
+            accepted += t
+
+    # Thermalisation
+    for i in range(number_discarded):
+        sweep()
+
+    # Reset acceptance count after thermalisation
+    accepted.fill_(0)
+    for i in range(1, number_samples):
+        states[i].copy_(current_state)
+        log_probs[i].copy_(current_log_prob)
+        current_state = states[i]
+        current_log_prob = log_probs[i]
+        sweep()
+
+    # Subtract 1 because the loop above starts at 1
+    acceptance = accepted.double() / ((number_samples - 1) * sweep_size)
+    return states, log_probs, acceptance
+
+
+def sample_using_metropolis(
+    log_prob_fn: Callable[[Tensor], Tensor], basis, options: SamplingOptions
+):
+    initial_state = prepare_initial_state(basis, options.number_chains)
+    initial_norm = ls.batched_state_info(basis, initial_state.numpy().view(np.uint64))[2]
+    initial_norm *= initial_norm  # We need 1/N rather than 1/√N
+    initial_state = initial_state.to(options.device)
+    initial_norm = torch.from_numpy(initial_norm).to(options.device)
+    kernel_fn = MetropolisGenerator(basis)
+    t1 = time.time()
+    states, log_probs, acceptance = metropolis_process(
+        (initial_state, initial_norm),
+        log_prob_fn,
+        kernel_fn,
+        options.number_samples,
+        options.number_discarded,
+        options.sweep_size,
+    )
+    t2 = time.time()
+    info = {"acceptance_rate": torch.mean(acceptance).item(), "metropolis_process": t2 - t1}
+    return states, log_probs, info
 
 
 @torch.jit.script
@@ -383,8 +383,10 @@ def _zanella_jump_rates(current_log_prob: Tensor, possible_log_prob: Tensor) -> 
             "'possible_log_prob' has wrong shape: {}; expected (number_chains={}, "
             "max_number_states)".format(possible_log_prob.size(), number_chains)
         )
+    # print("current: ", current_log_prob)
+    # print((possible_log_prob - current_log_prob.view(-1, 1)).cpu())
     r = torch.exp_(possible_log_prob - current_log_prob.view(-1, 1))
-    return torch.minimum(r, torch.scalar_tensor(1), out=r)
+    return torch.clamp(r, max=1, out=r)
 
 
 @torch.jit.script
@@ -542,7 +544,9 @@ def zanella_process(
         flat_possible_states = _flatten_states(possible_states, counts, total_count)
         flat_possible_log_probs = log_prob_fn(flat_possible_states)
         possible_log_probs = _unflatten_log_probs(flat_possible_log_probs, counts, max_count)
+        # print("log_probs: ", possible_log_probs)
         jump_rates = _zanella_jump_rates(_current_log_prob, possible_log_probs)
+        # print("jump_rates: ", jump_rates)
         _sample_exponential(jump_rates.sum(dim=1), out=_current_weight)
         indices = _zanella_next_state_index(jump_rates)
         return indices, possible_log_probs
@@ -731,13 +735,14 @@ def sample_some(
         def log_prob_fn(x):
             x = log_ψ(x)
             x *= 2
+            assert not torch.any(torch.isnan(x))
             return x
 
     fn = {
         "exact": sample_exactly,
         "full": sample_full,
         # "autoregressive": sample_autoregressive,
-        # "metropolis": sample_using_metropolis,
+        "metropolis": sample_using_metropolis,
         "zanella": sample_using_zanella,
     }[mode]
 

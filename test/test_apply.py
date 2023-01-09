@@ -1,20 +1,12 @@
 import numpy as np
 import torch
 import lattice_symmetries as ls
+import nqs_playground as nqs
 
-try:
-    import nqs_playground as nqs
-except ImportError:
-    # For local development when we only compile the C++ extension, but don't
-    # actually install the package using pip
-    import os
-    import sys
+from nqs_playground._extension import lib as _C
 
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
-    import nqs_playground as nqs
-
-
-def test_apply():
+def test_apply(use_jit=False):
+    # ls.enable_logging()
     basis = ls.SpinBasis(ls.Group([]), number_spins=10, hamming_weight=None)
     basis.build()
     matrix = np.array([[1, 0, 0, 0], [0, -1, -2, 0], [0, -2, -1, 0], [0, 0, 0, 1]])
@@ -35,18 +27,22 @@ def test_apply():
             y = self.fn(x)
             return torch.complex(y[:, 0], y[:, 1])
 
-    log_psi = torch.jit.script(MyModule(basis.number_spins))
+    log_psi = MyModule(basis.number_spins)
+    if use_jit == True:
+        log_psi = torch.jit.script(log_psi)
 
-    for batch_size in range(1000):
-        for inference_batch_size in range(1):
-            states = basis.states[np.random.permutation(basis.number_states)[:batch_size]]
-            states = torch.from_numpy(states.view(np.int64))
-            states = torch.cat(
-                [states.view(-1, 1), torch.zeros(states.size(0), 7, dtype=torch.int64)], dim=1
-            )
-            predicted = nqs._C.log_apply(states, op, log_psi, batch_size)
-            # expected = nqs.reference_log_apply(states, op, log_psi, batch_size)
-            # assert torch.allclose(predicted, expected)
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        devices.append("cuda")
+    for device in devices:
+        for batch_size in range(1, 10):
+            for inference_batch_size in range(1, 20):
+                states = basis.states[np.random.permutation(basis.number_states)[:batch_size]]
+                states = torch.from_numpy(states.view(np.int64))
+                states = nqs.pad_states(states)
+                predicted = _C.log_apply(states.to(device), op, log_psi.to(device), batch_size)
+                expected = nqs.reference_log_apply(states.cpu(), op, log_psi.cpu(), batch_size)
+                assert torch.allclose(predicted.cpu(), expected)
 
 
 test_apply()

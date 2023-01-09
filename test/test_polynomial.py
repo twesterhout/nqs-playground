@@ -45,6 +45,70 @@ def test_polynomial():
             predicted = explicit.get(basis.states[i], 0.0)
             assert np.isclose(predicted, expected)
 
+@torch.no_grad()
+def compute_log_target_state(
+    spins: Tensor,
+    hamiltonian,
+    roots: List[complex],
+    state: torch.nn.Module,
+    batch_size: int,
+    normalizing: bool = False,
+) -> Tensor:
+    logger.debug("Applying polynomial using batch_size={}...", batch_size)
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
+    spins = as_spins_tensor(spins, force_width=True)
+    original_shape = spins.size()[:-1]
+    spins = spins.view(-1, spins.size(-1))
+    if isinstance(state, torch.jit.ScriptModule):
+        state = state._c._get_method("forward")
+    log_target = _C.log_apply_polynomial(spins, hamiltonian, roots, state, batch_size, normalizing)
+    return log_target.view(original_shape)
+
+@torch.no_grad()
+def module_to_explicit(state: torch.nn.Module, basis):
+    device = _get_device(state)
+    if device is None:
+        device = torch.device("cpu")
+
+    spins = torch.from_numpy(basis.states.view(np.int64)).to(device)
+    out = forward_with_batches(log_psi, spins, batch_size=8192)
+    scale = torch.max(out.real).item()
+    out.real -= scale
+    out = torch.exp_(out)
+    return out, scale
+
+@torch.no_grad()
+def reference_log_apply_polynomial(
+    spins: Tensor,
+    hamiltonian,
+    roots: List[complex],
+    state: torch.nn.Module,
+    normalizing: bool = False,
+):
+    basis = hamiltonian.basis
+    basis.build()
+
+    v, scale = module_to_explicit(state, basis)
+    v = v.cpu().numpy()
+    for r in roots:
+        v = hamiltonian(v) - r * v
+        if normalizing:
+            v /= np.linalg.norm(v)
+
+    device = spins.device
+    if spins.dim() > 1:
+        assert spins.size(1) == 8
+        spins = spins[:, 0]
+    spins = spins.cpu().numpy().view(np.uint64)
+    indices = basis.batched_index(spins)
+    v = v[indices]
+
+    
+    pass
+
+
 
 class SlowPolynomialState:
     def __init__(self, hamiltonian, roots, log_psi):

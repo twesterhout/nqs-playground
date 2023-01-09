@@ -148,9 +148,10 @@ def heisenberg1d_evolution_operator(number_spins: int):
     edges = [(i, (i + 1) % number_spins) for i in range(number_spins)]
     Λ = float(2 * number_spins)
     return ls.Operator(
-        basis, _second_power(matrix, edges, coeff=1.0)
-             + _first_power(matrix, edges, coeff=-2 * Λ)
-             + _zeroth_power(matrix, edges, coeff=Λ**2)
+        basis,
+        _second_power(matrix, edges, coeff=1.0)
+        + _first_power(matrix, edges, coeff=-2 * Λ)
+        + _zeroth_power(matrix, edges, coeff=Λ ** 2)
         # _second_power(matrix, edges, coeff=-1.0) + _zeroth_power(matrix, edges, coeff=400.0)
     )
 
@@ -251,14 +252,16 @@ def optimize_with_swo(number_spins: int = 10):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # amplitude = LogAmplitude(number_spins, number_blocks=5, number_channels=8).to(device)
-    amplitude = torch.jit.script(
-        torch.nn.Sequential(
-            nqs.Unpack(number_spins),
-            torch.nn.Linear(number_spins, 2 * number_spins),
-            torch.nn.PReLU(),
-            torch.nn.Linear(2 * number_spins, 1, bias=False),
-        )
-    ).to(device)
+    amplitude = LogAmplitude(number_spins, number_blocks=6, number_channels=32).to(device)
+    amplitude.load_state_dict(torch.load("checkpoint_2.pt")["model"])
+    # amplitude = torch.jit.script(
+    #     torch.nn.Sequential(
+    #         nqs.Unpack(number_spins),
+    #         torch.nn.Linear(number_spins, 2 * number_spins),
+    #         torch.nn.PReLU(),
+    #         torch.nn.Linear(2 * number_spins, 1, bias=False),
+    #     )
+    # ).to(device)
     phase = Phase().to(device)
     # optimizer = torch.optim.SGD(amplitude.parameters(), lr=1e-2)
     # scheduler = None # torch.optim.lr_scheduler.MultiplicativeLR(optimizer, lr_lambda=lambda _: 0.997)
@@ -269,13 +272,17 @@ def optimize_with_swo(number_spins: int = 10):
         phase=phase,
         hamiltonian=hamiltonian,
         evolution_operator=evolution_operator,
-        output="runs_1x{}/10".format(number_spins),
+        output="runs_1x{}/11".format(number_spins),
         epochs=100,
         sampling_options=nqs.SamplingOptions(
-            number_samples=500,
-            number_chains=8,
-            sweep_size=10,
-            mode="zanella"),
+            number_samples=500, number_chains=8, sweep_size=10, mode="zanella"
+        ),
+        training_options=nqs.swo.TrainingOptions(
+            epochs=100,
+            batch_size=500 * 8,
+            optimizer=torch.optim.Adam(amplitude.parameters(), lr=1e-3),
+            scheduler=None,
+        ),
         inference_batch_size=16 * 1024,
     )
     runner = nqs.swo.Runner(options)
