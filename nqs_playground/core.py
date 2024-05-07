@@ -309,8 +309,8 @@ class SpinDataset(torch.utils.data.IterableDataset):
             spins = self.spins
             values = self.values
         return zip(
-            torch.split(self.spins, self.batch_size),
-            torch.split(self.values, self.batch_size),
+            torch.split(spins, self.batch_size),
+            torch.split(values, self.batch_size),
         )
 
 
